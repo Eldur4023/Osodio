@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 #include <optional>
 #include "types.hpp"
 
@@ -15,27 +16,37 @@ struct RouteMatch {
 
 class Router {
 public:
+    Router();
     void add(std::string method, std::string pattern, Handler handler);
-
     RouteMatch match(const std::string& method, const std::string& path) const;
 
 private:
-    struct Route {
-        std::string method;   // uppercase, e.g. "GET"
-        std::string pattern;  // normalized, e.g. "/users/:id"
-        Handler     handler;
+    enum class NodeType { STATIC, PARAM, WILDCARD };
+
+    struct Node {
+        std::string segment;
+        NodeType    type = NodeType::STATIC;
+        std::unordered_map<std::string, Handler> handlers; // method -> handler
+        std::vector<std::unique_ptr<Node>> children;
+
+        Node* find_static_child(const std::string& seg) const;
+        Node* find_param_child() const;
+        Node* find_wildcard_child() const;
     };
 
-    std::vector<Route> routes_;
+    std::unique_ptr<Node> root_;
 
-    // Converts {id} → :id  (supports both FastAPI and Express styles)
+    // Converts {id} → :id
     static std::string normalize_pattern(const std::string& p);
-
-    // Returns true if pattern matches path, filling params
-    static bool match_path(
-        const std::string& pattern,
-        const std::string& path,
-        std::unordered_map<std::string, std::string>& params);
+    
+    // Helper for recursive matching
+    bool match_recursive(
+        const Node* node,
+        const std::vector<std::string>& segments,
+        size_t index,
+        const std::string& method,
+        std::unordered_map<std::string, std::string>& params,
+        Handler& out_handler) const;
 };
 
 } // namespace osodio
