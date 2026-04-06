@@ -1,0 +1,2 @@
+/usr/bin/ar qc libosodio.a CMakeFiles/osodio.dir/src/app.cpp.o CMakeFiles/osodio.dir/src/router.cpp.o CMakeFiles/osodio.dir/src/core/event_loop.cpp.o CMakeFiles/osodio.dir/src/core/tcp_server.cpp.o CMakeFiles/osodio.dir/src/http/http_parser.cpp.o CMakeFiles/osodio.dir/src/http/http_connection.cpp.o
+/usr/bin/ranlib libosodio.a

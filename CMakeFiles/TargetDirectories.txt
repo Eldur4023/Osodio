@@ -1,0 +1,5 @@
+/home/burnt/Github/Osodio/CMakeFiles/osodio.dir
+/home/burnt/Github/Osodio/CMakeFiles/example.dir
+/home/burnt/Github/Osodio/CMakeFiles/distclean.dir
+/home/burnt/Github/Osodio/CMakeFiles/edit_cache.dir
+/home/burnt/Github/Osodio/CMakeFiles/rebuild_cache.dir
