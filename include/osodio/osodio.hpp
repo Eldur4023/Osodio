@@ -9,3 +9,5 @@
 #include "router.hpp"
 #include "app.hpp"
 #include "schema.hpp"
+#include "validation.hpp"
+#include "handler_traits.hpp"

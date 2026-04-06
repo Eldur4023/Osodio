@@ -6,6 +6,7 @@
 #include <optional>
 #include "request.hpp"
 #include "response.hpp"
+#include "validation.hpp"
 
 namespace osodio {
 
@@ -68,14 +69,33 @@ struct extractor<PathParam<T, Name>> {
     }
 };
 
+// --- Validation detection ---
+template<typename T, typename = void>
+struct has_validate : std::false_type {};
+
+template<typename T>
+struct has_validate<T, std::void_t<decltype(validate(std::declval<T&>()))>> : std::true_type {};
+
 // Body extractor
 template<typename T>
 struct extractor<Body<T>> {
-    static Body<T> extract(const Request& req, Response&) {
+    static Body<T> extract(const Request& req, Response& res) {
         try {
             auto j = nlohmann::json::parse(req.body);
-            return Body<T>(j.template get<T>());
+            T val = j.template get<T>();
+            
+            if constexpr (has_validate<T>::value) {
+                try {
+                    validate(val);
+                } catch (const ValidationError& e) {
+                    res.status(400).json({{"error", "Validation Failed"}, {"messages", e.messages}});
+                    return Body<T>(std::move(val)); // We still return it, but status is 400
+                }
+            }
+            
+            return Body<T>(std::move(val));
         } catch (...) {
+            res.status(400).json({{"error", "Invalid JSON or schema"}});
             return Body<T>(T{});
         }
     }
@@ -96,6 +116,9 @@ struct HandlerTraits<R(ClassType::*)(Args...) const> {
     static void call(F&& f, const Request& req, Response& res) {
         std::tuple<Args...> args{extractor<Args>::extract(req, res)...};
         
+        // If an extractor set an error status (e.g. 400 Bad Request), don't call the handler
+        if (res.status_code() >= 400) return;
+
         if constexpr (std::is_same_v<R, void>) {
             std::apply(f, std::move(args));
         } else {

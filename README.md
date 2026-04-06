@@ -28,33 +28,24 @@ struct User {
 OSODIO_SCHEMA(User, id, name, age);
 ```
 
-### Create Handlers
-Handlers can take direct parameters and return objects:
+### Add Validation Rules
+Osodio allows you to enforce constraints on your data using `OSODIO_VALIDATE`:
 
 ```cpp
-#include <osodio/osodio.hpp>
-using namespace osodio;
+struct CreateUserBody {
+    std::string name;
+    int age;
+};
+OSODIO_SCHEMA(CreateUserBody, name, age);
 
-int main() {
-    App app;
-
-    // Automatic Path Parameters and JSON Serialization
-    app.get("/users/:id", [](PathParam<int, "id"> id) -> User {
-        return User{ std::to_string(id), "User Name", 25 };
-    });
-
-    // Automatic JSON Body extraction
-    struct Signup { std::string email; };
-    OSODIO_SCHEMA(Signup, email);
-
-    app.post("/signup", [](Body<Signup> body) {
-        std::cout << "Signing up: " << body->email << "\n";
-        return nlohmann::json{{"success", true}};
-    });
-
-    app.run("0.0.0.0", 8080);
-}
+// Define validation rules
+OSODIO_VALIDATE(CreateUserBody,
+    check(name, len_min(3)),
+    check(age, min(18), max(99))
+);
 ```
+
+If a request fails validation, the server automatically returns a `400 Bad Request` with a list of error messages.
 
 ---
 
