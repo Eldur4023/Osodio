@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
-#include "event_loop.hpp"
+#include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
 
 namespace osodio::core {

@@ -2,7 +2,7 @@
 #include "../include/osodio/request.hpp"
 #include "../include/osodio/response.hpp"
 
-#include "core/event_loop.hpp"
+#include <osodio/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
 
 #include <csignal>
@@ -31,7 +31,8 @@ void App::run(const std::string& host, uint16_t port) {
     //  1. Configura el templates_dir en la Response
     //  2. Ejecuta la cadena de middlewares
     //  3. Al final de la cadena, busca la ruta en el router
-    DispatchFn dispatch = [this](Request& req, Response& res) {
+    DispatchFn dispatch = [this, &loop](Request& req, Response& res) {
+        req.loop = &loop;
         res.set_templates_dir(templates_dir_);
 
         // call_next(i) ejecuta el middleware i, o el router si ya no quedan

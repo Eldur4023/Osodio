@@ -4,6 +4,7 @@
 // #include <osodio/osodio.hpp>  — that's all you need.
 
 #include "types.hpp"
+#include "task.hpp"
 #include "request.hpp"
 #include "response.hpp"
 #include "router.hpp"

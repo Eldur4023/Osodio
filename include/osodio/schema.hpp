@@ -1,5 +1,7 @@
 #pragma once
 #include <nlohmann/json.hpp>
+#include <vector>
+#include <string>
 #include "validation.hpp"
 
 /**
@@ -12,7 +14,6 @@
 /**
  * OSODIO_VALIDATE(Type, Rules...)
  * Defines validation rules for a struct.
- * Rules should be a list of check(field, validators...)
  */
 #define OSODIO_VALIDATE(Type, ...) \
     inline void validate(const Type& x) { \
@@ -22,8 +23,15 @@
     }
 
 /**
- * check(field, validators...)
- * Used inside OSODIO_VALIDATE to apply validators to a field.
+ * check(condition, message)
+ * Expression-based check to allow comma separation in OSODIO_VALIDATE.
  */
-#define check(field, ...) \
-    osodio::validate_field(x.field, #field, _errors, __VA_ARGS__)
+#define check(cond, msg) \
+    ((cond) ? (void)0 : _errors.push_back(msg))
+
+/**
+ * validate_field(field, validators...)
+ * For more complex, reusable validators.
+ */
+#define validate_field(field, ...) \
+    osodio::validate_fields(x.field, #field, _errors, __VA_ARGS__)

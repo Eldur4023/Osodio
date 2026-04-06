@@ -1,5 +1,4 @@
 #include "http_connection.hpp"
-
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/response.hpp"
 
@@ -12,8 +11,6 @@
 #include <sstream>
 
 namespace osodio::http {
-
-// ─── Query string helpers ────────────────────────────────────────────────────
 
 static std::string url_decode(const std::string& s) {
     std::string out;
@@ -47,8 +44,6 @@ static void parse_query(const std::string& qs,
             out[url_decode(pair)] = "";
     }
 }
-
-// ─── HttpConnection ──────────────────────────────────────────────────────────
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
                                osodio::DispatchFn dispatch)
@@ -85,29 +80,41 @@ void HttpConnection::do_read() {
     }
 }
 
-void HttpConnection::dispatch(ParsedRequest req) {
-    osodio::Request request;
-    request.method  = req.method;
-    request.path    = req.path;
-    request.version = req.version;
-    request.headers = std::move(req.headers);
-    request.body    = std::move(req.body);
-    parse_query(req.query, request.query);
+void HttpConnection::dispatch(ParsedRequest req_parsed) {
+    auto request  = std::make_shared<osodio::Request>();
+    auto response = std::make_shared<osodio::Response>();
 
-    osodio::Response response;
+    request->method  = req_parsed.method;
+    request->path    = req_parsed.path;
+    request->headers = std::move(req_parsed.headers);
+    request->body    = std::move(req_parsed.body);
+    request->loop    = &loop_;
+    fprintf(stderr, "[DEBUG] HttpConnection: loop address = %p\n", (void*)&loop_);
+    parse_query(req_parsed.query, request->query);
 
     try {
-        dispatch_(request, response);   // ← middlewares + router
+        dispatch_(*request, *response);
     } catch (const std::exception& e) {
-        response = osodio::Response{};
-        response.status(500).json({{"error", e.what()}});
+        response->status(500).json({{"error", e.what()}});
     } catch (...) {
-        response = osodio::Response{};
-        response.status(500).json({{"error", "Internal Server Error"}});
+        response->status(500).json({{"error", "Internal Server Error"}});
     }
 
-    // Keep-alive
-    bool keep_alive = (request.version == "HTTP/1.1");
+    if (response->is_async()) {
+        auto self = shared_from_this();
+        response->on_complete([self, request, response]() {
+            self->loop_.post([self, request, response]() {
+                self->finish_dispatch(*request, *response);
+            });
+        });
+        return;
+    }
+
+    finish_dispatch(*request, *response);
+}
+
+void HttpConnection::finish_dispatch(osodio::Request& request, osodio::Response& response) {
+    bool keep_alive = true; 
     auto conn_hdr = request.header("connection");
     if (conn_hdr) {
         std::string val = *conn_hdr;

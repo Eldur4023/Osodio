@@ -1,4 +1,4 @@
-#include "event_loop.hpp"
+#include <osodio/core/event_loop.hpp>
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -55,12 +55,35 @@ void EventLoop::remove(int fd) {
     callbacks_.erase(fd);
 }
 
+void EventLoop::post(std::function<void()> cb) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        task_queue_.push_back(std::move(cb));
+    }
+    uint64_t val = 1;
+    (void)write(wakeup_fd_, &val, sizeof(val));
+}
+
+void EventLoop::process_tasks() {
+    std::vector<std::function<void()>> current_tasks;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        current_tasks.swap(task_queue_);
+    }
+    for (auto& task : current_tasks) {
+        if (task) task();
+    }
+}
+
 void EventLoop::run() {
     running_ = true;
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
 
     while (running_) {
+        // We process tasks before waiting to handle anything posted before the loop
+        process_tasks();
+        
         int n = epoll_wait(epoll_fd_, events, kMaxEvents, -1);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -71,7 +94,7 @@ void EventLoop::run() {
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
 
-            // Wakeup fd → check if we should stop
+            // Wakeup fd → this will trigger next iteration to process_tasks()
             if (fd == wakeup_fd_) {
                 uint64_t val;
                 (void)read(wakeup_fd_, &val, sizeof(val));

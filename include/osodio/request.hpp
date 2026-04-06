@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <optional>
 #include <algorithm>
+#include <osodio/core/event_loop.hpp>
 
 namespace osodio {
 
@@ -21,6 +22,9 @@ public:
 
     // Query string params (e.g. ?page=1&limit=20 → query["page"] = "1")
     std::unordered_map<std::string, std::string> query;
+
+    // Pointer to the event loop for scheduling tasks
+    core::EventLoop* loop = nullptr;
 
     // Convenience: get a header by name (case-insensitive)
     std::optional<std::string> header(std::string name) const {
