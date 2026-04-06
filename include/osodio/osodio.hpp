@@ -8,3 +8,4 @@
 #include "response.hpp"
 #include "router.hpp"
 #include "app.hpp"
+#include "schema.hpp"
