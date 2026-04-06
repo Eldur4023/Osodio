@@ -66,7 +66,7 @@ static std::vector<std::string> split_path(const std::string& s) {
     return parts;
 }
 
-void Router::add(std::string method, std::string pattern, Handler handler) {
+void Router::add_internal(std::string method, std::string pattern, Handler handler) {
     std::transform(method.begin(), method.end(), method.begin(), ::toupper);
     std::string norm = normalize_pattern(pattern);
     auto segments = split_path(norm);

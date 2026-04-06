@@ -1,5 +1,7 @@
 #include <osodio/osodio.hpp>
 
+using namespace osodio;
+
 struct User {
     std::string id;
     std::string name;
@@ -12,28 +14,22 @@ struct CreateUserBody {
 OSODIO_SCHEMA(CreateUserBody, name);
 
 int main() {
-    osodio::App app;
+    App app;
 
-    app.get("/", [](osodio::Request&, osodio::Response& res) {
+    app.get("/", [](Response& res) {
         res.html("index.html");
     });
 
-    app.get("/ping", [](osodio::Request&, osodio::Response& res) {
-        res.json({{"status", "ok"}});
+    app.get("/ping", []() {
+        return nlohmann::json{{"status", "ok"}};
     });
 
-    app.get("/users/:id", [](osodio::Request& req, osodio::Response& res) {
-        User u = {req.params.at("id"), "Usuario " + req.params.at("id")};
-        res.json(u); // Automatic serialization
+    app.get("/users/:id", [](PathParam<std::string, "id"> id) -> User {
+        return User{std::string(id), "Usuario " + std::string(id)};
     });
 
-    app.post("/users", [](osodio::Request& req, osodio::Response& res) {
-        try {
-            auto body = nlohmann::json::parse(req.body).get<CreateUserBody>();
-            res.status(201).json(User{"new-id", body.name});
-        } catch (...) {
-            res.status(400).json({{"error", "Invalid JSON or schema"}});
-        }
+    app.post("/users", [](Body<CreateUserBody> body) -> User {
+        return User{"new-id", body->name};
     });
 
     app.run("0.0.0.0", 8080);

@@ -13,12 +13,12 @@ public:
     ~App() = default;
 
     // Route registration — support both :param and {param} styles
-    App& get   (std::string path, Handler h) { router_.add("GET",    std::move(path), std::move(h)); return *this; }
-    App& post  (std::string path, Handler h) { router_.add("POST",   std::move(path), std::move(h)); return *this; }
-    App& put   (std::string path, Handler h) { router_.add("PUT",    std::move(path), std::move(h)); return *this; }
-    App& patch (std::string path, Handler h) { router_.add("PATCH",  std::move(path), std::move(h)); return *this; }
-    App& del   (std::string path, Handler h) { router_.add("DELETE", std::move(path), std::move(h)); return *this; }
-    App& any   (std::string path, Handler h) { router_.add("*",      std::move(path), std::move(h)); return *this; }
+    template<typename F> App& get   (std::string path, F&& h) { router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& post  (std::string path, F&& h) { router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& put   (std::string path, F&& h) { router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& patch (std::string path, F&& h) { router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& del   (std::string path, F&& h) { router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& any   (std::string path, F&& h) { router_.add("*",      std::move(path), std::forward<F>(h)); return *this; }
 
     // Middleware (applied in order for every request)
     App& use(Middleware m) { middlewares_.push_back(std::move(m)); return *this; }

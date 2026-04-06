@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include "types.hpp"
+#include "handler_traits.hpp"
 
 namespace osodio {
 
@@ -17,7 +18,17 @@ struct RouteMatch {
 class Router {
 public:
     Router();
-    void add(std::string method, std::string pattern, Handler handler);
+
+    template<typename F>
+    void add(std::string method, std::string pattern, F&& handler) {
+        auto wrapped = [h = std::forward<F>(handler)](Request& req, Response& res) mutable {
+            HandlerTraits<F>::call(h, req, res);
+        };
+        add_internal(std::move(method), std::move(pattern), std::move(wrapped));
+    }
+
+    void add_internal(std::string method, std::string pattern, Handler handler);
+
     RouteMatch match(const std::string& method, const std::string& path) const;
 
 private:
