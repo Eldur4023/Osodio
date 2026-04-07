@@ -14,15 +14,7 @@ struct User {
     )
 };
 
-// JSON mapping for User (Both directions for automatic serialization)
-void from_json(const nlohmann::json& j, User& u) {
-    u.name = j.at("name").get<std::string>();
-    u.age = j.at("age").get<int>();
-}
-
-void to_json(nlohmann::json& j, const User& u) {
-    j = nlohmann::json{{"name", u.name}, {"age", u.age}};
-}
+OSODIO_SCHEMA(User, name, age)
 
 int main() {
     App app;
@@ -39,8 +31,7 @@ int main() {
 
     // C++20 Coroutine Async Handler
     app.get("/async-ping", [](Request& req) -> Task<nlohmann::json> {
-        fprintf(stderr, "[DEBUG] Handler: req.loop address = %p\n", (void*)req.loop);
-        co_await sleep(500, req.loop); // Non-blocking sleep
+        co_await sleep(500, req.loop);
         co_return nlohmann::json{{"status", "async-ok"}, {"waited_ms", 500}};
     });
 
@@ -52,7 +43,17 @@ int main() {
         return nlohmann::json{{"id", 1}, {"name", user->name}};
     });
 
-    std::cout << "Starting Osodio on port 8080..." << std::endl;
+    // Static files: GET /static/* → ./public/*
+    app.serve_static("/static", "./public");
+
+    // Custom error handlers
+    app.on_error(404, [](int, Request& req, Response& res) {
+        res.json({{"error", "Not Found"}, {"path", req.path}});
+    });
+    app.on_error([](int code, Request&, Response& res) {
+        res.json({{"error", "Something went wrong"}, {"code", code}});
+    });
+
     app.run(8080);
 
     return 0;

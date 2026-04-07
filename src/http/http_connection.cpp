@@ -86,10 +86,10 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
 
     request->method  = req_parsed.method;
     request->path    = req_parsed.path;
+    request->version = req_parsed.version;
     request->headers = std::move(req_parsed.headers);
     request->body    = std::move(req_parsed.body);
     request->loop    = &loop_;
-    fprintf(stderr, "[DEBUG] HttpConnection: loop address = %p\n", (void*)&loop_);
     parse_query(req_parsed.query, request->query);
 
     try {
@@ -114,7 +114,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
 }
 
 void HttpConnection::finish_dispatch(osodio::Request& request, osodio::Response& response) {
-    bool keep_alive = true; 
+    bool keep_alive = (request.version == "HTTP/1.1");
     auto conn_hdr = request.header("connection");
     if (conn_hdr) {
         std::string val = *conn_hdr;
