@@ -1,11 +1,10 @@
 #pragma once
 #include <string>
+#include <memory>
 #include <cstdint>
 #include "http_parser.hpp"
 #include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
-
-#include <memory>
 
 namespace osodio::http {
 
@@ -17,11 +16,11 @@ public:
     void on_event(uint32_t events);
 
 private:
-    int               fd_;
-    core::EventLoop&  loop_;
+    int                fd_;
+    core::EventLoop&   loop_;
     osodio::DispatchFn dispatch_;
-    HttpParser        parser_;
-    bool              closed_ = false;
+    HttpParser         parser_;
+    bool               closed_ = false;
 
     void do_read();
     void dispatch(ParsedRequest req);

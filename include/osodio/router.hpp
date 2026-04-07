@@ -19,10 +19,11 @@ class Router {
 public:
     Router();
 
+    // Register any callable; HandlerTraits wraps it into Handler (Task<void>).
     template<typename F>
     void add(std::string method, std::string pattern, F&& handler) {
-        auto wrapped = [h = std::forward<F>(handler)](Request& req, Response& res) mutable {
-            HandlerTraits<F>::call(h, req, res);
+        auto wrapped = [h = std::forward<F>(handler)](Request& req, Response& res) mutable -> Task<void> {
+            return HandlerTraits<std::decay_t<F>>::call(h, req, res);
         };
         add_internal(std::move(method), std::move(pattern), std::move(wrapped));
     }
@@ -47,10 +48,8 @@ private:
 
     std::unique_ptr<Node> root_;
 
-    // Converts {id} → :id
     static std::string normalize_pattern(const std::string& p);
-    
-    // Helper for recursive matching
+
     bool match_recursive(
         const Node* node,
         const std::vector<std::string>& segments,

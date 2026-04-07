@@ -957,6 +957,101 @@ Parser incremental de multipart (los archivos pueden ser grandes — no leer tod
 - Parser de estado: `PREAMBLE → HEADER → BODY → BOUNDARY → ...`
 - Soporte para streaming al disco durante el parse (no buffering completo en RAM)
 
+### 7.6 Template Engine (estilo Jinja2/Flask)
+
+Flask usa Jinja2 para renderizar HTML dinámico. Osodio necesita un equivalente en C++ para servir páginas web completas, no solo APIs JSON.
+
+**Objetivo:** `res.render("template.html", data)` con la misma ergonomía que Flask:
+```python
+# Flask / Jinja2:
+@app.route("/profile")
+def profile():
+    return render_template("profile.html", user=current_user, items=cart)
+```
+```cpp
+// Osodio equivalente:
+app.get("/profile", [](Request& req, Response& res) {
+    res.render("profile.html", {
+        {"user", user_data},
+        {"items", cart_items}
+    });
+});
+```
+
+#### Sintaxis de templates (compatible con Jinja2)
+
+| Feature | Sintaxis | Ejemplo |
+|---|---|---|
+| Variable | `{{ var }}` | `{{ user.name }}` |
+| Filtro | `{{ var \| filter }}` | `{{ title \| upper }}` |
+| Condicional | `{% if %}...{% endif %}` | `{% if logged_in %}Hola{% endif %}` |
+| Bucle | `{% for x in list %}...{% endfor %}` | `{% for item in items %}...{% endfor %}` |
+| Include | `{% include "partial.html" %}` | Header/footer reutilizables |
+| Herencia | `{% extends "base.html" %}` + `{% block %}` | Layout base con bloques override |
+| Comentarios | `{# comment #}` | `{# TODO: fix this #}` |
+| Raw | `{% raw %}...{% endraw %}` | Escapar sintaxis de template |
+
+#### Implementación: integrar `inja`
+
+[**inja**](https://github.com/pantor/inja) es una librería C++ header-only que implementa un motor de templates compatible con Jinja2, usando `nlohmann::json` como backend de datos — que ya usamos.
+
+```cpp
+// inja usa nlohmann::json directamente
+inja::Environment env{"./templates/"};
+
+// Renderizar template con datos
+nlohmann::json data = {{"name", "Carlos"}, {"items", {1, 2, 3}}};
+std::string result = env.render_file("index.html", data);
+```
+
+Ventajas de inja:
+- **Header-only** — sin dependencias adicionales, solo copiar el header
+- **Usa nlohmann::json** — integración directa con nuestro stack existente
+- **Sintaxis Jinja2** — familiar para cualquier desarrollador Flask/Django
+- **Template inheritance** — `extends` + `block` funciona
+- **Filtros custom** — se pueden registrar filtros propios
+- **Buena performance** — templates se parsean una vez y se cachean
+
+#### API en Osodio
+
+```cpp
+// Response::render() — renderiza un template con datos
+Response& render(const std::string& template_name, const nlohmann::json& data = {});
+
+// Configuración del engine en App
+app.set_templates("./templates");  // ya existe este método
+
+// Filtros custom globales
+app.template_filter("currency", [](const nlohmann::json& val) {
+    return "$" + std::to_string(val.get<double>());
+});
+```
+
+Ejemplo de template `templates/index.html`:
+```html
+{% extends "base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block content %}
+<h1>Bienvenido, {{ user.name | upper }}</h1>
+<ul>
+{% for item in items %}
+    <li>{{ item.name }} — {{ item.price | currency }}</li>
+{% endfor %}
+</ul>
+{% if show_footer %}
+    {% include "footer.html" %}
+{% endif %}
+{% endblock %}
+```
+
+#### Auto-escaping para XSS
+
+Como Jinja2, auto-escapar HTML por defecto:
+- `{{ user_input }}` → escapado (`<script>` → `&lt;script&gt;`)
+- `{{ trusted_html | safe }}` → sin escapar (filtro explícito)
+
+Esto previene XSS automáticamente sin que el desarrollador tenga que pensarlo.
+
 ---
 
 ## 11. Seguridad
@@ -1141,42 +1236,50 @@ int main() {
 
 ## 14. Fases de Implementación
 
-### Fase 1 — Core HTTP (MVP)
-- [ ] EventLoop con `epoll` (Linux) / `kqueue` (macOS)
-- [ ] TCP server no bloqueante con `SO_REUSEPORT`
-- [ ] HTTP/1.1 parser con `llhttp` (incremental, zero-copy)
-- [ ] Router radix tree con PathParam
-- [ ] Response builder (status, headers, body)
-- [ ] `Task<T>` coroutine type básico
-- [ ] Middleware chain con `co_await next()`
-- [ ] Logger y CORS middleware
-- [ ] JSON response helpers con nlohmann/json
+### Fase 1 — Core HTTP (MVP) ✅ COMPLETADA (2026-04-07)
+- [x] EventLoop con `epoll` (Linux) — `src/core/event_loop.cpp` (epoll + eventfd wakeup + task queue)
+- [ ] ~~EventLoop con `kqueue` (macOS)~~ — sin implementar (solo epoll)
+- [x] TCP server no bloqueante con `SO_REUSEPORT` — `src/core/tcp_server.cpp` (IPv4/IPv6, TCP_NODELAY, SOCK_NONBLOCK)
+- [x] HTTP/1.1 parser incremental — `src/http/http_parser.cpp` (**ahora usa `llhttp`** — chunked encoding, smuggling protection, spec compliance)
+- [x] Límites de seguridad en parser — max URL 8 KB, max headers 100, max header-size 8 KB, max body 16 MB
+- [x] Router radix tree con PathParam — `src/router.cpp` (nodos STATIC/PARAM/WILDCARD, métodos por nodo)
+- [x] Response builder (status, headers, body) — `include/osodio/response.hpp` (text/html/json, template loading, HTTP reason phrases)
+- [x] `Task<T>` coroutine type básico — `include/osodio/task.hpp` (Task\<T\> + Task\<void\>, symmetric transfer, SleepAwaitable, deferred frame destruction via event loop)
+- [x] Middleware chain **async** — `src/app.cpp` (`NextFn = std::function<Task<void>()>`, `co_await next()` real, dispatch como coroutine)
+- [x] Event loop **multi-core** — `src/app.cpp` (N loops con `SO_REUSEPORT`, uno por hardware thread, kernel balancea conexiones)
+- [x] Logger middleware reutilizable — `include/osodio/middleware.hpp` (`osodio::logger()`, mide tiempo real incluyendo handlers async)
+- [x] CORS middleware reutilizable — `include/osodio/middleware.hpp` (`osodio::cors(opts)`, preflight automático, allowlist de origins)
+- [x] JSON response helpers con nlohmann/json — `response.json()`, serialización automática via HandlerTraits (ahora como coroutine Task\<void\>)
 
 ### Fase 2 — Ergonomía (FastAPI parity)
-- [ ] Macro `OSODIO_SCHEMA` + from_json/to_json generado
-- [ ] Validadores declarativos
-- [ ] Deducción de tipos en handlers (PathParam, Body, Query, Inject)
-- [ ] Generación de OpenAPI 3.0 en compile-time
-- [ ] Swagger UI embebida (assets compilados en el binario)
-- [ ] HTTP 422 con errores de validación estructurados
-- [ ] Service container para inyección de dependencias
-- [ ] Respuestas de error tipadas (`not_found()`, `bad_request()`, etc.)
+- [x] Macro `OSODIO_SCHEMA` + from_json/to_json generado — `include/osodio/schema.hpp` (wrapper sobre NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE)
+- [x] Validadores declarativos — `include/osodio/validation.hpp` (min/max/len_min/len_max) + `OSODIO_VALIDATE` macro con `check()`
+- [x] Deducción de tipos en handlers (PathParam, Body, Query) — `include/osodio/handler_traits.hpp` (HandlerTraits + extractors automáticos)
+- [ ] Deducción: `Inject<T>` — no implementado (service container falta)
+- [ ] Generación de OpenAPI 3.0 en compile-time — no implementado
+- [ ] Swagger UI embebida (assets compilados en el binario) — no implementado
+- [x] HTTP 422 con errores de validación estructurados — `extractor<Body<T>>` retorna 422 si validate() falla
+- [ ] Service container para inyección de dependencias — no implementado
+- [ ] Respuestas de error tipadas (`not_found()`, `bad_request()`, etc.) — no implementado
+- [ ] Template engine (Jinja2-like) — integrar `inja` para `res.render("template.html", data)` con herencia, filtros, auto-escaping
 
 ### Fase 3 — Frontend-ready
 - [ ] HTTPS con TLS 1.3 (OpenSSL)
 - [ ] WebSocket con pub/sub integrado
 - [ ] Server-Sent Events
 - [ ] Compresión gzip/brotli automática
-- [ ] Static file server con ETag, `sendfile()`, SPA fallback
-- [ ] Body parser (JSON, multipart/form-data, urlencoded)
-- [ ] Rate limiting middleware (token bucket)
-- [ ] `helmet()` middleware (security headers)
+- [x] Static file server — `src/app.cpp` (`serve_static()` con MIME types, path traversal protection, **pero sin ETag, sin `sendfile()`, sin SPA fallback**)
+- [x] Body parser JSON — via `extractor<Body<T>>` con nlohmann/json::parse
+- [ ] Body parser multipart/form-data — no implementado
+- [ ] Body parser urlencoded — no implementado
+- [ ] Rate limiting middleware (token bucket) — no implementado
+- [ ] `helmet()` middleware (security headers) — no implementado
 
 ### Fase 4 — Producción
 - [ ] HTTP/2 con `nghttp2`
 - [ ] `io_uring` backend (Linux 5.1+)
-- [ ] Thread pool configurable (N loops, uno por core)
-- [ ] Graceful shutdown (drenar conexiones activas)
+- [ ] Thread pool configurable (N loops, uno por core) — actualmente usa un solo event loop en un thread
+- [ ] Graceful shutdown (drenar conexiones activas) — hay SIGINT/SIGTERM handling pero no drena conexiones activas
 - [ ] Hot reload de certificados TLS
 - [ ] Métricas Prometheus (`/metrics` endpoint)
 - [ ] Health check endpoint (`/health`)
@@ -1256,3 +1359,194 @@ target_compile_options(fuzz-http-parser PRIVATE -fsanitize=fuzzer,address)
 ```
 
 El parser HTTP es la superficie de ataque más grande (recibe input arbitrario de Internet). Fuzzear con libFuzzer es no negociable antes del primer release.
+
+---
+
+## 16. Estado Actual y Diagnóstico Real (Actualizado 2026-04-07)
+
+### Resumen del estado
+
+**Fase 1 completada.** El framework tiene una base sólida y arquitectónicamente correcta: parser de producción, modelo async coherente de punta a punta, y escalabilidad multi-core. El siguiente objetivo es Fase 2 (ergonomía FastAPI-like) y el diferenciador OpenAPI.
+
+**Lo que funciona:**
+- Servidor arranca, acepta conexiones TCP no bloqueantes con `SO_REUSEPORT`
+- Parser HTTP/1.1 via `llhttp` — chunked encoding, request smuggling protegido, spec compliant
+- Límites de seguridad en parser: max URL 8 KB, max headers 100, max header size 8 KB, max body 16 MB
+- Event loop **multi-core**: un thread + EventLoop por hardware core, kernel balancea vía SO_REUSEPORT
+- Router radix tree con PathParam, Body, Query auto-extraídos
+- Middleware chain **completamente async**: `co_await next()` real — los middlewares pueden hacer I/O async
+- Logger middleware (`osodio::logger()`) mide tiempo real incluyendo handlers async
+- CORS middleware (`osodio::cors()`) con preflight automático y allowlist de origins
+- `Task<T>` / `Task<void>` con symmetric transfer y deferred frame destruction via event loop
+- `HandlerTraits::call` es coroutine: toda la cadena dispatch → middleware → handler → respuesta es un único árbol de coroutines coherente
+- Validación declarativa con `OSODIO_VALIDATE` + errores 422 estructurados
+- Archivos estáticos con protección path traversal
+- Compila limpio con GCC 13.3 + C++20
+
+**Arquitectura actual de archivos:**
+```
+include/osodio/
+  osodio.hpp          ← include único
+  app.hpp             ← App, listen(), serve_static(), on_error()
+  request.hpp         ← Request, Headers, query params
+  response.hpp        ← Response builder (json/text/html/send)
+  router.hpp          ← radix tree, Handler = std::function<Task<void>(...)>
+  handler_traits.hpp  ← HandlerTraits, PathParam, Body, Query, extractor<T>
+  middleware.hpp      ← logger(), cors(CorsOptions)
+  schema.hpp          ← OSODIO_SCHEMA macro (nlohmann wrapper)
+  validation.hpp      ← OSODIO_VALIDATE, ValidationError
+  task.hpp            ← Task<T>, Task<void>, SleepAwaitable
+  types.hpp           ← NextFn, Middleware, DispatchFn, Handler, ErrorHandler
+  core/event_loop.hpp ← EventLoop (epoll + eventfd + task queue)
+src/
+  app.cpp                           ← async dispatch chain + multi-core run()
+  router.cpp                        ← radix tree implementation
+  core/event_loop.cpp               ← epoll event loop
+  core/tcp_server.{hpp,cpp}         ← non-blocking accept + SO_REUSEPORT
+  http/http_connection.{hpp,cpp}    ← per-connection state, fires dispatch Task
+  http/http_parser.{hpp,cpp}        ← llhttp wrapper + security limits
+```
+
+---
+
+### Diagnóstico: problemas resueltos y pendientes
+
+#### ✅ 1. Parser HTTP — RESUELTO
+
+Reemplazado el parser manual por `llhttp` (parser de Node.js). Ahora soporta:
+- `Transfer-Encoding: chunked`
+- Múltiples `Content-Length` (request smuggling rechazado)
+- Headers duplicados correctamente
+- CRLF estricto, validación completa de la spec HTTP/1.1
+- Integrado via CMake `FetchContent` (reproducible, sin vendor)
+
+#### ✅ 2. Middleware chain síncrona — RESUELTO
+
+`NextFn = std::function<Task<void>()>`. La cadena completa es async:
+- `co_await next()` real en todos los middlewares
+- Logger mide tiempo real incluyendo handlers async
+- Cualquier middleware puede hacer `co_await` (DB, Redis, etc.)
+- `HandlerTraits::call` es coroutine — toda la cadena es un árbol de Task sin callbacks
+
+#### ✅ 3. Un solo event loop — RESUELTO
+
+`std::thread::hardware_concurrency()` loops, uno por core. El kernel distribuye conexiones vía `SO_REUSEPORT`. Sin mutex en el path crítico: cada conexión pertenece a un solo loop.
+
+#### ❌ 4. nlohmann::json para parsing de input — PENDIENTE
+
+`extractor<Body<T>>` usa `nlohmann::json::parse(body)`:
+- Allocación masiva del DOM completo en memoria
+- ~300 MB/s vs simdjson ~2.5 GB/s (8x más lento)
+- Sin límite de profundidad de anidación (DoS via JSON muy nested)
+
+**Próximo paso:** integrar `simdjson` en `extractor<Body<T>>` con on-demand API.
+
+#### ❌ 5. Validación frágil — PENDIENTE
+
+`OSODIO_VALIDATE` corre post-binding. Problemas sin resolver:
+- `{"name": null}` → `std::string` vacío, no error
+- Campo faltante → excepción de nlohmann capturada como 400 genérico, no 422 estructurado
+- Sin distinción "campo faltante" vs "tipo incorrecto" vs "valor inválido"
+
+**Próximo paso:** field-level validation en `extractor<Body<T>>` con `std::expected`.
+
+#### ✅ 6. Sin límites de seguridad — PARCIALMENTE RESUELTO
+
+**Resuelto:** max URL (8 KB), max headers (100), max header size (8 KB), max body (16 MB) en el parser.
+
+**Pendiente todavía:**
+- Header timeout (5 s) — requiere timerfd en EventLoop
+- Body timeout (30 s) — mismo
+- Max conexiones simultáneas — contador en TcpServer
+
+#### ❌ 7. Static file server incompleto — PENDIENTE
+
+Tiene path traversal protection ✔️, pero falta:
+- `sendfile()` / zero-copy
+- `ETag` / `If-None-Match` (304 Not Modified)
+- `Range` requests (video/audio streaming)
+- `Cache-Control`, `Last-Modified`
+- SPA fallback (`/* → /index.html`)
+
+#### ❌ 8. OpenAPI no implementado — PENDIENTE
+
+El diferenciador principal del framework. Sin `/docs` y `/openapi.json` no hay paridad con FastAPI. Requiere:
+- `Schema<T>::openapi_schema()` generado por `OSODIO_SCHEMA`
+- Registro de rutas con tipos de request/response al router
+- Builder de documento OpenAPI 3.0 en `App`
+- Swagger UI embebida (assets como arrays C++ vía `xxd`)
+
+#### ⚠️ 9. `Inject<T>` sin diseño de lifecycle — PENDIENTE
+
+No implementado. Cuando se implemente debe contemplar:
+- Lifecycle: singleton / scoped-per-request / transient
+- Thread-safe (el service container es compartido por N loops)
+- Testeable (inyección de mocks)
+
+#### ⚠️ 10. Coroutines — Peligros ocultos — PENDIENTE
+
+`Task<T>` funciona correctamente en el flujo normal, pero:
+- **Sin cancelación** — handler colgado vive para siempre, acumula frames en memoria
+- **Sin backpressure** — escritura al socket es bloqueante; si el cliente es lento, el handler espera
+- **SleepAwaitable usa `std::thread::detach()`** — no escala bajo miles de sleeps simultáneos; reemplazar por `timerfd`
+- **Sin timeout por handler** — un handler que nunca completa bloquea esa conexión indefinidamente
+
+**Próximo paso:** `timerfd` en EventLoop (resuelve sleep escalable + header/body timeouts + handler timeout).
+
+---
+
+### Lo que está MUY bien hecho
+
+- **Arquitectura general** — Separación por capas limpia. Todo el path request→response es un árbol de coroutines sin callbacks. No es típico de un proyecto C++ amateur.
+- **Ergonomía** — `app.post("/users", [](Body<User> user) { ... })` es la killer feature. Gana a Drogon y Crow en DX por mucho.
+- **Dirección correcta** — FastAPI ergonomics + Node model + C++ performance tiene mercado real.
+- **Coroutine base** — Symmetric transfer, FinalAwaitable, deferred destruction, árbol de Tasks sin shared state. Bien pensado y ahora consistente de punta a punta.
+- **Multi-core limpio** — Sin mutex en el path crítico. Cada conexión tiene dueño exclusivo.
+
+---
+
+### Roadmap real — Prioridades
+
+#### ✅ Nivel 1 — COMPLETADO
+
+| # | Tarea | Estado |
+|---|---|---|
+| 1 | **`llhttp`** como parser HTTP | ✅ FetchContent v9.2.1 |
+| 2 | **Límites de seguridad en parser** | ✅ max URL/headers/header-size/body |
+| 3 | **Event loop multi-core** | ✅ N threads × SO_REUSEPORT |
+| 4 | **Middleware chain async** | ✅ `NextFn = Task<void>`, `co_await next()` |
+| 5 | **CORS middleware reutilizable** | ✅ `osodio::cors(opts)` |
+| 6 | **Logger middleware** | ✅ `osodio::logger()` mide tiempo real |
+
+#### 🟠 Nivel 2 — Necesario para uso real
+
+| # | Tarea | Por qué |
+|---|---|---|
+| 7 | **`simdjson` para parsing de input** | 8x más rápido; on-demand evita DOM completo |
+| 8 | **Validación robusta** | 422 estructurado: campo faltante ≠ tipo incorrecto ≠ null |
+| 9 | **`timerfd` en EventLoop** | Habilita: sleep escalable, header timeout, body timeout, handler timeout |
+| 10 | **Template engine (`inja`)** | `res.render("template.html", data)` para HTML dinámico |
+
+#### 🟡 Nivel 3 — Diferenciador (razón de existir del framework)
+
+| # | Tarea | Por qué |
+|---|---|---|
+| 11 | **OpenAPI 3.0 automático** | 50% del valor. Sin esto no eres "FastAPI-like" |
+| 12 | **Swagger UI embebida** | `/docs` en el binario, cero dependencias externas |
+| 13 | **Service container + `Inject<T>`** | Singleton/scoped/transient. Thread-safe. Testeable |
+| 14 | **Route groups** | `app.group("/api/v1").use(auth)` con middleware scoped |
+| 15 | **Static files completo** | `sendfile()`, ETag, Range, Cache-Control, SPA fallback |
+| 16 | **Respuestas de error tipadas** | `osodio::not_found()`, `osodio::bad_request()` como helpers |
+| 17 | **Coroutine hardening** | Cancelación, backpressure, reemplazar `thread::detach()` en sleep |
+
+#### 🟢 Nivel 4 — Ecosistema (después de que todo lo anterior funcione)
+
+| # | Tarea | Por qué |
+|---|---|---|
+| 18 | HTTP/2 con `nghttp2` | Multiplexing, HPACK, server push |
+| 19 | `io_uring` backend | Batch syscalls, menos overhead que epoll |
+| 20 | WebSocket + pub/sub | Comunicación bidireccional, live apps |
+| 21 | SSE | Streaming unidireccional (LLM tokens, live logs) |
+| 22 | TLS 1.3 (OpenSSL) | HTTPS obligatorio para APIs modernas |
+| 23 | Compresión gzip/brotli | Reducir ancho de banda en responses |
+| 24 | Graceful shutdown | Drenar conexiones activas sin perder requests |

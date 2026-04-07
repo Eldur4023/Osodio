@@ -1,6 +1,7 @@
 #include "http_connection.hpp"
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/response.hpp"
+#include "../../include/osodio/task.hpp"
 
 #include <sys/epoll.h>
 #include <unistd.h>
@@ -12,14 +13,16 @@
 
 namespace osodio::http {
 
+// ── URL helpers ───────────────────────────────────────────────────────────────
+
 static std::string url_decode(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '%' && i + 2 < s.size()) {
             unsigned int hex = 0;
-            std::istringstream iss(s.substr(i + 1, 2));
-            iss >> std::hex >> hex;
+            char buf[3] = {s[i+1], s[i+2], '\0'};
+            hex = static_cast<unsigned int>(std::strtoul(buf, nullptr, 16));
             out += static_cast<char>(hex);
             i += 2;
         } else if (s[i] == '+') {
@@ -32,7 +35,7 @@ static std::string url_decode(const std::string& s) {
 }
 
 static void parse_query(const std::string& qs,
-                         std::unordered_map<std::string, std::string>& out) {
+                        std::unordered_map<std::string, std::string>& out) {
     if (qs.empty()) return;
     std::istringstream ss(qs);
     std::string pair;
@@ -44,6 +47,8 @@ static void parse_query(const std::string& qs,
             out[url_decode(pair)] = "";
     }
 }
+
+// ── HttpConnection ────────────────────────────────────────────────────────────
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
                                osodio::DispatchFn dispatch)
@@ -81,39 +86,44 @@ void HttpConnection::do_read() {
 }
 
 void HttpConnection::dispatch(ParsedRequest req_parsed) {
-    auto request  = std::make_shared<osodio::Request>();
-    auto response = std::make_shared<osodio::Response>();
+    auto req_ptr = std::make_shared<osodio::Request>();
+    auto res_ptr = std::make_shared<osodio::Response>();
 
-    request->method  = req_parsed.method;
-    request->path    = req_parsed.path;
-    request->version = req_parsed.version;
-    request->headers = std::move(req_parsed.headers);
-    request->body    = std::move(req_parsed.body);
-    request->loop    = &loop_;
-    parse_query(req_parsed.query, request->query);
+    req_ptr->method  = req_parsed.method;
+    req_ptr->path    = req_parsed.path;
+    req_ptr->version = req_parsed.version;
+    req_ptr->headers = std::move(req_parsed.headers);
+    req_ptr->body    = std::move(req_parsed.body);
+    req_ptr->loop    = &loop_;
+    parse_query(req_parsed.query, req_ptr->query);
 
-    try {
-        dispatch_(*request, *response);
-    } catch (const std::exception& e) {
-        response->status(500).json({{"error", e.what()}});
-    } catch (...) {
-        response->status(500).json({{"error", "Internal Server Error"}});
-    }
+    // ── Wrapper coroutine keeps req_ptr / res_ptr alive for the full chain ──
+    // req_ptr and res_ptr are captured by value (shared_ptr copies stored in
+    // the coroutine frame), ensuring they outlive any co_await suspension.
+    auto wrapper_task = [req_ptr, res_ptr, disp = dispatch_]() -> osodio::Task<void> {
+        try {
+            co_await disp(*req_ptr, *res_ptr);
+        } catch (const std::exception& e) {
+            res_ptr->status(500).json({{"error", e.what()}});
+        } catch (...) {
+            res_ptr->status(500).json({{"error", "Internal Server Error"}});
+        }
+    }();
 
-    if (response->is_async()) {
-        auto self = shared_from_this();
-        response->on_complete([self, request, response]() {
-            self->loop_.post([self, request, response]() {
-                self->finish_dispatch(*request, *response);
-            });
-        });
-        return;
-    }
+    auto h = wrapper_task.detach();
+    h.promise().loop = &loop_;
 
-    finish_dispatch(*request, *response);
+    auto self = shared_from_this();
+    h.promise().on_complete = [self, req_ptr, res_ptr]() {
+        self->finish_dispatch(*req_ptr, *res_ptr);
+    };
+
+    h.resume();
+    // Whether sync or async, finish_dispatch is called via on_complete.
 }
 
-void HttpConnection::finish_dispatch(osodio::Request& request, osodio::Response& response) {
+void HttpConnection::finish_dispatch(osodio::Request& request,
+                                     osodio::Response& response) {
     bool keep_alive = (request.version == "HTTP/1.1");
     auto conn_hdr = request.header("connection");
     if (conn_hdr) {
@@ -122,7 +132,6 @@ void HttpConnection::finish_dispatch(osodio::Request& request, osodio::Response&
         keep_alive = (val != "close");
     }
     response.header("Connection", keep_alive ? "keep-alive" : "close");
-
     send_response(response.build());
     if (!keep_alive) close();
 }

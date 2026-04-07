@@ -12,3 +12,4 @@
 #include "schema.hpp"
 #include "validation.hpp"
 #include "handler_traits.hpp"
+#include "middleware.hpp"

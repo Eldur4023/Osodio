@@ -1,6 +1,7 @@
 #include "../include/osodio/app.hpp"
 #include "../include/osodio/request.hpp"
 #include "../include/osodio/response.hpp"
+#include "../include/osodio/task.hpp"
 
 #include <osodio/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
@@ -10,6 +11,10 @@
 #include <memory>
 #include <fstream>
 #include <filesystem>
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <functional>
 
 namespace osodio {
 
@@ -35,7 +40,7 @@ static const char* mime_for_ext(const std::string& ext) {
     return "application/octet-stream";
 }
 
-// Returns true and writes the response if a static mount covers this path.
+// Returns true and fills res if a static mount covers this path.
 static bool try_serve_static(
     const std::vector<App::StaticMount>& mounts,
     const std::string& req_path,
@@ -45,13 +50,11 @@ static bool try_serve_static(
     for (const auto& m : mounts) {
         if (req_path.rfind(m.prefix, 0) != 0) continue;
 
-        // Strip the prefix, resolve to a real path
         std::string rel = req_path.substr(m.prefix.size());
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
-        fs::path file = fs::path(m.root) / rel.substr(1); // strip leading '/'
+        fs::path file = fs::path(m.root) / rel.substr(1);
 
-        // Prevent path traversal
         auto canonical_root = fs::weakly_canonical(m.root);
         auto canonical_file = fs::weakly_canonical(file);
         auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
@@ -67,10 +70,7 @@ static bool try_serve_static(
         }
 
         std::ifstream f(canonical_file, std::ios::binary);
-        if (!f) {
-            res.status(500).json({{"error", "Could not read file"}});
-            return true;
-        }
+        if (!f) { res.status(500).json({{"error", "Could not read file"}}); return true; }
 
         std::string body{std::istreambuf_iterator<char>(f),
                          std::istreambuf_iterator<char>()};
@@ -81,60 +81,58 @@ static bool try_serve_static(
     return false;
 }
 
+// Global stop callback — set before spawning threads, read only after.
+static std::function<void()> g_stop_all;
+
+static void signal_handler(int) {
+    std::cout << "\nShutting down...\n";
+    if (g_stop_all) g_stop_all();
+}
+
 } // anonymous namespace
 
-namespace {
-    core::EventLoop* g_loop = nullptr;
-    void signal_handler(int) {
-        std::cout << "\nShutting down..." << std::endl;
-        if (g_loop) g_loop->stop();
-    }
-}
+// ── App::run ──────────────────────────────────────────────────────────────────
 
 void App::run(const std::string& host, uint16_t port) {
     std::signal(SIGPIPE, SIG_IGN);
 
-    core::EventLoop loop;
-    g_loop = &loop;
-    std::signal(SIGINT,  signal_handler);
-    std::signal(SIGTERM, signal_handler);
-
-    // Construimos la función de dispatch que:
-    //  1. Configura el templates_dir en la Response
-    //  2. Comprueba si la ruta la cubre un mount de archivos estáticos
-    //  3. Ejecuta la cadena de middlewares
-    //  4. Al final de la cadena, busca la ruta en el router
-    DispatchFn dispatch = [this, &loop](Request& req, Response& res) {
-        req.loop = &loop;
+    // ── Build the async dispatch function ─────────────────────────────────────
+    // Captured by value into the DispatchFn so each thread gets its own copy.
+    // All captures are read-only after run() starts, so thread-safe.
+    DispatchFn dispatch = [this](Request& req, Response& res) -> Task<void> {
         res.set_templates_dir(templates_dir_);
 
-        // Static files bypass the middleware chain (like nginx would)
+        // Static file mounts bypass the middleware chain.
         if (req.method == "GET" || req.method == "HEAD") {
-            if (try_serve_static(static_mounts_, req.path, res)) return;
+            if (try_serve_static(static_mounts_, req.path, res)) co_return;
         }
 
-        // call_next(i) ejecuta el middleware i, o el router si ya no quedan
-        auto call_next = std::make_shared<std::function<void(size_t)>>();
-        *call_next = [this, &req, &res, call_next](size_t i) {
+        // ── Async middleware chain ─────────────────────────────────────────
+        // call_next is a local in THIS coroutine frame (heap-allocated).
+        // Inner lambdas capture &call_next (reference into the frame), which
+        // remains valid as long as this coroutine is suspended or running.
+        std::function<Task<void>(size_t)> call_next;
+        call_next = [this, &req, &res, &call_next](size_t i) -> Task<void> {
             if (i < middlewares_.size()) {
-                middlewares_[i](req, res, [call_next, i]() {
-                    (*call_next)(i + 1);
-                });
+                // Pass next() as a NextFn that returns call_next(i+1)
+                co_await middlewares_[i](req, res,
+                    [&call_next, i]() -> Task<void> {
+                        return call_next(i + 1);
+                    });
             } else {
                 auto match = router_.match(req.method, req.path);
                 if (match.found) {
                     req.params = std::move(match.params);
-                    match.handler(req, res);
+                    co_await match.handler(req, res);
                 } else {
                     res.status(404).json({{"error", "Not Found"}, {"path", req.path}});
                 }
             }
         };
-        (*call_next)(0);
+        co_await call_next(0);
 
-        // Run error handlers after the full chain if status is 4xx/5xx
-        // (skip async responses — the handler chain will run after completion)
-        if (!res.is_async() && res.status_code() >= 400) {
+        // Error handlers run after the full chain, while we still own req/res.
+        if (res.status_code() >= 400) {
             int code = res.status_code();
             auto it = error_handlers_.find(code);
             if (it != error_handlers_.end()) {
@@ -145,13 +143,53 @@ void App::run(const std::string& host, uint16_t port) {
         }
     };
 
-    core::TcpServer server(host, port, loop, std::move(dispatch));
+    // ── Multi-core: one event loop per hardware thread ────────────────────────
+    unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
+
+    std::vector<core::EventLoop*> all_loops;
+    std::mutex loops_mutex;
+
+    // Stop callback: called from SIGINT/SIGTERM, stops every loop.
+    g_stop_all = [&all_loops, &loops_mutex]() {
+        std::lock_guard<std::mutex> lk(loops_mutex);
+        for (auto* l : all_loops) l->stop();
+    };
+    std::signal(SIGINT,  signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    // Worker threads (cores 1..N-1)
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads - 1);
+    for (unsigned i = 1; i < num_threads; ++i) {
+        threads.emplace_back([&]() {
+            core::EventLoop loop;
+            {
+                std::lock_guard<std::mutex> lk(loops_mutex);
+                all_loops.push_back(&loop);
+            }
+            // Each TcpServer binds to the same port via SO_REUSEPORT; the
+            // kernel load-balances incoming connections across all loops.
+            core::TcpServer server(host, port, loop, dispatch);
+            loop.run();
+        });
+    }
+
+    // Main thread (core 0)
+    core::EventLoop main_loop;
+    {
+        std::lock_guard<std::mutex> lk(loops_mutex);
+        all_loops.push_back(&main_loop);
+    }
+    core::TcpServer main_server(host, port, main_loop, dispatch);
 
     std::cout << " * Osodio running on http://" << host << ":" << port
-              << "  (Press CTRL+C to quit)\n";
+              << "  (threads=" << num_threads << ", press CTRL+C to quit)\n";
 
-    loop.run();
-    g_loop = nullptr;
+    main_loop.run();
+
+    for (auto& t : threads) t.join();
+
+    g_stop_all = nullptr;
 }
 
 } // namespace osodio

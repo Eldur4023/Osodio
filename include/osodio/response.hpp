@@ -16,15 +16,13 @@ class Response {
         std::string body;
         std::string templates_dir = "./templates";
         std::unordered_map<std::string, std::string> headers;
-        bool async = false;
-        std::function<void()> on_complete_cb;
     };
     std::shared_ptr<State> state_;
 
 public:
     Response() : state_(std::make_shared<State>()) {}
 
-    // --- Builder methods ---
+    // ── Builder methods ───────────────────────────────────────────────────────
 
     Response& status(int code) {
         state_->status_code = code;
@@ -72,33 +70,20 @@ public:
         return *this;
     }
 
-    // --- Async support ---
-    bool is_async() const { return state_->async; }
-    void mark_async() { state_->async = true; }
-    void unmark_async() { state_->async = false; }
-    
-    void on_complete(std::function<void()> cb) {
-        state_->on_complete_cb = std::move(cb);
-    }
-    
-    void complete_async() {
-        if (state_->on_complete_cb) state_->on_complete_cb();
-    }
-
-    // --- Framework-internal ---
+    // ── Framework-internal ───────────────────────────────────────────────────
 
     void set_templates_dir(const std::string& dir) { state_->templates_dir = dir; }
 
-    int status_code() const { return state_->status_code; }
+    int         status_code() const { return state_->status_code; }
     const std::string& body() const { return state_->body; }
 
     std::string build() const {
         std::ostringstream os;
-        os << "HTTP/1.1 " << state_->status_code << ' ' << reason_phrase(state_->status_code) << "\r\n";
+        os << "HTTP/1.1 " << state_->status_code
+           << ' ' << reason_phrase(state_->status_code) << "\r\n";
         os << "Content-Length: " << state_->body.size() << "\r\n";
-        for (const auto& [k, v] : state_->headers) {
+        for (const auto& [k, v] : state_->headers)
             os << k << ": " << v << "\r\n";
-        }
         os << "\r\n" << state_->body;
         return os.str();
     }
@@ -106,7 +91,7 @@ public:
 private:
     static bool is_template_name(const std::string& s) {
         if (s.empty() || s.find('\n') != std::string::npos) return false;
-        if (s.find('<')  != std::string::npos) return false;
+        if (s.find('<') != std::string::npos) return false;
         return s.ends_with(".html") || s.ends_with(".htm");
     }
 
