@@ -3,6 +3,7 @@
 // Single include for the entire library.
 // #include <osodio/osodio.hpp>  — that's all you need.
 
+#include "cancel.hpp"
 #include "types.hpp"
 #include "task.hpp"
 #include "request.hpp"

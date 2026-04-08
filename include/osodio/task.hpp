@@ -3,7 +3,9 @@
 #include <exception>
 #include <utility>
 #include <functional>
+#include <memory>
 #include <osodio/core/event_loop.hpp>
+#include "cancel.hpp"
 
 namespace osodio {
 
@@ -162,16 +164,28 @@ struct Task<void> {
 // ─── SleepAwaitable ──────────────────────────────────────────────────────────
 // Non-blocking sleep: suspends the coroutine and resumes it after `ms`
 // milliseconds via the event loop's timerfd (one-shot, no extra threads).
+//
+// If a CancellationToken is supplied (via the thread-local or explicitly) and
+// the connection is closed before the timer fires, the coroutine is resumed
+// immediately so it can check is_cancelled() and exit rather than waiting out
+// the full duration (avoids zombie coroutines on slow-path handlers).
 
 struct SleepAwaitable {
     int ms;
-    core::EventLoop* loop;
+    core::EventLoop*                    loop;
+    std::weak_ptr<CancellationToken>    token;
 
     bool await_ready() const noexcept { return ms <= 0; }
 
     void await_suspend(std::coroutine_handle<> h) noexcept {
         if (!loop) { h.resume(); return; }
-        loop->schedule_timer(ms, [h]() mutable {
+        loop->schedule_timer(ms, [h, tok = token]() mutable {
+            // If the connection was cancelled, resume immediately so the
+            // coroutine frame runs to completion and is properly destroyed.
+            if (auto t = tok.lock(); t && t->is_cancelled()) {
+                if (!h.done()) h.resume();
+                return;
+            }
             if (!h.done()) h.resume();
         });
     }
@@ -179,21 +193,20 @@ struct SleepAwaitable {
     void await_resume() const noexcept {}
 };
 
-// Thread-local pointer to the event loop currently handling this request.
-// Set by HttpConnection::dispatch() before invoking any handler.
-// Allows sleep(ms) without explicitly passing req.loop.
+// Thread-locals set by HttpConnection::dispatch() for the current request.
 namespace detail {
-    inline thread_local core::EventLoop* current_loop = nullptr;
+    inline thread_local core::EventLoop*             current_loop  = nullptr;
+    inline thread_local std::weak_ptr<CancellationToken> current_token = {};
 }
 
-// sleep(ms, loop) — explicit loop (backward-compat, advanced use)
+// sleep(ms, loop) — explicit loop (backward-compat / advanced use)
 inline SleepAwaitable sleep(int ms, core::EventLoop* loop) {
-    return {ms, loop};
+    return {ms, loop, detail::current_token};
 }
 
-// sleep(ms) — uses the thread-local loop set for the current request
+// sleep(ms) — uses thread-locals set for the current request (no args needed)
 inline SleepAwaitable sleep(int ms) {
-    return {ms, detail::current_loop};
+    return {ms, detail::current_loop, detail::current_token};
 }
 
 } // namespace osodio

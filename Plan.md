@@ -26,7 +26,10 @@
 | **Auto-body** | Cualquier struct con OSODIO_SCHEMA como parámetro bare |
 | **Inject\<T\>** | ServiceContainer: singleton + transient; resolve desde req.container |
 | **Task\<T\>** | Coroutine type con symmetric transfer, frame autodestruction vía loop |
-| **sleep(ms)** | thread_local current_loop; no requiere pasar req.loop |
+| **sleep(ms)** | thread_local current_loop + current_token; no requiere pasar req.loop |
+| **CancellationToken** | Compartido entre conexión y Request; cancelado en close(); sleep() lo honra |
+| **write_buf_ limit** | Hard cap 16 MB por respuesta; cierre limpio si se supera |
+| **Header timeout per-keepalive** | Timer de 5s rearmado tras cada respuesta en conexiones keep-alive |
 | **Errores tipados** | HttpError, not_found(), bad_request(), unauthorized(), etc. |
 | **Middleware** | logger(), cors(), compress() (gzip zlib) |
 | **Static files** | MIME, path traversal block, ETag, Cache-Control, 304 Not Modified |
@@ -37,79 +40,7 @@
 
 ---
 
-## Problemas pendientes — críticos
-
-### 1. Buffer de escritura sin límite (OOM)
-
-**Problema:** `write_buf_` crece sin techo si el cliente lee lento mientras el handler genera mucha data.
-
-**Solución:** Límite configurable en `write_buf_` + backpressure hacia el handler.
-
-```
-kMaxWriteBufBytes = 1 MB (configurable)
-
-En send_response():
-  Si write_buf_.size() >= kMaxWriteBufBytes → cerrar conexión con 503
-  O mejor: exponer un awaitable "puede escribir?" para que el handler se pause
-```
-
-La solución correcta a largo plazo es un `WriteAwaitable` que suspende la coroutine hasta que `write_buf_` drene por debajo del umbral. Requiere integrar el EPOLLOUT con el resume de la coroutine.
-
-**Arquitectura:**
-```cpp
-// En HttpConnection:
-Task<void> flush_if_needed();  // co_await esto antes de enviar chunks grandes
-
-// En handlers de streaming:
-app.get("/stream", [](Response& res) -> Task<void> {
-    for (auto& chunk : big_data) {
-        res.write_chunk(chunk);
-        co_await res.flush();  // suspende si el buffer está lleno
-    }
-});
-```
-
-### 2. Coroutines zombie tras timeout/close
-
-**Problema:** Cuando el timeout dispara (408) o el cliente cierra la conexión, la coroutine puede estar suspendida en un `co_await sleep()` o esperando I/O externo. El timer del sleep eventualmente la reanuda, intenta escribir en un socket cerrado, y aunque no crashea, retiene memoria más tiempo del necesario.
-
-**Solución:** CancellationToken — un flag compartido entre la conexión y sus coroutines.
-
-```cpp
-struct CancellationToken {
-    std::atomic<bool> cancelled{false};
-    bool is_cancelled() const { return cancelled.load(std::memory_order_relaxed); }
-    void cancel() { cancelled.store(true, std::memory_order_relaxed); }
-};
-
-// En Request:
-std::shared_ptr<CancellationToken> cancel_token;
-
-// En SleepAwaitable:
-void await_suspend(std::coroutine_handle<> h) noexcept {
-    loop->schedule_timer(ms, [h, token = cancel_token]() {
-        if (!token || !token->is_cancelled())
-            h.resume();
-        else
-            h.destroy();   // o simplemente no resume
-    });
-}
-
-// En HttpConnection::close():
-cancel_token_->cancel();
-```
-
-El handler puede también comprobar `req.cancel_token->is_cancelled()` antes de operaciones costosas.
-
----
-
 ## Roadmap
-
-### Siguiente: "Robustez de I/O" (fixes críticos)
-
-- [ ] **Límite en write_buf_** — hard limit + cierre limpio con 503 al superarlo
-- [ ] **CancellationToken** — propagado desde Request a coroutines; SleepAwaitable lo honra
-- [ ] **Header read timeout per-keep-alive** — el timer de 5s debe rearmarse tras cada respuesta en conexiones keep-alive (ahora solo se arma una vez al crear la conexión)
 
 ### Nivel siguiente: "Frontend-ready"
 

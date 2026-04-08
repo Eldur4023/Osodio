@@ -2,8 +2,10 @@
 #include <string>
 #include <unordered_map>
 #include <optional>
+#include <memory>
 #include <algorithm>
 #include <osodio/core/event_loop.hpp>
+#include "cancel.hpp"
 
 namespace osodio {
 
@@ -29,6 +31,16 @@ public:
     // Pointer to the service container (set by App::run before dispatch).
     // Non-owning: the App owns the container and outlives all requests.
     class ServiceContainer* container = nullptr;
+
+    // Cancellation token — shared with the HttpConnection.
+    // Cancelled when the connection closes (timeout, disconnect, write error).
+    // Check in long-running handlers to exit early.
+    std::shared_ptr<CancellationToken> cancel_token;
+
+    // Convenience: true if the underlying connection has been closed.
+    bool is_cancelled() const noexcept {
+        return cancel_token && cancel_token->is_cancelled();
+    }
 
     // Convenience: get a header by name (case-insensitive)
     std::optional<std::string> header(std::string name) const {

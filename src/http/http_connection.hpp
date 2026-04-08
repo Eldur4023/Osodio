@@ -6,6 +6,7 @@
 #include "http_parser.hpp"
 #include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
+#include "../../include/osodio/cancel.hpp"
 
 namespace osodio::http {
 
@@ -22,9 +23,15 @@ private:
     int                fd_;
     core::EventLoop&   loop_;
     osodio::DispatchFn dispatch_;
-    std::shared_ptr<std::atomic<int>> conn_count_; // decremented on close()
+    std::shared_ptr<std::atomic<int>>   conn_count_;    // decremented on close()
+    std::shared_ptr<osodio::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_       = false;
+
+    // ── Response buffer limit ─────────────────────────────────────────────────
+    // Hard cap on the size of a single response.  Connections that exceed this
+    // are closed to prevent unbounded RAM growth from slow-reading clients.
+    static constexpr size_t kMaxResponseBytes = 16 * 1024 * 1024; // 16 MB
 
     // ── Write buffer ─────────────────────────────────────────────────────────
     // Non-blocking writes: if send buffer is full (EAGAIN), data is queued here

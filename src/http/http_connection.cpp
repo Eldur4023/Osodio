@@ -117,18 +117,23 @@ void HttpConnection::do_read() {
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 void HttpConnection::dispatch(ParsedRequest req_parsed) {
-    // Set the thread-local loop so handlers can call sleep(ms) without req.loop.
-    osodio::detail::current_loop = &loop_;
+    // Fresh cancellation token for this request.
+    cancel_token_ = std::make_shared<osodio::CancellationToken>();
+
+    // Set thread-locals so handlers can call sleep(ms) without explicit args.
+    osodio::detail::current_loop  = &loop_;
+    osodio::detail::current_token = cancel_token_;
 
     auto req_ptr = std::make_shared<osodio::Request>();
     auto res_ptr = std::make_shared<osodio::Response>();
 
-    req_ptr->method  = req_parsed.method;
-    req_ptr->path    = req_parsed.path;
-    req_ptr->version = req_parsed.version;
-    req_ptr->headers = std::move(req_parsed.headers);
-    req_ptr->body    = std::move(req_parsed.body);
-    req_ptr->loop    = &loop_;
+    req_ptr->method       = req_parsed.method;
+    req_ptr->path         = req_parsed.path;
+    req_ptr->version      = req_parsed.version;
+    req_ptr->headers      = std::move(req_parsed.headers);
+    req_ptr->body         = std::move(req_parsed.body);
+    req_ptr->loop         = &loop_;
+    req_ptr->cancel_token = cancel_token_;
     parse_query(req_parsed.query, req_ptr->query);
 
     // Headers fully received — cancel the Slowloris timer.
@@ -197,6 +202,14 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
 void HttpConnection::send_response(std::string data) {
     if (closed_) return;
 
+    // Hard cap: if a single response exceeds kMaxResponseBytes, the client is
+    // reading so slowly that buffering would exhaust RAM.  Close cleanly.
+    if (data.size() > kMaxResponseBytes) {
+        keep_alive_ = false;
+        close();
+        return;
+    }
+
     // Try immediate write
     ssize_t n = ::write(fd_, data.data(), data.size());
     if (n < 0) {
@@ -250,7 +263,21 @@ void HttpConnection::on_write_complete() {
         close();
         return;
     }
-    // Re-arm for the next request on this connection
+
+    // Re-arm the header timeout for the next pipelined/keep-alive request.
+    // Without this, a client that sends headers slowly on the second request
+    // (Slowloris) would go unchecked — the 5s timer only ran for the first one.
+    auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
+    header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
+        if (auto self = self_weak.lock()) {
+            if (!self->closed_) {
+                self->send_error(408, "Request Header Timeout");
+                self->close();
+            }
+        }
+    });
+
+    // Ready for the next request
     loop_.modify(fd_, EPOLLIN);
 }
 
@@ -268,6 +295,11 @@ void HttpConnection::send_error(int code, const char* msg) {
 void HttpConnection::close() {
     if (closed_) return;
     closed_ = true;
+
+    // Signal any suspended coroutines (e.g. co_await sleep()) to wake up and
+    // exit rather than waiting out their full timer duration.
+    if (cancel_token_) cancel_token_->cancel();
+
     loop_.cancel_timer(header_tfd_);
     header_tfd_ = -1;
     loop_.cancel_timer(timeout_tfd_);
