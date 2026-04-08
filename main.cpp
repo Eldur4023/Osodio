@@ -124,9 +124,11 @@ int main() {
 
     // Template rendering with inja (Jinja2-compatible)
     app.set_templates("./templates");
-    app.get("/hello", [](Request& req, Response& res) {
-        res.render("hello.html", {{"name", req.query.count("name")
-            ? req.query.at("name") : "World"}});
+    app.get("/hello", [](Response& res) {
+        res.render("hello.html", {
+            {"name", "manolo"},
+            {"risa", "soy tu ano"}
+        });
     });
 
 

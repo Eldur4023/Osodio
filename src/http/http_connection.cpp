@@ -57,6 +57,9 @@ HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
     , conn_count_(std::move(conn_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); })
 {
+}
+
+void HttpConnection::start() {
     // Arm the header timeout immediately — if we don't receive a complete
     // HTTP request within kHeaderTimeoutMs, close the connection (Slowloris).
     auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());

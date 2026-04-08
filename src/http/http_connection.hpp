@@ -15,15 +15,16 @@ public:
                    std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~HttpConnection();
 
+    void start();
     void on_event(uint32_t events);
 
 private:
     int                fd_;
     core::EventLoop&   loop_;
     osodio::DispatchFn dispatch_;
+    std::shared_ptr<std::atomic<int>> conn_count_; // decremented on close()
     HttpParser         parser_;
     bool               closed_       = false;
-    std::shared_ptr<std::atomic<int>> conn_count_; // decremented on close()
 
     // ── Write buffer ─────────────────────────────────────────────────────────
     // Non-blocking writes: if send buffer is full (EAGAIN), data is queued here

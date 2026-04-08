@@ -101,6 +101,8 @@ void TcpServer::on_accept() {
         auto conn = std::make_shared<http::HttpConnection>(
             client_fd, loop_, dispatch_, conn_count_);
 
+        conn->start();
+
         loop_.add(client_fd, EPOLLIN, [conn](uint32_t events) {
             conn->on_event(events);
         });
