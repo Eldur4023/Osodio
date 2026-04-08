@@ -21,6 +21,14 @@ public:
     // Schedule a task to run in the next loop iteration
     void post(std::function<void()> cb);
 
+    // Schedule a one-shot timer: fires cb after `ms` milliseconds.
+    // Uses timerfd — scalable, no extra threads.
+    // Returns the timerfd so it can be cancelled with cancel_timer().
+    int  schedule_timer(int ms, std::function<void()> cb);
+
+    // Cancel a previously scheduled timer (safe to call with -1 or already-fired tfd).
+    void cancel_timer(int tfd);
+
     // Blocks until stop() is called
     void run();
     void stop();

@@ -2,6 +2,7 @@
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <stdexcept>
 #include <cstring>
@@ -110,6 +111,38 @@ void EventLoop::run() {
             cb(events[i].events);
         }
     }
+}
+
+int EventLoop::schedule_timer(int ms, std::function<void()> cb) {
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (tfd < 0) {
+        post(std::move(cb));
+        return -1;
+    }
+
+    struct itimerspec ts{};
+    if (ms > 0) {
+        ts.it_value.tv_sec  = ms / 1000;
+        ts.it_value.tv_nsec = static_cast<long>(ms % 1000) * 1'000'000L;
+    } else {
+        ts.it_value.tv_nsec = 1;
+    }
+    timerfd_settime(tfd, 0, &ts, nullptr);
+
+    add(tfd, EPOLLIN, [this, tfd, cb = std::move(cb)](uint32_t) mutable {
+        uint64_t val;
+        (void)::read(tfd, &val, sizeof(val));
+        remove(tfd);
+        ::close(tfd);
+        cb();
+    });
+    return tfd;
+}
+
+void EventLoop::cancel_timer(int tfd) {
+    if (tfd < 0) return;
+    remove(tfd);
+    ::close(tfd);
 }
 
 void EventLoop::stop() {

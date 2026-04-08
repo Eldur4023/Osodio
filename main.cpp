@@ -6,16 +6,29 @@ using namespace osodio;
 struct User {
     std::string name;
     int age;
-
-    OSODIO_VALIDATE(User,
+    OSODIO_SCHEMA(User, name, age)
+    OSODIO_VALIDATE(
         check(name.size() > 0, "Name cannot be empty"),
         check(age >= 18, "Must be at least 18 years old")
     )
 };
-OSODIO_SCHEMA(User, name, age)
+
+// ── Demo service injected via Inject<T> ─────────────────────────────────────
+struct UserStore {
+    // In a real app this would hold a DB connection pool, etc.
+    std::vector<User> users = {
+        User{"Alice", 30},
+        User{"Bob",   25},
+    };
+};
 
 int main() {
     App app;
+
+    app.api_info("Demo API", "0.1.0");  // visible at /docs and /openapi.json
+
+    // ── Dependency injection ─────────────────────────────────────────────────
+    app.provide(std::make_shared<UserStore>());
 
     // ── Built-in middleware ──────────────────────────────────────────────────
     app.use(osodio::logger());
@@ -23,12 +36,9 @@ int main() {
         .origins = {"http://localhost:5173", "http://localhost:3000"},
     }));
 
-    // ── Custom middleware (must co_await next() to continue chain) ───────────
-    app.use([](Request& req, Response& res, auto next) -> Task<void> {
-        // Pre-handler work
+    app.use([](Request&, Response& res, auto next) -> Task<void> {
         res.header("X-Powered-By", "Osodio");
         co_await next();
-        // Post-handler work (runs after the handler finishes, even if async)
     });
 
     // ── Routes ───────────────────────────────────────────────────────────────
@@ -37,22 +47,46 @@ int main() {
         res.json({{"status", "ok"}});
     });
 
-    // Async handler — co_await a sleep before responding
-    app.get("/async-ping", [](Request& req) -> Task<nlohmann::json> {
-        co_await sleep(500, req.loop);
+    app.get("/async-ping", []() -> Task<nlohmann::json> {
+        co_await sleep(500);
         co_return nlohmann::json{{"status", "async-ok"}, {"waited_ms", 500}};
     });
 
-    // Path parameter (type-safe)
-    app.get("/users/:id", [](PathParam<std::string, "id"> id) -> User {
-        return User{id.value, 25};
+    // Inject<UserStore>: resolved from container, 500 if not registered
+    app.get("/users", [](Inject<UserStore> store) -> nlohmann::json {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& u : store->users)
+            arr.push_back({{"name", u.name}, {"age", u.age}});
+        return arr;
     });
 
-    // Body auto-deserialization + validation
-    app.post("/users", [](Body<User> user) {
-        return nlohmann::json{{"id", 1}, {"name", user->name}};
+    // throw osodio::not_found() → 404 JSON, no try/catch needed in handler
+    app.get("/users/:id", [](PathParam<int, "id"> id,
+                             Inject<UserStore> store) -> User {
+        int idx = id.value - 1;
+        if (idx < 0 || idx >= static_cast<int>(store->users.size()))
+            throw osodio::not_found("User not found");
+        return store->users[idx];
     });
 
+    // Plain User — auto-extracted from body, no Body<> wrapper needed.
+    // Validation (OSODIO_VALIDATE) and 422 errors work exactly the same.
+    app.post("/users", [](User user, Inject<UserStore> store) {
+        store->users.push_back(user);
+        return nlohmann::json{{"id", store->users.size()}, {"name", user.name}};
+    });
+
+    // Template rendering with inja (Jinja2-compatible)
+    app.set_templates("./templates");
+    app.get("/hello", [](Request& req, Response& res) {
+        res.render("hello.html", {{"name", req.query.count("name")
+            ? req.query.at("name") : "World"}});
+    });
+
+
+    app.get("/", [](Request&, Response& res){
+        res.render("/index.html");
+    });
     // ── Static files ─────────────────────────────────────────────────────────
     app.serve_static("/static", "./public");
 

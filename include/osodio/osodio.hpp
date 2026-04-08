@@ -13,3 +13,6 @@
 #include "validation.hpp"
 #include "handler_traits.hpp"
 #include "middleware.hpp"
+#include "openapi.hpp"
+#include "errors.hpp"
+#include "di.hpp"

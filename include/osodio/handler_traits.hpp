@@ -4,14 +4,52 @@
 #include <type_traits>
 #include <tuple>
 #include <optional>
+#include <simdjson.h>
 #include "task.hpp"
 #include "request.hpp"
 #include "response.hpp"
 #include "validation.hpp"
+#include "schema.hpp"
+#include "errors.hpp"
+#include "di.hpp"
 
 namespace osodio {
 
-// ─── FixedString: C++20 NTTP string (enables PathParam<T, "id">) ─────────────
+// ─── simdjson → nlohmann conversion ─────────────────────────────────────────
+
+namespace detail {
+    inline nlohmann::json simdjson_to_nlohmann(simdjson::dom::element elem) {
+        switch (elem.type()) {
+            case simdjson::dom::element_type::OBJECT: {
+                nlohmann::json obj = nlohmann::json::object();
+                for (auto [k, v] : elem.get_object())
+                    obj[std::string(k)] = simdjson_to_nlohmann(v);
+                return obj;
+            }
+            case simdjson::dom::element_type::ARRAY: {
+                nlohmann::json arr = nlohmann::json::array();
+                for (auto v : elem.get_array())
+                    arr.push_back(simdjson_to_nlohmann(v));
+                return arr;
+            }
+            case simdjson::dom::element_type::STRING:
+                return std::string(elem.get_string().value());
+            case simdjson::dom::element_type::INT64:
+                return elem.get_int64().value();
+            case simdjson::dom::element_type::UINT64:
+                return elem.get_uint64().value();
+            case simdjson::dom::element_type::DOUBLE:
+                return elem.get_double().value();
+            case simdjson::dom::element_type::BOOL:
+                return elem.get_bool().value();
+            case simdjson::dom::element_type::NULL_VALUE:
+                return nullptr;
+        }
+        return nullptr;
+    }
+} // namespace detail
+
+// ─── FixedString ─────────────────────────────────────────────────────────────
 
 template<size_t N>
 struct fixed_string {
@@ -22,7 +60,7 @@ struct fixed_string {
     operator std::string_view() const { return {buf, N - 1}; }
 };
 
-// ─── Special parameter types ─────────────────────────────────────────────────
+// ─── Parameter wrapper types ─────────────────────────────────────────────────
 
 template<typename T, fixed_string Name>
 struct PathParam {
@@ -30,13 +68,17 @@ struct PathParam {
     operator T() const { return value; }
 };
 
+// Body<T> — explicit wrapper; kept for backward-compat and when you need the
+// optional validity check (if (!body) { ... }).
 template<typename T>
 struct Body {
     T value;
+    bool valid = false;
     Body() = default;
-    explicit Body(T v) : value(std::move(v)) {}
+    explicit Body(T v) : value(std::move(v)), valid(true) {}
     const T* operator->() const { return &value; }
     const T& operator*()  const { return value; }
+    explicit operator bool() const { return valid; }
 };
 
 template<typename T, fixed_string Name>
@@ -46,31 +88,150 @@ struct Query {
 };
 
 // ─── has_validate ─────────────────────────────────────────────────────────────
+// Detects types that have an OSODIO_VALIDATE block (i.e., expose _validate_impl).
 
 template<typename T, typename = void>
 struct has_validate : std::false_type {};
-
 template<typename T>
 struct has_validate<T,
-    std::void_t<decltype(validate(std::declval<const T&>()))>
+    std::void_t<decltype(std::declval<const T&>()._validate_impl(
+        std::declval<std::vector<std::string>&>()))>
 > : std::true_type {};
 
-// ─── Argument extractors ─────────────────────────────────────────────────────
+// ─── has_to_json ──────────────────────────────────────────────────────────────
 
+template<typename T, typename = void>
+struct has_to_json : std::false_type {};
 template<typename T>
-struct extractor {
-    static T extract(const Request& req, Response& res) {
-        if constexpr (std::is_same_v<T, Request&>)
-            return const_cast<Request&>(req);
-        else if constexpr (std::is_same_v<T, const Request&>)
-            return req;
-        else if constexpr (std::is_same_v<T, Response&>)
-            return res;
-        else
+struct has_to_json<T,
+    std::void_t<decltype(nlohmann::to_json(
+        std::declval<nlohmann::json&>(), std::declval<const T&>()))>
+> : std::true_type {};
+
+// ─── is_known_param_type ──────────────────────────────────────────────────────
+// Marks types that already have an explicit extractor specialisation.
+// Prevents the auto-body extractor from matching them.
+
+template<typename T> struct is_known_param_type : std::false_type {};
+template<> struct is_known_param_type<Request>         : std::true_type {};
+template<> struct is_known_param_type<const Request>   : std::true_type {};
+template<> struct is_known_param_type<Response>        : std::true_type {};
+template<> struct is_known_param_type<nlohmann::json>  : std::true_type {};
+template<typename T, fixed_string N>
+struct is_known_param_type<PathParam<T, N>>            : std::true_type {};
+template<typename T, fixed_string N>
+struct is_known_param_type<Query<T, N>>                : std::true_type {};
+template<typename T>
+struct is_known_param_type<Body<T>>                    : std::true_type {};
+template<typename T>
+struct is_known_param_type<Inject<T>>                  : std::true_type {};
+
+// ─── Body extraction — shared impl ───────────────────────────────────────────
+// Used by both extractor<T> (auto) and extractor<Body<T>> (explicit).
+// On error: sets res status and returns default-constructed T.
+
+namespace detail {
+template<typename T>
+T extract_body(const Request& req, Response& res) {
+    // 1. Parse with simdjson
+    thread_local simdjson::dom::parser sjparser;
+    simdjson::dom::element doc;
+    auto perr = sjparser.parse(req.body).get(doc);
+    if (perr) {
+        res.status(400).json({
+            {"error",  "Invalid JSON"},
+            {"detail", std::string(simdjson::error_message(perr))}
+        });
+        return T{};
+    }
+    if (doc.type() != simdjson::dom::element_type::OBJECT) {
+        res.status(400).json({{"error", "Request body must be a JSON object"}});
+        return T{};
+    }
+
+    // 2. Field-level validation (presence + null)
+    {
+        std::vector<std::string> field_errors;
+        auto obj = doc.get_object().value();
+        for (const auto& field : SchemaFields<T>::names()) {
+            simdjson::dom::element val;
+            auto ferr = obj[field].get(val);
+            if (ferr == simdjson::NO_SUCH_FIELD)
+                field_errors.push_back(field + ": field required");
+            else if (!ferr && val.is_null())
+                field_errors.push_back(field + ": must not be null");
+        }
+        if (!field_errors.empty()) {
+            res.status(422).json({{"error", "Validation Failed"}, {"messages", field_errors}});
             return T{};
+        }
+    }
+
+    // 3. simdjson DOM → nlohmann
+    nlohmann::json j = simdjson_to_nlohmann(doc);
+
+    // 4. Bind to T
+    T val;
+    try {
+        val = j.get<T>();
+    } catch (const nlohmann::json::type_error& e) {
+        res.status(422).json({{"error","Validation Failed"},
+            {"messages", nlohmann::json::array({std::string(e.what())})}});
+        return T{};
+    } catch (const nlohmann::json::out_of_range& e) {
+        res.status(422).json({{"error","Validation Failed"},
+            {"messages", nlohmann::json::array({std::string(e.what())})}});
+        return T{};
+    } catch (...) {
+        res.status(422).json({{"error", "Schema binding failed"}});
+        return T{};
+    }
+
+    // 5. OSODIO_VALIDATE business rules
+    if constexpr (has_validate<T>::value) {
+        std::vector<std::string> errs;
+        val._validate_impl(errs);
+        if (!errs.empty()) {
+            res.status(422).json({{"error","Validation Failed"}, {"messages", errs}});
+            return T{};
+        }
+    }
+
+    return val;
+}
+} // namespace detail
+
+// ─── Extractors ───────────────────────────────────────────────────────────────
+
+// Primary: fires a clear compile error for unsupported types.
+template<typename T, typename = void>
+struct extractor {
+    static T extract(const Request&, Response&) {
+        static_assert(sizeof(T) == 0,
+            "Unsupported handler parameter type. "
+            "Supported: PathParam<T,\"name\">, Query<T,\"name\">, "
+            "Inject<T>, Request&, Response&, "
+            "Body<T> (explicit), or any OSODIO_SCHEMA struct (implicit body).");
     }
 };
 
+// Request& / Response& — pass through
+template<>
+struct extractor<Request&> {
+    static Request& extract(const Request& req, Response&) {
+        return const_cast<Request&>(req);
+    }
+};
+template<>
+struct extractor<const Request&> {
+    static const Request& extract(const Request& req, Response&) { return req; }
+};
+template<>
+struct extractor<Response&> {
+    static Response& extract(const Request&, Response& res) { return res; }
+};
+
+// PathParam<T, Name>
 template<typename T, fixed_string Name>
 struct extractor<PathParam<T, Name>> {
     static PathParam<T, Name> extract(const Request& req, Response&) {
@@ -86,6 +247,7 @@ struct extractor<PathParam<T, Name>> {
     }
 };
 
+// Query<T, Name>
 template<typename T, fixed_string Name>
 struct extractor<Query<T, Name>> {
     static Query<T, Name> extract(const Request& req, Response&) {
@@ -98,30 +260,45 @@ struct extractor<Query<T, Name>> {
     }
 };
 
+// Body<T> — explicit wrapper (backward-compat; also provides operator bool)
 template<typename T>
 struct extractor<Body<T>> {
     static Body<T> extract(const Request& req, Response& res) {
-        try {
-            auto j   = nlohmann::json::parse(req.body);
-            T    val = j.template get<T>();
+        T val = detail::extract_body<T>(req, res);
+        if (res.status_code() >= 400) return Body<T>{};
+        return Body<T>(std::move(val));
+    }
+};
 
-            if constexpr (has_validate<T>::value) {
-                try {
-                    validate(val);
-                } catch (const ValidationError& e) {
-                    res.status(422).json({
-                        {"error",    "Validation Failed"},
-                        {"messages", e.messages}
-                    });
-                }
-            }
-            return Body<T>(std::move(val));
-        } catch (const ValidationError&) {
-            throw;
-        } catch (...) {
-            res.status(400).json({{"error", "Invalid JSON or schema mismatch"}});
-            return Body<T>{};
+// Inject<T>
+template<typename T>
+struct extractor<Inject<T>> {
+    static Inject<T> extract(const Request& req, Response& res) {
+        if (!req.container) {
+            res.status(500).json({{"error", "No service container configured"}});
+            return {};
         }
+        auto ptr = req.container->template resolve<T>();
+        if (!ptr) {
+            res.status(500).json({{"error", "Service not registered"},
+                                  {"type",  typeid(T).name()}});
+            return {};
+        }
+        return Inject<T>{std::move(ptr)};
+    }
+};
+
+// Auto-body for OSODIO_SCHEMA types — the ergonomic path.
+// [](User body) { ... }  works without Body<> wrapper.
+// Matches any class with OSODIO_SCHEMA that isn't already a known param type.
+template<typename T>
+struct extractor<T, std::enable_if_t<
+    std::is_class_v<T>                          &&
+    !is_known_param_type<T>::value              &&
+    has_to_json<T>::value
+>> {
+    static T extract(const Request& req, Response& res) {
+        return detail::extract_body<T>(req, res);
     }
 };
 
@@ -133,51 +310,44 @@ template<typename T>
 struct is_task<Task<T>> : std::true_type {};
 
 // ─── HandlerTraits ────────────────────────────────────────────────────────────
-// Wraps any callable into a Task<void> coroutine so the entire dispatch chain
-// is uniformly async.  Three cases:
-//
-//   - void return       → run synchronously, no serialisation
-//   - Task<T> return    → co_await the inner task, then res.json(result)
-//   - anything else     → res.json(return value)  (sync auto-serialise)
+// Wraps any callable into Task<void>.  Supports:
+//   - [](User body) { return User{...}; }          sync, auto-body, auto-json
+//   - [](PathParam<int,"id"> id) -> User { ... }   sync, path param
+//   - [](Inject<DB> db) -> Task<json> { co_return ... }  async
+//   - throw osodio::not_found()                    caught here → JSON 404
 
 template<typename F>
 struct HandlerTraits : HandlerTraits<decltype(&F::operator())> {};
 
-// const lambda / functor
 template<typename R, typename C, typename... Args>
 struct HandlerTraits<R (C::*)(Args...) const> {
-
     template<typename F>
     static Task<void> call(F&& f, const Request& req, Response& res) {
-        // Build arguments; short-circuit if an extractor already set an error.
         auto args = std::tuple<Args...>{extractor<Args>::extract(req, res)...};
         if (res.status_code() >= 400) co_return;
 
-        if constexpr (is_task<R>::value) {
-            // ── Async handler ────────────────────────────────────────────────
-            using ValueType = typename R::promise_type::value_type;
-            auto inner = std::apply(std::forward<F>(f), std::move(args));
-
-            if constexpr (!std::is_void_v<ValueType>) {
-                auto result = co_await inner;
-                if (res.status_code() < 400) res.json(result);
+        try {
+            if constexpr (is_task<R>::value) {
+                using V = typename R::promise_type::value_type;
+                auto inner = std::apply(std::forward<F>(f), std::move(args));
+                if constexpr (!std::is_void_v<V>) {
+                    auto result = co_await inner;
+                    if (res.status_code() < 400) res.json(result);
+                } else {
+                    co_await inner;
+                }
+            } else if constexpr (std::is_same_v<R, void>) {
+                std::apply(std::forward<F>(f), std::move(args));
             } else {
-                co_await inner;
+                auto result = std::apply(std::forward<F>(f), std::move(args));
+                if (res.status_code() < 400) res.json(result);
             }
-
-        } else if constexpr (std::is_same_v<R, void>) {
-            // ── Sync void handler ────────────────────────────────────────────
-            std::apply(std::forward<F>(f), std::move(args));
-
-        } else {
-            // ── Sync returning handler → auto-serialise ──────────────────────
-            auto result = std::apply(std::forward<F>(f), std::move(args));
-            if (res.status_code() < 400) res.json(result);
+        } catch (const HttpError& e) {
+            res.status(e.status).json(e.body);
         }
     }
 };
 
-// mutable lambda / non-const functor
 template<typename R, typename C, typename... Args>
 struct HandlerTraits<R (C::*)(Args...)> {
     template<typename F>

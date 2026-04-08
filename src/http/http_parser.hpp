@@ -31,13 +31,11 @@ inline constexpr size_t kMaxHeaderCount =  100;
 inline constexpr size_t kMaxBodySize    = 16 * 1024 * 1024; // 16 MB
 
 // Incremental HTTP/1.1 request parser backed by llhttp.
-//
-// Feed it bytes as they arrive from the socket.  When a complete request is
-// parsed, on_complete is called.  The parser resets automatically for the next
-// request on the same keep-alive connection.
 class HttpParser {
 public:
     using OnComplete = std::function<void(ParsedRequest)>;
+
+    struct ParseContext;
 
     explicit HttpParser(OnComplete on_complete);
     ~HttpParser();
@@ -48,8 +46,6 @@ public:
     void reset();
 
 private:
-    struct ParseContext;
-
     OnComplete                       on_complete_;
     std::unique_ptr<ParseContext>    ctx_;
     std::unique_ptr<llhttp_t>        parser_;

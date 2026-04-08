@@ -96,11 +96,24 @@ static void signal_handler(int) {
 void App::run(const std::string& host, uint16_t port) {
     std::signal(SIGPIPE, SIG_IGN);
 
+    // ── Built-in: /openapi.json and /docs ─────────────────────────────────────
+    // Build the spec once, capture by value into the handler lambda.
+    {
+        std::string spec = build_openapi_doc(api_title_, api_version_, openapi_routes_).dump(2);
+        router_.add("GET", "/openapi.json", [spec](Request&, Response& res) {
+            res.header("Content-Type", "application/json; charset=utf-8").send(spec);
+        });
+        router_.add("GET", "/docs", [](Request&, Response& res) {
+            res.html(swagger_ui_html());
+        });
+    }
+
     // ── Build the async dispatch function ─────────────────────────────────────
     // Captured by value into the DispatchFn so each thread gets its own copy.
     // All captures are read-only after run() starts, so thread-safe.
     DispatchFn dispatch = [this](Request& req, Response& res) -> Task<void> {
         res.set_templates_dir(templates_dir_);
+        req.container = &container_;
 
         // Static file mounts bypass the middleware chain.
         if (req.method == "GET" || req.method == "HEAD") {
@@ -144,7 +157,7 @@ void App::run(const std::string& host, uint16_t port) {
     };
 
     // ── Multi-core: one event loop per hardware thread ────────────────────────
-    unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
+    unsigned num_threads = 1; // Forced for debugging
 
     std::vector<core::EventLoop*> all_loops;
     std::mutex loops_mutex;

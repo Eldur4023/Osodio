@@ -7,6 +7,7 @@
 #include <memory>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include <inja.hpp>
 
 namespace osodio {
 
@@ -67,6 +68,33 @@ public:
 
     Response& send(std::string body) {
         state_->body = std::move(body);
+        return *this;
+    }
+
+    // Render a Jinja2-compatible template from the templates directory.
+    // Uses inja; the Environment is cached per thread per templates_dir.
+    //
+    //   res.render("index.html", {{"user", user_data}, {"items", items}});
+    //
+    Response& render(const std::string& template_name,
+                     const nlohmann::json& data = {}) {
+        header("Content-Type", "text/html; charset=utf-8");
+        try {
+            // One inja::Environment per (thread × templates_dir): templates are
+            // parsed once and cached inside the Environment.
+            thread_local std::unordered_map<std::string, inja::Environment> envs;
+            auto it = envs.find(state_->templates_dir);
+            if (it == envs.end()) {
+                it = envs.emplace(
+                    state_->templates_dir,
+                    inja::Environment{state_->templates_dir + "/"}
+                ).first;
+            }
+            state_->body = it->second.render_file(template_name, data);
+        } catch (const std::exception& e) {
+            state_->status_code = 500;
+            state_->body = std::string("Template error: ") + e.what();
+        }
         return *this;
     }
 

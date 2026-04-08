@@ -28,8 +28,8 @@ struct HttpParser::ParseContext {
 
 // ── llhttp callbacks ───────────────────────────────────────────────────────
 
-static ParseContext* ctx(llhttp_t* p) {
-    return static_cast<ParseContext*>(p->data);
+static HttpParser::ParseContext* ctx(llhttp_t* p) {
+    return static_cast<HttpParser::ParseContext*>(p->data);
 }
 
 static int cb_on_url(llhttp_t* p, const char* at, size_t len) {
@@ -39,7 +39,7 @@ static int cb_on_url(llhttp_t* p, const char* at, size_t len) {
     return HPE_OK;
 }
 
-static void commit_header(ParseContext* c) {
+static void commit_header(HttpParser::ParseContext* c) {
     if (!c->value_pending) return;
     // Lowercase the field name for case-insensitive lookup
     std::string key = c->last_field;

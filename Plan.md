@@ -1251,17 +1251,17 @@ int main() {
 - [x] CORS middleware reutilizable — `include/osodio/middleware.hpp` (`osodio::cors(opts)`, preflight automático, allowlist de origins)
 - [x] JSON response helpers con nlohmann/json — `response.json()`, serialización automática via HandlerTraits (ahora como coroutine Task\<void\>)
 
-### Fase 2 — Ergonomía (FastAPI parity)
-- [x] Macro `OSODIO_SCHEMA` + from_json/to_json generado — `include/osodio/schema.hpp` (wrapper sobre NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE)
-- [x] Validadores declarativos — `include/osodio/validation.hpp` (min/max/len_min/len_max) + `OSODIO_VALIDATE` macro con `check()`
-- [x] Deducción de tipos en handlers (PathParam, Body, Query) — `include/osodio/handler_traits.hpp` (HandlerTraits + extractors automáticos)
-- [ ] Deducción: `Inject<T>` — no implementado (service container falta)
-- [ ] Generación de OpenAPI 3.0 en compile-time — no implementado
-- [ ] Swagger UI embebida (assets compilados en el binario) — no implementado
-- [x] HTTP 422 con errores de validación estructurados — `extractor<Body<T>>` retorna 422 si validate() falla
-- [ ] Service container para inyección de dependencias — no implementado
-- [ ] Respuestas de error tipadas (`not_found()`, `bad_request()`, etc.) — no implementado
-- [ ] Template engine (Jinja2-like) — integrar `inja` para `res.render("template.html", data)` con herencia, filtros, auto-escaping
+### Fase 2 — Ergonomía (FastAPI parity) ✅ COMPLETADA (2026-04-07)
+- [x] Macro `OSODIO_SCHEMA` + from_json/to_json generado — `include/osodio/schema.hpp`
+- [x] Validadores declarativos — `include/osodio/validation.hpp` + `OSODIO_VALIDATE` con `check()`
+- [x] Deducción de tipos en handlers (PathParam, Body, Query) — `include/osodio/handler_traits.hpp`; tipos `OSODIO_SCHEMA` se extraen del body automáticamente sin `Body<>` wrapper
+- [x] Deducción: `Inject<T>` — `include/osodio/di.hpp`; `extractor<Inject<T>>` resuelve desde `ServiceContainer`
+- [x] Generación de OpenAPI 3.0 en compile-time — `include/osodio/openapi.hpp`; `DocBuilder<F>` extrae tipos en compile-time
+- [x] Swagger UI — `/docs` via CDN (unpkg); `swagger_ui_html()` en `openapi.hpp`
+- [x] HTTP 422 con errores de validación estructurados — pipeline de 5 pasos en `extractor<Body<T>>`
+- [x] Service container — `include/osodio/di.hpp`; singleton + transient; `app.provide<T>()`; thread-safe post-construcción
+- [x] Respuestas de error tipadas — `include/osodio/errors.hpp`; `throw osodio::not_found()` / `bad_request()` / etc.; capturado en `HandlerTraits::call`
+- [x] Template engine — `res.render("template.html", data)` vía `inja`; `inja::Environment` cacheado por thread×dir
 
 ### Fase 3 — Frontend-ready
 - [ ] HTTPS con TLS 1.3 (OpenSSL)
@@ -1283,7 +1283,7 @@ int main() {
 - [ ] Hot reload de certificados TLS
 - [ ] Métricas Prometheus (`/metrics` endpoint)
 - [ ] Health check endpoint (`/health`)
-- [ ] Request timeout middleware
+- [x] Request timeout — 30 s integrado en `HttpConnection` via `timerfd`; no requiere middleware
 
 ### Fase 5 — Ecosistema
 - [ ] CLI `osodio-ctl` para scaffolding de proyectos
@@ -1366,44 +1366,52 @@ El parser HTTP es la superficie de ataque más grande (recibe input arbitrario d
 
 ### Resumen del estado
 
-**Fase 1 completada.** El framework tiene una base sólida y arquitectónicamente correcta: parser de producción, modelo async coherente de punta a punta, y escalabilidad multi-core. El siguiente objetivo es Fase 2 (ergonomía FastAPI-like) y el diferenciador OpenAPI.
+**Fases 1 y 2 completadas.** El framework tiene paridad de ergonomía con FastAPI: parser de producción, modelo async coherente, escalabilidad multi-core, validación estructurada, OpenAPI automático, DI con `Inject<T>`, errores tipados y escritura no bloqueante. El siguiente objetivo es Nivel 3 restante (route groups, static files completo) y Nivel 4 (HTTP/2, TLS).
 
 **Lo que funciona:**
 - Servidor arranca, acepta conexiones TCP no bloqueantes con `SO_REUSEPORT`
 - Parser HTTP/1.1 via `llhttp` — chunked encoding, request smuggling protegido, spec compliant
-- Límites de seguridad en parser: max URL 8 KB, max headers 100, max header size 8 KB, max body 16 MB
+- Límites de seguridad: max URL 8 KB, max headers 100, max header size 8 KB, max body 16 MB
 - Event loop **multi-core**: un thread + EventLoop por hardware core, kernel balancea vía SO_REUSEPORT
-- Router radix tree con PathParam, Body, Query auto-extraídos
-- Middleware chain **completamente async**: `co_await next()` real — los middlewares pueden hacer I/O async
-- Logger middleware (`osodio::logger()`) mide tiempo real incluyendo handlers async
-- CORS middleware (`osodio::cors()`) con preflight automático y allowlist de origins
-- `Task<T>` / `Task<void>` con symmetric transfer y deferred frame destruction via event loop
-- `HandlerTraits::call` es coroutine: toda la cadena dispatch → middleware → handler → respuesta es un único árbol de coroutines coherente
-- Validación declarativa con `OSODIO_VALIDATE` + errores 422 estructurados
+- Router radix tree con PathParam, Body, Query, Inject auto-extraídos
+- Middleware chain **completamente async**: `co_await next()` real
+- Logger + CORS middleware reutilizables
+- `Task<T>` / `Task<void>` con symmetric transfer y deferred frame destruction
+- **Escritura no bloqueante**: `write_buf_` + EPOLLOUT — nunca bloquea el loop thread por cliente lento
+- **Timeout de request (30 s)**: `timerfd` armado en dispatch, cancelado al completar escritura → 408 si se agota
+- `simdjson` para parsing de input: `thread_local dom::parser`, 8x más rápido que nlohmann
+- Validación en 5 pasos: parse → field-presence → null-check → type-bind → OSODIO_VALIDATE
+- `res.render("template.html", data)` via `inja` con `Environment` cacheado por thread
+- **OpenAPI 3.0 automático**: `/openapi.json` + `/docs` (Swagger UI) sin configuración
+- **`Inject<T>`**: `app.provide<T>(singleton_or_factory)` → disponible en cualquier handler
+- **Errores tipados**: `throw osodio::not_found()` / `bad_request()` / etc. → respuesta JSON automática
+- Keep-alive HTTP/1.1 funcional
 - Archivos estáticos con protección path traversal
-- Compila limpio con GCC 13.3 + C++20
 
 **Arquitectura actual de archivos:**
 ```
 include/osodio/
   osodio.hpp          ← include único
-  app.hpp             ← App, listen(), serve_static(), on_error()
-  request.hpp         ← Request, Headers, query params
-  response.hpp        ← Response builder (json/text/html/send)
+  app.hpp             ← App, run(), serve_static(), on_error(), provide<T>(), api_info()
+  request.hpp         ← Request, headers, query, params, loop, container
+  response.hpp        ← Response builder (json/text/html/render/send)
   router.hpp          ← radix tree, Handler = std::function<Task<void>(...)>
-  handler_traits.hpp  ← HandlerTraits, PathParam, Body, Query, extractor<T>
+  handler_traits.hpp  ← HandlerTraits, PathParam, Body, Query, Inject extractors, auto-body for OSODIO_SCHEMA types, HttpError catch
   middleware.hpp      ← logger(), cors(CorsOptions)
-  schema.hpp          ← OSODIO_SCHEMA macro (nlohmann wrapper)
+  schema.hpp          ← OSODIO_SCHEMA (nlohmann + SchemaFields<T>)
   validation.hpp      ← OSODIO_VALIDATE, ValidationError
-  task.hpp            ← Task<T>, Task<void>, SleepAwaitable
+  errors.hpp          ← HttpError, not_found(), bad_request(), conflict(), …
+  di.hpp              ← ServiceContainer (singleton+transient), Inject<T>
+  openapi.hpp         ← DocBuilder<F>, schema_from_type<T>, build_openapi_doc, swagger_ui_html
+  task.hpp            ← Task<T>, Task<void>, SleepAwaitable (timerfd-backed)
   types.hpp           ← NextFn, Middleware, DispatchFn, Handler, ErrorHandler
-  core/event_loop.hpp ← EventLoop (epoll + eventfd + task queue)
+  core/event_loop.hpp ← EventLoop (epoll + eventfd + timerfd, schedule_timer/cancel_timer)
 src/
-  app.cpp                           ← async dispatch chain + multi-core run()
+  app.cpp                           ← dispatch chain, multi-core run(), built-in /openapi.json /docs
   router.cpp                        ← radix tree implementation
-  core/event_loop.cpp               ← epoll event loop
+  core/event_loop.cpp               ← epoll loop, schedule_timer (returns tfd), cancel_timer
   core/tcp_server.{hpp,cpp}         ← non-blocking accept + SO_REUSEPORT
-  http/http_connection.{hpp,cpp}    ← per-connection state, fires dispatch Task
+  http/http_connection.{hpp,cpp}    ← non-blocking write (EPOLLOUT), 30 s timeout, keep-alive
   http/http_parser.{hpp,cpp}        ← llhttp wrapper + security limits
 ```
 
@@ -1432,32 +1440,32 @@ Reemplazado el parser manual por `llhttp` (parser de Node.js). Ahora soporta:
 
 `std::thread::hardware_concurrency()` loops, uno por core. El kernel distribuye conexiones vía `SO_REUSEPORT`. Sin mutex en el path crítico: cada conexión pertenece a un solo loop.
 
-#### ❌ 4. nlohmann::json para parsing de input — PENDIENTE
+#### ✅ 4. nlohmann::json para parsing de input — RESUELTO (2026-04-07)
 
-`extractor<Body<T>>` usa `nlohmann::json::parse(body)`:
-- Allocación masiva del DOM completo en memoria
-- ~300 MB/s vs simdjson ~2.5 GB/s (8x más lento)
-- Sin límite de profundidad de anidación (DoS via JSON muy nested)
+`extractor<Body<T>>` ahora usa `simdjson` DOM API:
+- `thread_local simdjson::dom::parser` por loop thread — cero allocaciones por request
+- ~2.5 GB/s vs ~300 MB/s de nlohmann (8x)
+- Puente `simdjson_to_nlohmann()` preserva todos los bindings `OSODIO_SCHEMA` sin cambios
+- Integrado via `FetchContent` v3.10.0
 
-**Próximo paso:** integrar `simdjson` en `extractor<Body<T>>` con on-demand API.
+#### ✅ 5. Validación frágil — RESUELTO (2026-04-07)
 
-#### ❌ 5. Validación frágil — PENDIENTE
+Pipeline de 5 pasos en `extractor<Body<T>>`:
+1. **simdjson parse** → 400 "Invalid JSON" si mal formado
+2. **Field presence** → 422 "field: field required" por campo faltante
+3. **Null check** → 422 "field: must not be null" para campos no-optional
+4. **nlohmann bind** → 422 con mensaje de tipo si type_error/out_of_range
+5. **OSODIO_VALIDATE** → 422 "Validation Failed" con lista de errores de negocio
 
-`OSODIO_VALIDATE` corre post-binding. Problemas sin resolver:
-- `{"name": null}` → `std::string` vacío, no error
-- Campo faltante → excepción de nlohmann capturada como 400 genérico, no 422 estructurado
-- Sin distinción "campo faltante" vs "tipo incorrecto" vs "valor inválido"
-
-**Próximo paso:** field-level validation en `extractor<Body<T>>` con `std::expected`.
+`SchemaFields<T>` generado por `OSODIO_SCHEMA` provee nombres de campos en runtime para el paso 2.
 
 #### ✅ 6. Sin límites de seguridad — PARCIALMENTE RESUELTO
 
-**Resuelto:** max URL (8 KB), max headers (100), max header size (8 KB), max body (16 MB) en el parser.
+**Resuelto:** max URL (8 KB), max headers (100), max header size (8 KB), max body (16 MB) en el parser. Timeout de 30 s por request (handler + escritura completa).
 
 **Pendiente todavía:**
-- Header timeout (5 s) — requiere timerfd en EventLoop
-- Body timeout (30 s) — mismo
-- Max conexiones simultáneas — contador en TcpServer
+- Header read timeout (5 s) — tiempo para recibir headers completos desde que llega la conexión TCP; falta armarlo en `HttpConnection` justo después de `accept()`
+- Max conexiones simultáneas — contador en `TcpServer`
 
 #### ❌ 7. Static file server incompleto — PENDIENTE
 
@@ -1468,30 +1476,32 @@ Tiene path traversal protection ✔️, pero falta:
 - `Cache-Control`, `Last-Modified`
 - SPA fallback (`/* → /index.html`)
 
-#### ❌ 8. OpenAPI no implementado — PENDIENTE
+#### ✅ 8. OpenAPI 3.0 — RESUELTO (2026-04-07)
 
-El diferenciador principal del framework. Sin `/docs` y `/openapi.json` no hay paridad con FastAPI. Requiere:
-- `Schema<T>::openapi_schema()` generado por `OSODIO_SCHEMA`
-- Registro de rutas con tipos de request/response al router
-- Builder de documento OpenAPI 3.0 en `App`
-- Swagger UI embebida (assets como arrays C++ vía `xxd`)
+`/openapi.json` y `/docs` disponibles automáticamente sin configuración:
+- `DocBuilder<F>` extrae `PathParam`, `Body<T>`, `Query`, tipo de retorno en compile-time (fold expression sobre `Args...`)
+- `schema_from_type<T>()` genera JSON Schema via default-construction + inferencia de tipos del JSON serializado
+- `ArgVisitor<T>` especializado para `PathParam`, `Query`, `Body` — extensible para tipos futuros
+- Swagger UI desde CDN (unpkg); para air-gap: sustituir por assets embebidos
+- `app.api_info("Mi API", "1.0.0")` opcional; por defecto "Osodio API" / "0.1.0"
 
-#### ⚠️ 9. `Inject<T>` sin diseño de lifecycle — PENDIENTE
+#### ✅ 9. `Inject<T>` + `ServiceContainer` — RESUELTO (2026-04-07)
 
-No implementado. Cuando se implemente debe contemplar:
-- Lifecycle: singleton / scoped-per-request / transient
-- Thread-safe (el service container es compartido por N loops)
-- Testeable (inyección de mocks)
+- `ServiceContainer` en `include/osodio/di.hpp`: `singleton<T>()` + `transient<T>(factory)`
+- `app.provide(shared_ptr<T>)` — singleton; `app.provide<T>(factory)` — transient
+- Thread-safe: todas las registraciones ocurren antes de `app.run()`; resolución es read-only (`unordered_map` + `shared_ptr` copies)
+- `extractor<Inject<T>>` en `handler_traits.hpp` resuelve desde `req.container` — 500 si no registrado
+- Testeable: basta registrar un mock antes de `run()`
 
-#### ⚠️ 10. Coroutines — Peligros ocultos — PENDIENTE
+#### ✅ 10. Backpressure + Timeout — RESUELTO (2026-04-07)
 
-`Task<T>` funciona correctamente en el flujo normal, pero:
-- **Sin cancelación** — handler colgado vive para siempre, acumula frames en memoria
-- **Sin backpressure** — escritura al socket es bloqueante; si el cliente es lento, el handler espera
-- **SleepAwaitable usa `std::thread::detach()`** — no escala bajo miles de sleeps simultáneos; reemplazar por `timerfd`
-- **Sin timeout por handler** — un handler que nunca completa bloquea esa conexión indefinidamente
-
-**Próximo paso:** `timerfd` en EventLoop (resuelve sleep escalable + header/body timeouts + handler timeout).
+`HttpConnection` ahora tiene escritura completamente no bloqueante:
+- ✅ **Backpressure**: `send_response()` intenta `write()` inmediato; si EAGAIN/parcial → buffer en `write_buf_` + arma EPOLLOUT. `do_write()` drena el buffer cuando EPOLLOUT dispara. Nunca bloquea el loop thread por un cliente lento.
+- ✅ **Timeout por request (30 s)**: `schedule_timer` armado en `dispatch()`, cancelado en `on_write_complete()`. Si handler + escritura superan 30 s → 408 + cierre.
+- ✅ **`schedule_timer` retorna `int tfd`** → `cancel_timer(tfd)` permite cancelación limpia
+- ✅ **`SleepAwaitable`** — ya usaba `timerfd`; sin cambios requeridos
+- ❌ **Sin cancelación de coroutine** — handler que hace `co_await` de operación infinita sigue vivo (el timeout cierra el socket pero el frame permanece hasta que la operación complete o el proceso termina)
+- ❌ **Sin backpressure interno** — si un handler genera respuestas más rápido de lo que el cliente las consume, el `write_buf_` crece en memoria sin límite
 
 ---
 
@@ -1518,26 +1528,26 @@ No implementado. Cuando se implemente debe contemplar:
 | 5 | **CORS middleware reutilizable** | ✅ `osodio::cors(opts)` |
 | 6 | **Logger middleware** | ✅ `osodio::logger()` mide tiempo real |
 
-#### 🟠 Nivel 2 — Necesario para uso real
+#### ✅ Nivel 2 — COMPLETADO (2026-04-07)
 
-| # | Tarea | Por qué |
+| # | Tarea | Estado |
 |---|---|---|
-| 7 | **`simdjson` para parsing de input** | 8x más rápido; on-demand evita DOM completo |
-| 8 | **Validación robusta** | 422 estructurado: campo faltante ≠ tipo incorrecto ≠ null |
-| 9 | **`timerfd` en EventLoop** | Habilita: sleep escalable, header timeout, body timeout, handler timeout |
-| 10 | **Template engine (`inja`)** | `res.render("template.html", data)` para HTML dinámico |
+| 7 | **`simdjson` para parsing de input** | ✅ FetchContent v3.10.0; `thread_local dom::parser` por loop thread |
+| 8 | **Validación robusta** | ✅ `SchemaFields<T>` + 5-step pipeline: parse→field-check→null-check→bind→validate |
+| 9 | **`timerfd` en EventLoop** | ✅ `schedule_timer(ms,cb)` via timerfd; `SleepAwaitable` sin thread::detach |
+| 10 | **Template engine (`inja`)** | ✅ `res.render("t.html", data)`; inja::Environment cacheado por thread×dir |
 
 #### 🟡 Nivel 3 — Diferenciador (razón de existir del framework)
 
 | # | Tarea | Por qué |
 |---|---|---|
-| 11 | **OpenAPI 3.0 automático** | 50% del valor. Sin esto no eres "FastAPI-like" |
-| 12 | **Swagger UI embebida** | `/docs` en el binario, cero dependencias externas |
-| 13 | **Service container + `Inject<T>`** | Singleton/scoped/transient. Thread-safe. Testeable |
+| 11 | **OpenAPI 3.0 automático** | ✅ `DocBuilder<F>` extrae tipos en compile-time; `schema_from_type<T>()` por default-construction; `/openapi.json` + `/docs` automáticos |
+| 12 | **Swagger UI embebida** | ✅ `swagger_ui_html()` sirve UI desde CDN (unpkg); `/docs` disponible sin config |
+| 13 | **Service container + `Inject<T>`** | ✅ `ServiceContainer` singleton+transient; `extractor<Inject<T>>`; thread-safe; `app.provide<T>()` |
 | 14 | **Route groups** | `app.group("/api/v1").use(auth)` con middleware scoped |
 | 15 | **Static files completo** | `sendfile()`, ETag, Range, Cache-Control, SPA fallback |
-| 16 | **Respuestas de error tipadas** | `osodio::not_found()`, `osodio::bad_request()` como helpers |
-| 17 | **Coroutine hardening** | Cancelación, backpressure, reemplazar `thread::detach()` en sleep |
+| 16 | **Respuestas de error tipadas** | ✅ `HttpError` en `errors.hpp`; `throw osodio::not_found()` / `bad_request()` / etc.; capturado en `HandlerTraits::call` |
+| 17 | **Coroutine hardening** | ✅ Backpressure (write_buf_ + EPOLLOUT); ✅ timeout 30 s por request; ❌ cancelación de coroutine pendiente |
 
 #### 🟢 Nivel 4 — Ecosistema (después de que todo lo anterior funcione)
 

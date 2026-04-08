@@ -2,8 +2,6 @@
 #include <coroutine>
 #include <exception>
 #include <utility>
-#include <chrono>
-#include <thread>
 #include <functional>
 #include <osodio/core/event_loop.hpp>
 
@@ -162,9 +160,8 @@ struct Task<void> {
 };
 
 // ─── SleepAwaitable ──────────────────────────────────────────────────────────
-// Non-blocking sleep: suspends the coroutine and posts resume to the event
-// loop after `ms` milliseconds (via a detached thread — good enough for now;
-// a timerfd-based implementation would be more scalable).
+// Non-blocking sleep: suspends the coroutine and resumes it after `ms`
+// milliseconds via the event loop's timerfd (one-shot, no extra threads).
 
 struct SleepAwaitable {
     int ms;
@@ -174,17 +171,29 @@ struct SleepAwaitable {
 
     void await_suspend(std::coroutine_handle<> h) noexcept {
         if (!loop) { h.resume(); return; }
-        std::thread([ms = ms, loop = loop, h]() mutable {
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-            loop->post([h]() mutable { if (!h.done()) h.resume(); });
-        }).detach();
+        loop->schedule_timer(ms, [h]() mutable {
+            if (!h.done()) h.resume();
+        });
     }
 
     void await_resume() const noexcept {}
 };
 
+// Thread-local pointer to the event loop currently handling this request.
+// Set by HttpConnection::dispatch() before invoking any handler.
+// Allows sleep(ms) without explicitly passing req.loop.
+namespace detail {
+    inline thread_local core::EventLoop* current_loop = nullptr;
+}
+
+// sleep(ms, loop) — explicit loop (backward-compat, advanced use)
 inline SleepAwaitable sleep(int ms, core::EventLoop* loop) {
     return {ms, loop};
+}
+
+// sleep(ms) — uses the thread-local loop set for the current request
+inline SleepAwaitable sleep(int ms) {
+    return {ms, detail::current_loop};
 }
 
 } // namespace osodio

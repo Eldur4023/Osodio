@@ -5,15 +5,32 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ── llhttp (Node.js HTTP parser) ─────────────────────────────────────────────
-include(FetchContent)
-FetchContent_Declare(
-    llhttp
-    GIT_REPOSITORY https://github.com/nodejs/llhttp.git
-    GIT_TAG        release/v9.2.1
+# ── Vendored dependencies (third_party/) — 8 files, no network, no subdirs ───
+#
+#   third_party/
+#     simdjson.h / simdjson.cpp   — amalgamated single-file (v3.10.0)
+#     inja.hpp                    — single-include header-only (v3.4.0)
+#     nlohmann/json.hpp           — single-include header-only (v3.11.3)
+#     llhttp/include/llhttp.h     — Node.js HTTP parser header (v9.2.1)
+#     llhttp/src/{api,http,llhttp}.c
+
+# llhttp — compiled directly, no CMakeLists needed
+add_library(llhttp STATIC
+    third_party/llhttp/src/api.c
+    third_party/llhttp/src/http.c
+    third_party/llhttp/src/llhttp.c
 )
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(llhttp)
+target_include_directories(llhttp PUBLIC third_party/llhttp/include)
+
+# simdjson — amalgamated, compiled directly
+add_library(simdjson STATIC third_party/simdjson.cpp)
+target_include_directories(simdjson PUBLIC third_party)
+# simdjson amalgamation uses #include "simdjson.h" internally
+target_compile_options(simdjson PRIVATE -O2)
+
+# inja — header-only interface target
+add_library(inja INTERFACE)
+target_include_directories(inja INTERFACE third_party)
 
 # ── osodio library ────────────────────────────────────────────────────────────
 add_library(osodio STATIC
@@ -30,15 +47,15 @@ target_include_directories(osodio
     PRIVATE src
 )
 
-target_link_libraries(osodio PUBLIC llhttp_static)
+target_link_libraries(osodio PUBLIC llhttp simdjson inja)
 
 # ── example binary ───────────────────────────────────────────────────────────
 add_executable(example main.cpp)
 target_link_libraries(example PRIVATE osodio)
 
 # Warnings
-target_compile_options(osodio  PRIVATE -Wall -Wextra -Wpedantic)
-target_compile_options(example PRIVATE -Wall -Wextra)
+target_compile_options(osodio  PRIVATE -Wall -Wextra -Wpedantic -g)
+target_compile_options(example PRIVATE -Wall -Wextra -g)
 
 # make distclean
 add_custom_target(distclean

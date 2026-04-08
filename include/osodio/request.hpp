@@ -26,6 +26,10 @@ public:
     // Pointer to the event loop for scheduling tasks
     core::EventLoop* loop = nullptr;
 
+    // Pointer to the service container (set by App::run before dispatch).
+    // Non-owning: the App owns the container and outlives all requests.
+    class ServiceContainer* container = nullptr;
+
     // Convenience: get a header by name (case-insensitive)
     std::optional<std::string> header(std::string name) const {
         std::transform(name.begin(), name.end(), name.begin(), ::tolower);
