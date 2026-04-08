@@ -15,6 +15,8 @@
 #include <vector>
 #include <mutex>
 #include <functional>
+#include <sstream>
+#include <iomanip>
 
 namespace osodio {
 
@@ -40,17 +42,28 @@ static const char* mime_for_ext(const std::string& ext) {
     return "application/octet-stream";
 }
 
+// Weak ETag from mtime + size: "mtime-size" hex-encoded.
+static std::string make_etag(const std::filesystem::file_time_type& mtime,
+                              std::uintmax_t size) {
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  mtime.time_since_epoch()).count();
+    std::ostringstream ss;
+    ss << '"' << std::hex << ns << '-' << size << '"';
+    return ss.str();
+}
+
 // Returns true and fills res if a static mount covers this path.
+// Sets ETag, Cache-Control, and honours If-None-Match for 304 responses.
 static bool try_serve_static(
     const std::vector<App::StaticMount>& mounts,
-    const std::string& req_path,
+    const Request& req,
     Response& res)
 {
     namespace fs = std::filesystem;
     for (const auto& m : mounts) {
-        if (req_path.rfind(m.prefix, 0) != 0) continue;
+        if (req.path.rfind(m.prefix, 0) != 0) continue;
 
-        std::string rel = req_path.substr(m.prefix.size());
+        std::string rel = req.path.substr(m.prefix.size());
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
         fs::path file = fs::path(m.root) / rel.substr(1);
@@ -64,17 +77,46 @@ static bool try_serve_static(
             return true;
         }
 
-        if (!fs::exists(canonical_file) || !fs::is_regular_file(canonical_file)) {
+        std::error_code ec;
+        auto status = fs::status(canonical_file, ec);
+        if (ec || !fs::is_regular_file(status)) {
             res.status(404).json({{"error", "Not Found"}});
             return true;
         }
 
+        // ── ETag ──────────────────────────────────────────────────────────────
+        auto mtime    = fs::last_write_time(canonical_file, ec);
+        auto filesize = fs::file_size(canonical_file, ec);
+        std::string etag = make_etag(mtime, filesize);
+
+        // ── Cache-Control ─────────────────────────────────────────────────────
+        // Hashed filenames (e.g. app.abc123.js) → immutable for 1 year.
+        // Everything else → must-revalidate with short max-age.
+        const std::string& ext = canonical_file.extension().string();
+        const std::string  stem = canonical_file.stem().string();
+        bool looks_hashed = stem.size() > 8 &&
+                            stem.find('.') != std::string::npos; // app.abc123
+        const char* cache_ctrl = looks_hashed
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=3600, must-revalidate";
+
+        res.header("ETag",          etag);
+        res.header("Cache-Control", cache_ctrl);
+
+        // ── 304 Not Modified ──────────────────────────────────────────────────
+        auto inm = req.header("if-none-match");
+        if (inm && *inm == etag) {
+            res.status(304).send("");
+            return true;
+        }
+
+        // ── Read and serve ────────────────────────────────────────────────────
         std::ifstream f(canonical_file, std::ios::binary);
         if (!f) { res.status(500).json({{"error", "Could not read file"}}); return true; }
 
         std::string body{std::istreambuf_iterator<char>(f),
                          std::istreambuf_iterator<char>()};
-        const char* mime = mime_for_ext(canonical_file.extension().string());
+        const char* mime = mime_for_ext(ext);
         res.header("Content-Type", mime).send(std::move(body));
         return true;
     }
@@ -117,7 +159,7 @@ void App::run(const std::string& host, uint16_t port) {
 
         // Static file mounts bypass the middleware chain.
         if (req.method == "GET" || req.method == "HEAD") {
-            if (try_serve_static(static_mounts_, req.path, res)) co_return;
+            if (try_serve_static(static_mounts_, req, res)) co_return;
         }
 
         // ── Async middleware chain ─────────────────────────────────────────
@@ -182,7 +224,7 @@ void App::run(const std::string& host, uint16_t port) {
             }
             // Each TcpServer binds to the same port via SO_REUSEPORT; the
             // kernel load-balances incoming connections across all loops.
-            core::TcpServer server(host, port, loop, dispatch);
+            core::TcpServer server(host, port, loop, dispatch, max_connections_);
             loop.run();
         });
     }
@@ -193,7 +235,7 @@ void App::run(const std::string& host, uint16_t port) {
         std::lock_guard<std::mutex> lk(loops_mutex);
         all_loops.push_back(&main_loop);
     }
-    core::TcpServer main_server(host, port, main_loop, dispatch);
+    core::TcpServer main_server(host, port, main_loop, dispatch, max_connections_);
 
     std::cout << " * Osodio running on http://" << host << ":" << port
               << "  (threads=" << num_threads << ", press CTRL+C to quit)\n";

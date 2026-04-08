@@ -1,16 +1,37 @@
 # Osodio
 
-A C++20 web framework with FastAPI/Flask ergonomics. Single header include, zero runtime dependencies, epoll-based event loop.
+C++20 web framework with FastAPI/Flask ergonomics. epoll event loop, C++20 coroutines, zero network dependencies.
 
 ```cpp
 #include <osodio/osodio.hpp>
 using namespace osodio;
 
+struct User {
+    std::string name;
+    int age;
+    OSODIO_SCHEMA(User, name, age)
+    OSODIO_VALIDATE(
+        check(name.size() > 0, "Name required"),
+        check(age >= 18, "Must be 18+")
+    )
+};
+
 int main() {
     App app;
-    app.get("/hello", [](Request&, Response& res) {
-        res.json({{"message", "Hello, world!"}});
+
+    app.use(osodio::logger());
+    app.use(osodio::compress());
+    app.use(osodio::cors({.origins = {"http://localhost:5173"}}));
+
+    app.post("/users", [](User user) {
+        return nlohmann::json{{"name", user.name}, {"age", user.age}};
     });
+
+    app.get("/users/:id", [](PathParam<int, "id"> id) -> Task<nlohmann::json> {
+        co_await sleep(10);
+        co_return nlohmann::json{{"id", (int)id}};
+    });
+
     app.run(8080);
 }
 ```
@@ -21,17 +42,23 @@ int main() {
 
 | | |
 |---|---|
-| Routing | Radix tree, `:param` segments, `*` wildcards |
-| Handler injection | `PathParam`, `Query`, `Body`, `Request&`, `Response&` auto-extracted from lambda signature |
-| JSON | `OSODIO_SCHEMA` generates `to_json`/`from_json` via nlohmann/json |
-| Validation | `OSODIO_VALIDATE` + `check()` inside structs; violations → 422 automatically |
-| Async | C++20 `Task<T>` coroutines, `co_await sleep(ms)`, chained `co_await Task<U>` |
-| Middleware | `app.use()` with ordered `next()` continuation |
-| Static files | `app.serve_static(prefix, dir)` with MIME detection and path-traversal protection |
-| Error handlers | `app.on_error(code, fn)` and catch-all `app.on_error(fn)` |
-| Templates | `res.html("page.html")` loads from `./templates/` (configurable) |
-| HTTP/1.1 | Keep-alive, incremental parser, `Content-Length` |
-| No dependencies | nlohmann/json vendored in `third_party/` |
+| **Routing** | Radix tree, `:param` and `{param}` styles, `*` wildcards |
+| **Handler injection** | `PathParam`, `Query`, body structs, `Inject<T>`, `Request&`, `Response&` — auto-extracted from signature |
+| **Body parsing** | Any `OSODIO_SCHEMA` struct as a bare parameter — no `Body<>` wrapper needed |
+| **Optional fields** | `OSODIO_OPTIONAL` marks fields that may be absent in the body (PATCH-friendly) |
+| **Validation** | `OSODIO_VALIDATE` + `check()` inside the struct; violations → 422 automatically |
+| **Async** | C++20 `Task<T>` coroutines, `co_await sleep(ms)`, `co_await Task<U>` chaining |
+| **Route groups** | `app.group("/api/v1").use(auth)` — prefix + per-group middleware |
+| **Middleware** | Global `app.use()` chain and per-group; ordered `next()` continuation |
+| **Dependency injection** | `app.provide<T>(...)` / `Inject<T>` in handler params |
+| **Error handlers** | `app.on_error(code, fn)` and catch-all |
+| **Static files** | `app.serve_static(prefix, dir)` with MIME, ETag, Cache-Control, 304 support |
+| **Templates** | `res.render("page.html", data)` via inja (Jinja2-compatible) |
+| **OpenAPI + Swagger** | `/openapi.json` and `/docs` (Swagger UI) auto-generated at startup |
+| **HTTP/1.1** | Keep-alive, incremental llhttp parser, non-blocking writes, backpressure |
+| **Security** | Slowloris protection (5s header timeout), connection limit, path traversal blocked |
+| **Compression** | `osodio::compress()` middleware — gzip, negotiated via Accept-Encoding |
+| **Vendored deps** | 8 files in `third_party/` — no network on cmake |
 
 ---
 
@@ -41,53 +68,75 @@ int main() {
 #include <osodio/osodio.hpp>
 using namespace osodio;
 
-struct User {
+// ── Schema + validation inside the struct ────────────────────────────────────
+struct CreateUser {
     std::string name;
-    int age;
-
-    OSODIO_VALIDATE(User,
-        check(name.size() >= 2, "Name too short"),
-        check(age >= 18,        "Must be 18 or older")
+    int         age;
+    std::optional<std::string> email;  // optional field
+    OSODIO_SCHEMA(CreateUser, name, age, email)
+    OSODIO_OPTIONAL(email)
+    OSODIO_VALIDATE(
+        check(name.size() >= 2,  "Name too short"),
+        check(age >= 18,         "Must be 18+")
     )
 };
-OSODIO_SCHEMA(User, name, age)   // generates from_json / to_json
+
+// ── Service injected via Inject<T> ───────────────────────────────────────────
+struct DB {
+    std::vector<CreateUser> users;
+};
 
 int main() {
     App app;
+    app.provide(std::make_shared<DB>());
+    app.api_info("My API", "1.0.0");   // visible at /docs
+    app.max_connections(5'000);
 
-    // Middleware (runs before every route)
-    app.use([](Request& req, Response&, auto next) {
-        std::cout << req.method << " " << req.path << "\n";
-        next();
+    // Global middleware
+    app.use(osodio::logger());
+    app.use(osodio::compress());
+    app.use(osodio::cors({.origins = {"http://localhost:5173"}}));
+
+    // Route group with its own middleware
+    auto api = app.group("/api/v1");
+    api.use([](Request&, Response& res, auto next) -> Task<void> {
+        res.header("X-API-Version", "1");
+        co_await next();
     });
 
-    // Static files: GET /static/* → ./public/*
-    app.serve_static("/static", "./public");
-
-    // Simple GET
-    app.get("/ping", [](Request&, Response& res) {
-        res.json({{"status", "ok"}});
+    // Body auto-extracted and validated → 422 on failure
+    api.post("/users", [](CreateUser user, Inject<DB> db) {
+        db->users.push_back(user);
+        return nlohmann::json{{"id", db->users.size()}, {"name", user.name}};
     });
 
-    // Path parameter
-    app.get("/users/:id", [](PathParam<int, "id"> id, Response& res) {
-        res.json({{"id", id.value}});
+    // PATCH with optional fields — only send what you want to change
+    api.patch("/users/:id", [](PathParam<int,"id"> id,
+                                CreateUser patch, Inject<DB> db) {
+        if (id.value < 1 || id.value > (int)db->users.size())
+            throw osodio::not_found("User not found");
+        auto& u = db->users[id.value - 1];
+        u.name = patch.name;
+        return nlohmann::json{{"name", u.name}};
     });
 
-    // Body parsing + automatic validation (returns 422 on failure)
-    app.post("/users", [](Body<User> user) {
-        return nlohmann::json{{"created", user->name}};
+    // Query params with defaults
+    api.get("/users", [](Query<int,"page","1"> page,
+                          Query<int,"limit","20"> limit,
+                          Inject<DB> db) -> nlohmann::json {
+        return {{"page", (int)page}, {"limit", (int)limit},
+                {"total", db->users.size()}};
     });
 
-    // Async coroutine
-    app.get("/slow", [](Request& req) -> Task<nlohmann::json> {
-        co_await sleep(200, req.loop);
+    // Async handler — sleep doesn't block the event loop
+    app.get("/slow", []() -> Task<nlohmann::json> {
+        co_await sleep(200);
         co_return nlohmann::json{{"done", true}};
     });
 
-    // Custom error pages
+    // Error handlers
     app.on_error(404, [](int, Request& req, Response& res) {
-        res.html("404.html");
+        res.json({{"error", "Not Found"}, {"path", req.path}});
     });
 
     app.run(8080);
@@ -102,12 +151,16 @@ int main() {
 
 ```cpp
 App app;
-app.run(8080);                          // 0.0.0.0:8080
-app.run("127.0.0.1", 3000);            // specific host
-app.run();                              // 0.0.0.0:5000 (default)
+app.run(8080);                       // 0.0.0.0:8080
+app.run("127.0.0.1", 3000);
+app.run();                           // 0.0.0.0:5000 (default)
+
+app.api_info("My API", "1.0.0");    // shown in /docs
+app.max_connections(10'000);         // 503 beyond this limit (default: 10 000)
+app.set_templates("./views");        // template root (default: ./templates)
 ```
 
-#### Routing
+### Routing
 
 ```cpp
 app.get   ("/path", handler);
@@ -115,234 +168,194 @@ app.post  ("/path", handler);
 app.put   ("/path", handler);
 app.patch ("/path", handler);
 app.del   ("/path", handler);
-app.any   ("/path", handler);           // all methods
+app.any   ("/path", handler);        // all methods
 ```
 
 Route patterns:
-- `/users/:id` — named parameter, extracted as `PathParam<T, "id">`
-- `/files/*` — wildcard, matches anything after `/files/`
-- `/users/{id}` — `{id}` syntax also supported (converted to `:id`)
+- `/users/:id` — named parameter → `PathParam<T, "id">`
+- `/users/{id}` — same, `{}` syntax also supported
+- `/files/*` — wildcard, matches everything after `/files/`
 
-#### Middleware
-
-```cpp
-app.use([](Request& req, Response& res, auto next) {
-    // runs before the handler
-    next();
-    // runs after the handler (if sync)
-});
-```
-
-Middleware runs in registration order. Calling `next()` advances to the next middleware or the router. Not calling `next()` short-circuits the chain.
-
-#### Static Files
+### Route Groups
 
 ```cpp
-app.serve_static("/static", "./public");
-// GET /static/app.js   → ./public/app.js
-// GET /static/img/x.png → ./public/img/x.png
+auto api = app.group("/api/v1");
+api.use(auth_middleware);            // runs only for routes in this group
+
+auto admin = api.group("/admin");    // inherits api's middleware
+admin.use(admin_only_middleware);    // adds on top
+admin.get("/stats", get_stats);     // → GET /api/v1/admin/stats
 ```
-
-MIME types detected from extension: `.html`, `.css`, `.js`, `.json`, `.svg`, `.png`, `.jpg`, `.gif`, `.webp`, `.ico`, `.woff`, `.woff2`, `.ttf`, `.pdf`, `.xml`, `.txt`. Anything else → `application/octet-stream`. Path traversal (`../`) is blocked with 403.
-
-Multiple mounts are supported; first match wins.
-
-#### Error Handlers
-
-```cpp
-app.on_error(404, [](int code, Request& req, Response& res) {
-    res.status(404).html("404.html");
-});
-
-app.on_error(500, [](int code, Request&, Response& res) {
-    res.status(500).json({{"error", "Internal error"}});
-});
-
-// Catch-all (runs if no specific handler matches)
-app.on_error([](int code, Request&, Response& res) {
-    res.json({{"error", "Unexpected error"}, {"code", code}});
-});
-```
-
-Error handlers run after the route handler (and any middleware). They only fire when `status_code >= 400`. The specific-code handler takes precedence over the catch-all.
-
-#### Templates
-
-```cpp
-app.set_templates("./views");   // default: "./templates"
-
-app.get("/", [](Request&, Response& res) {
-    res.html("index.html");     // loads ./views/index.html
-});
-```
-
----
 
 ### Handler Arguments
 
-Arguments are resolved automatically from the lambda signature — any combination, any order.
+Any combination, any order — resolved from the lambda signature automatically.
 
-| Type | Resolves from |
-|------|--------------|
-| `Request&` | The current request |
-| `Response&` | The current response |
-| `PathParam<T, "name">` | URL segment `:name`, converted to `T` |
-| `Query<T, "name">` | Query string `?name=value`, converted to `T` |
-| `Body<T>` | Request body parsed as JSON into `T` |
+| Type | Source |
+|------|--------|
+| `Request&` | Current request |
+| `Response&` | Current response |
+| `PathParam<T, "name">` | URL segment `:name` → converted to `T` |
+| `Query<T, "name">` | `?name=value` → `T`; absent → `T{}` |
+| `Query<T, "name", "default">` | same, absent → converted from `"default"` |
+| `Inject<T>` | Service resolved from container (500 if not registered) |
+| Any `OSODIO_SCHEMA` struct | Request body, parsed + validated automatically |
+| `Body<T>` | Same as above, explicit wrapper with `operator bool` |
 
-Supported `T` for `PathParam` and `Query`: `int`, `long`, `float`, `double`, `std::string`.
+Supported `T` for `PathParam` / `Query`: `int`, `long`, `float`, `double`, `bool`, `std::string`.
 
-```cpp
-// All arguments are optional and independent
-app.get("/items/:id", [](PathParam<int, "id"> id, Query<int, "limit"> limit) {
-    // id.value, limit.value
-});
-
-app.post("/items", [](Body<Item> item, Response& res) {
-    if (item->name.empty()) { res.status(400).json({{"error","bad"}}); return; }
-    res.status(201).json({{"id", 1}});
-});
-```
-
----
-
-### Response
-
-```cpp
-res.status(201)                          // set status code (chainable)
-res.json({{"key", "value"}})            // Content-Type: application/json
-res.html("page.html")                   // load template file
-res.html("<h1>Hello</h1>")             // inline HTML string
-res.text("plain text")                  // Content-Type: text/plain
-res.send("raw body")                    // set body without Content-Type
-res.header("X-Custom", "value")        // set arbitrary header
-```
-
-Handlers that take `Response&` use the builder API. Handlers that *return* a value have it serialized to JSON automatically:
-
-```cpp
-// These are equivalent:
-app.get("/a", [](Response& res) { res.json({{"x", 1}}); });
-app.get("/b", []() { return nlohmann::json{{"x", 1}}; });
-app.get("/c", []() -> MyStruct { return {1, "hello"}; }); // needs OSODIO_SCHEMA
-```
-
----
-
-### Request
-
-```cpp
-req.method                          // "GET", "POST", etc.
-req.path                            // "/users/42"
-req.body                            // raw body string
-req.headers                         // std::unordered_map (lowercase keys)
-req.params                          // path params: params["id"]
-req.query                           // query params: query["page"]
-req.loop                            // event loop pointer (for coroutines)
-
-req.header("content-type")         // std::optional<std::string>
-req.query_param("page", "1")       // with default value
-```
-
----
-
-### JSON Serialization — OSODIO_SCHEMA
+### Defining Schemas
 
 ```cpp
 struct Product {
     int         id;
     std::string name;
     double      price;
-};
-OSODIO_SCHEMA(Product, id, name, price)   // must be outside the struct
-```
+    std::optional<std::string> description;  // may be absent in body
 
-This generates `from_json` and `to_json` via nlohmann/json's `NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE`. Once defined:
-- `Body<Product>` deserializes the request JSON automatically.
-- Returning `Product` from a handler serializes it to JSON automatically.
-
----
-
-### Validation — OSODIO_VALIDATE
-
-```cpp
-struct CreateUser {
-    std::string email;
-    std::string name;
-    int         age;
-
-    OSODIO_VALIDATE(CreateUser,
-        check(name.size() >= 2,        "Name must be at least 2 characters"),
-        check(age >= 18 && age <= 120,  "Age must be between 18 and 120"),
-        check(email.find('@') != std::string::npos, "Invalid email")
+    OSODIO_SCHEMA(Product, id, name, price, description)
+    OSODIO_OPTIONAL(description)             // absence allowed; null → std::nullopt
+    OSODIO_VALIDATE(
+        check(price > 0,      "Price must be positive"),
+        check(name.size() > 0, "Name required")
     )
 };
-OSODIO_SCHEMA(CreateUser, email, name, age)
 ```
 
-- `check(condition, message)` — adds `message` to the error list if `condition` is false.
-- Multiple `check` calls are all evaluated; all failures are reported at once.
-- When used with `Body<T>`, a failed validation automatically returns 422 with:
-  ```json
-  { "error": "Validation Failed", "messages": ["Name must be at least 2 characters"] }
-  ```
-- To call validation manually: `validate(obj)` — throws `osodio::ValidationError` on failure.
+- `OSODIO_SCHEMA` — generates `from_json` / `to_json`. Place inside the struct.
+- `OSODIO_OPTIONAL` — fields that may be missing from the request body. Must be `std::optional<T>`.
+- `OSODIO_VALIDATE` — business rules. `check(cond, msg)` adds to error list on failure.
+- Missing required fields → 422. Failed `check` → 422 with all messages at once.
 
----
-
-### Async — Task\<T\>
+### Response
 
 ```cpp
-app.get("/data", [](Request& req) -> Task<nlohmann::json> {
-    co_await sleep(100, req.loop);             // non-blocking wait
-    co_return nlohmann::json{{"data", "..."}};
+res.status(201)
+res.json({{"key", "value"}})
+res.html("page.html")               // load from templates dir
+res.html("<h1>Hello</h1>")          // inline HTML
+res.text("plain text")
+res.send("raw body")
+res.header("X-Custom", "value")
+res.render("index.html", data)      // inja template with JSON data
+```
+
+Handlers can also return a value — it's serialized to JSON automatically:
+
+```cpp
+app.get("/a", [](Response& res) { res.json({{"x",1}}); });   // explicit
+app.get("/b", []() { return nlohmann::json{{"x",1}}; });      // return value
+app.get("/c", []() -> Product { return {1,"item",9.99}; });   // OSODIO_SCHEMA struct
+```
+
+### Async
+
+```cpp
+app.get("/slow", []() -> Task<nlohmann::json> {
+    co_await sleep(100);                      // non-blocking, no req.loop needed
+    co_return nlohmann::json{{"done", true}};
 });
-```
 
-- `Task<T>` is the coroutine return type.
-- `co_await sleep(ms, req.loop)` suspends without blocking the event loop thread.
-- Other handlers continue executing during the suspension.
-- `req.loop` must be passed to `sleep()` and to any nested task that needs scheduling.
-
-Chaining tasks:
-
-```cpp
-Task<std::string> fetch(core::EventLoop* loop) {
-    co_await sleep(50, loop);
-    co_return std::string("result");
+// Chain tasks
+Task<std::string> fetch_data() {
+    co_await sleep(50);
+    co_return std::string{"result"};
 }
 
-app.get("/chain", [](Request& req) -> Task<nlohmann::json> {
-    auto s = co_await fetch(req.loop);
+app.get("/chain", []() -> Task<nlohmann::json> {
+    auto s = co_await fetch_data();
     co_return nlohmann::json{{"value", s}};
 });
 ```
 
-`Task<void>` is also supported for fire-and-forget operations.
+### Middleware
+
+```cpp
+// Global
+app.use([](Request& req, Response& res, auto next) -> Task<void> {
+    // before handler
+    co_await next();
+    // after handler
+});
+
+// Built-in
+app.use(osodio::logger());
+app.use(osodio::compress());                          // gzip, negotiated
+app.use(osodio::compress({.min_size=512, .level=9})); // options
+app.use(osodio::cors({
+    .origins     = {"https://app.example.com"},
+    .credentials = true,
+    .max_age     = 86400,
+}));
+```
+
+### Dependency Injection
+
+```cpp
+// Register at startup
+app.provide(std::make_shared<Database>(conn_str));   // singleton
+app.provide<Logger>([]{ return std::make_shared<Logger>(); }); // transient
+
+// Use in any handler
+app.get("/users", [](Inject<Database> db) -> nlohmann::json {
+    // db->query(...)
+});
+```
+
+### Error Handling
+
+```cpp
+// Throw from any handler — caught automatically
+throw osodio::not_found("User not found");       // 404
+throw osodio::bad_request("Missing field");      // 400
+throw osodio::unauthorized("Invalid token");     // 401
+throw osodio::forbidden("No access");            // 403
+throw osodio::conflict("Already exists");        // 409
+throw osodio::unprocessable("Invalid data");     // 422
+throw osodio::too_many_requests("Slow down");    // 429
+throw osodio::internal_error("DB error");        // 500
+
+// Register error handlers
+app.on_error(404, [](int, Request& req, Response& res) {
+    res.json({{"error","Not Found"},{"path",req.path}});
+});
+app.on_error([](int code, Request&, Response& res) {
+    res.json({{"error","Something went wrong"},{"code",code}});
+});
+```
+
+### OpenAPI / Swagger
+
+```cpp
+app.api_info("My API", "1.0.0");
+// Then visit:
+//   GET /openapi.json  — OpenAPI 3.0 spec
+//   GET /docs          — Swagger UI
+```
 
 ---
 
 ## Building
 
-Requires **CMake 3.20+** and a **C++20** compiler (GCC 11+ or Clang 13+). Linux only (uses epoll).
+Requires **CMake 3.20+**, **C++20** compiler (GCC 11+ or Clang 13+), **Linux** (epoll), **zlib** (system).
 
 ```bash
-# In-source (simplest)
-cmake .
-make
-
-# Out-of-tree
 cmake -S . -B build
-make -C build
-
-# Run the example
-./example
-
-# Clean build artifacts
-make distclean
+cmake --build build -j$(nproc)
+./build/example
 ```
 
-The `osodio` static library is built from `src/`. Link your own project against it:
+All dependencies are vendored in `third_party/` (8 files total) — no network access during cmake.
+
+```
+third_party/
+  nlohmann/json.hpp   — JSON (v3.11.3)
+  simdjson.h/.cpp     — fast JSON parser, amalgamated (v3.10.0)
+  inja.hpp            — Jinja2 templates, single-include (v3.4.0)
+  llhttp/             — HTTP/1.1 parser from Node.js (v9.2.1)
+```
+
+To use Osodio in your own project:
 
 ```cmake
 add_subdirectory(osodio)
@@ -355,24 +368,40 @@ target_link_libraries(myapp PRIVATE osodio)
 
 | Feature | Status |
 |---------|--------|
-| Radix tree router (`:param`, `*`) | Done |
-| Middleware (`app.use`) | Done |
-| Handler dependency injection | Done |
-| `OSODIO_SCHEMA` — auto JSON serialization | Done |
-| `OSODIO_VALIDATE` + `check()` | Done |
-| `Body<T>` with automatic validation | Done |
-| `PathParam<T, "name">` | Done |
-| `Query<T, "name">` | Done |
-| C++20 `Task<T>` coroutines | Done |
-| `co_await sleep(ms)` | Done |
-| Chained `co_await Task<U>` | Done |
-| HTML template serving | Done |
-| Static file server (`app.serve_static`) | Done |
-| Global error handlers (`app.on_error`) | Done |
-| HTTP/1.1 keep-alive | Done |
-| epoll event loop | Done |
-| Vendored nlohmann/json | Done |
-| HTTPS / TLS | Not started |
-| Multipart / form-data | Not started |
-| WebSockets | Not started |
-| OpenAPI / Swagger generation | Not started |
+| Radix tree router (`:param`, `*`, `{}`) | ✅ Done |
+| Route groups with per-group middleware | ✅ Done |
+| Handler dependency injection (all param types) | ✅ Done |
+| `OSODIO_SCHEMA` — body auto-extract, no wrapper needed | ✅ Done |
+| `OSODIO_OPTIONAL` — optional fields, `std::optional<T>` support | ✅ Done |
+| `OSODIO_VALIDATE` + `check()` | ✅ Done |
+| `PathParam<T, "name">` | ✅ Done |
+| `Query<T, "name", "default">` — with default values | ✅ Done |
+| `Inject<T>` — singleton + transient DI | ✅ Done |
+| `Body<T>` — explicit body wrapper | ✅ Done |
+| Typed HTTP errors (`not_found()`, `bad_request()`, …) | ✅ Done |
+| C++20 `Task<T>` coroutines | ✅ Done |
+| `co_await sleep(ms)` — no `req.loop` needed | ✅ Done |
+| epoll event loop, non-blocking I/O | ✅ Done |
+| HTTP/1.1 keep-alive, backpressure (EPOLLOUT) | ✅ Done |
+| Slowloris protection (5s header timeout) | ✅ Done |
+| Request timeout (30s handler + write) | ✅ Done |
+| Connection limit (`max_connections`) | ✅ Done |
+| `compress()` middleware — gzip | ✅ Done |
+| `cors()` middleware — full preflight | ✅ Done |
+| `logger()` middleware | ✅ Done |
+| Static files — MIME, ETag, Cache-Control, 304 | ✅ Done |
+| HTML templates via inja (Jinja2-compatible) | ✅ Done |
+| OpenAPI 3.0 + Swagger UI at `/docs` | ✅ Done |
+| Global error handlers | ✅ Done |
+| Vendored deps (8 files, no cmake network) | ✅ Done |
+| write_buf copy-free (offset, no substr) | ✅ Done |
+| Backpressure buffer limit (OOM protection) | 🔴 Pending |
+| Coroutine cancellation (zombie tasks) | 🔴 Pending |
+| WebSockets | ⬜ Not started |
+| Server-Sent Events (SSE) | ⬜ Not started |
+| Multipart / form-data | ⬜ Not started |
+| HTTPS / TLS | ⬜ Not started |
+| HTTP/2 | ⬜ Not started |
+| Rate limiting middleware | ⬜ Not started |
+| `helmet()` security headers middleware | ⬜ Not started |
+| SPA fallback in static files | ⬜ Not started |

@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <memory>
+#include <atomic>
 #include <cstdint>
 #include "http_parser.hpp"
 #include <osodio/core/event_loop.hpp>
@@ -10,7 +11,8 @@ namespace osodio::http {
 
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
-    HttpConnection(int fd, core::EventLoop& loop, osodio::DispatchFn dispatch);
+    HttpConnection(int fd, core::EventLoop& loop, osodio::DispatchFn dispatch,
+                   std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~HttpConnection();
 
     void on_event(uint32_t events);
@@ -21,6 +23,7 @@ private:
     osodio::DispatchFn dispatch_;
     HttpParser         parser_;
     bool               closed_       = false;
+    std::shared_ptr<std::atomic<int>> conn_count_; // decremented on close()
 
     // ── Write buffer ─────────────────────────────────────────────────────────
     // Non-blocking writes: if send buffer is full (EAGAIN), data is queued here
@@ -29,10 +32,15 @@ private:
     size_t      write_offset_ = 0;
     bool        keep_alive_   = false;  // stored here so on_write_complete can act
 
-    // ── Request timeout ───────────────────────────────────────────────────────
-    // Timer armed when dispatch() starts; cancelled in on_write_complete().
-    // Fires 408 if the handler + response write take longer than kTimeoutMs.
-    static constexpr int kTimeoutMs = 30'000;
+    // ── Timeouts ──────────────────────────────────────────────────────────────
+    // kHeaderTimeoutMs: armed at construction; fires 408 if complete headers are
+    //   not received within this window (Slowloris defence).
+    //   Cancelled in dispatch() once headers are fully parsed.
+    // kRequestTimeoutMs: armed in dispatch(); fires 408 if handler + write take
+    //   too long.  Cancelled in on_write_complete().
+    static constexpr int kHeaderTimeoutMs  = 5'000;
+    static constexpr int kRequestTimeoutMs = 30'000;
+    int header_tfd_  = -1;
     int timeout_tfd_ = -1;
 
     void do_read();

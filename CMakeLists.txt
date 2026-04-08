@@ -47,7 +47,8 @@ target_include_directories(osodio
     PRIVATE src
 )
 
-target_link_libraries(osodio PUBLIC llhttp simdjson inja)
+find_package(ZLIB REQUIRED)
+target_link_libraries(osodio PUBLIC llhttp simdjson inja ZLIB::ZLIB)
 
 # ── example binary ───────────────────────────────────────────────────────────
 add_executable(example main.cpp)

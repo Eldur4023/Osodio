@@ -13,6 +13,14 @@ struct User {
     )
 };
 
+// PATCH body: todos los campos son opcionales
+struct UserPatch {
+    std::optional<std::string> name;
+    std::optional<int> age;
+    OSODIO_SCHEMA(UserPatch, name, age)
+    OSODIO_OPTIONAL(name, age)
+};
+
 // ── Demo service injected via Inject<T> ─────────────────────────────────────
 struct UserStore {
     // In a real app this would hold a DB connection pool, etc.
@@ -30,8 +38,12 @@ int main() {
     // ── Dependency injection ─────────────────────────────────────────────────
     app.provide(std::make_shared<UserStore>());
 
+    // ── Limits ───────────────────────────────────────────────────────────────
+    app.max_connections(5'000);
+
     // ── Built-in middleware ──────────────────────────────────────────────────
     app.use(osodio::logger());
+    app.use(osodio::compress());
     app.use(osodio::cors({
         .origins = {"http://localhost:5173", "http://localhost:3000"},
     }));
@@ -67,6 +79,40 @@ int main() {
         if (idx < 0 || idx >= static_cast<int>(store->users.size()))
             throw osodio::not_found("User not found");
         return store->users[idx];
+    });
+
+    // ── Route group with prefix + middleware ─────────────────────────────────
+    auto api = app.group("/api");
+    api.use([](Request&, Response& res, auto next) -> Task<void> {
+        res.header("X-API-Version", "1");
+        co_await next();
+    });
+
+    api.get("/users", [](Inject<UserStore> store) -> nlohmann::json {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& u : store->users)
+            arr.push_back({{"name", u.name}, {"age", u.age}});
+        return arr;
+    });
+
+    // Query params with defaults: ?page=1&limit=10
+    api.get("/users/search", [](Query<int, "page", "1"> page,
+                                Query<int, "limit", "10"> limit,
+                                Query<std::string, "q"> q) -> nlohmann::json {
+        return {{"page", (int)page}, {"limit", (int)limit}, {"q", (std::string)q}};
+    });
+
+    // PATCH with optional fields — send only the fields you want to change
+    api.patch("/users/:id", [](PathParam<int, "id"> id,
+                                UserPatch patch,
+                                Inject<UserStore> store) -> nlohmann::json {
+        int idx = id.value - 1;
+        if (idx < 0 || idx >= static_cast<int>(store->users.size()))
+            throw osodio::not_found("User not found");
+        auto& u = store->users[idx];
+        if (patch.name) u.name = *patch.name;
+        if (patch.age)  u.age  = *patch.age;
+        return {{"name", u.name}, {"age", u.age}};
     });
 
     // Plain User — auto-extracted from body, no Body<> wrapper needed.

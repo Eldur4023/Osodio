@@ -102,8 +102,12 @@ public:
 
     void set_templates_dir(const std::string& dir) { state_->templates_dir = dir; }
 
-    int         status_code() const { return state_->status_code; }
-    const std::string& body() const { return state_->body; }
+    int                status_code()  const { return state_->status_code; }
+    const std::string& body()         const { return state_->body; }
+    std::string        content_type() const {
+        auto it = state_->headers.find("Content-Type");
+        return (it != state_->headers.end()) ? it->second : "";
+    }
 
     std::string build() const {
         std::ostringstream os;

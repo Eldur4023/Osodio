@@ -16,3 +16,4 @@
 #include "openapi.hpp"
 #include "errors.hpp"
 #include "di.hpp"
+#include "group.hpp"

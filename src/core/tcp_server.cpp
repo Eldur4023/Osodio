@@ -16,8 +16,12 @@
 namespace osodio::core {
 
 TcpServer::TcpServer(const std::string& host, uint16_t port,
-                     EventLoop& loop, osodio::DispatchFn dispatch)
-    : loop_(loop), dispatch_(std::move(dispatch))
+                     EventLoop& loop, osodio::DispatchFn dispatch,
+                     int max_connections)
+    : loop_(loop)
+    , dispatch_(std::move(dispatch))
+    , max_connections_(max_connections)
+    , conn_count_(std::make_shared<std::atomic<int>>(0))
 {
     // Usamos IPv4 cuando el host lo indica (0.0.0.0 o IP v4)
     // y IPv6 solo cuando se pide explícitamente (::)
@@ -78,8 +82,24 @@ void TcpServer::on_accept() {
             break;
         }
 
+        // Reject if at connection limit — send 503 and close immediately.
+        int current = conn_count_->fetch_add(1, std::memory_order_relaxed);
+        if (current >= max_connections_) {
+            conn_count_->fetch_sub(1, std::memory_order_relaxed);
+            // Write a minimal 503 without allocating an HttpConnection.
+            const char resp[] =
+                "HTTP/1.1 503 Service Unavailable\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: 29\r\n"
+                "Connection: close\r\n\r\n"
+                "{\"error\":\"Too many connections\"}";
+            (void)::write(client_fd, resp, sizeof(resp) - 1);
+            ::close(client_fd);
+            continue;
+        }
+
         auto conn = std::make_shared<http::HttpConnection>(
-            client_fd, loop_, dispatch_);
+            client_fd, loop_, dispatch_, conn_count_);
 
         loop_.add(client_fd, EPOLLIN, [conn](uint32_t events) {
             conn->on_event(events);

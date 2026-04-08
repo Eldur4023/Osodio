@@ -3,6 +3,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <zlib.h>
 #include "types.hpp"
 #include "request.hpp"
 #include "response.hpp"
@@ -112,6 +114,79 @@ inline Middleware cors(CorsOptions opts = {}) {
         }
 
         co_await next();
+    };
+}
+
+// ─── compress() ───────────────────────────────────────────────────────────────
+//
+// gzip compression middleware.  Runs after the handler; compresses the response
+// body if the client signals Accept-Encoding: gzip and the body is large enough.
+//
+//   app.use(osodio::compress());                // default: min_size=1024, level=6
+//   app.use(osodio::compress({.min_size=512, .level=9}));
+//
+// Skips: already-compressed types (images, video, fonts, zip), bodies < min_size,
+// clients that don't accept gzip, 304/204 responses (no body).
+//
+struct CompressOptions {
+    std::size_t min_size = 1024;   // bytes — don't compress smaller responses
+    int         level    = 6;      // zlib level 1-9  (1=fast, 9=best ratio)
+};
+
+inline Middleware compress(CompressOptions opts = {}) {
+    return [opts](Request& req, Response& res, NextFn next) -> Task<void> {
+        co_await next();
+
+        // Only compress if client advertises gzip
+        auto ae = req.header("accept-encoding");
+        if (!ae) co_return;
+        if (ae->find("gzip") == std::string::npos) co_return;
+
+        // Skip no-body statuses
+        int sc = res.status_code();
+        if (sc == 204 || sc == 304) co_return;
+
+        // Skip small responses
+        const std::string& body = res.body();
+        if (body.size() < opts.min_size) co_return;
+
+        // Skip already-compressed content types
+        static const std::vector<std::string> skip_prefixes = {
+            "image/", "video/", "audio/",
+            "font/woff", "font/woff2",
+            "application/zip", "application/gzip",
+            "application/octet-stream"
+        };
+        auto ct_hdr = res.content_type();
+        if (!ct_hdr.empty()) {
+            for (const auto& pfx : skip_prefixes) {
+                if (ct_hdr.rfind(pfx, 0) == 0) co_return;
+            }
+        }
+
+        // ── gzip compress with zlib ───────────────────────────────────────────
+        uLongf bound = compressBound(static_cast<uLong>(body.size())) + 18; // gzip header
+        std::string compressed(bound, '\0');
+
+        z_stream zs{};
+        zs.next_in   = reinterpret_cast<Bytef*>(const_cast<char*>(body.data()));
+        zs.avail_in  = static_cast<uInt>(body.size());
+        zs.next_out  = reinterpret_cast<Bytef*>(compressed.data());
+        zs.avail_out = static_cast<uInt>(bound);
+
+        // windowBits = 15 + 16 → gzip format (not raw deflate)
+        if (deflateInit2(&zs, opts.level, Z_DEFLATED,
+                         15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) co_return;
+
+        int ret = deflate(&zs, Z_FINISH);
+        deflateEnd(&zs);
+        if (ret != Z_STREAM_END) co_return;
+
+        compressed.resize(zs.total_out);
+
+        res.header("Content-Encoding", "gzip")
+           .header("Vary", "Accept-Encoding")
+           .send(std::move(compressed));
     };
 }
 

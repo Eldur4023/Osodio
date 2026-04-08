@@ -7,6 +7,7 @@
 #include "router.hpp"
 #include "openapi.hpp"
 #include "di.hpp"
+#include "group.hpp"
 
 namespace osodio {
 
@@ -78,6 +79,24 @@ public:
         return *this;
     }
 
+    // ── Route groups ─────────────────────────────────────────────────────────
+    //
+    // Creates a group with a URL prefix. Routes registered on the group are
+    // prefixed automatically. Middleware added via group.use() runs only for
+    // routes in that group, after global middlewares.
+    //
+    //   auto api = app.group("/api/v1");
+    //   api.use(auth);
+    //   api.get("/users", list_users);   // → GET /api/v1/users
+    //
+    RouteGroup group(std::string prefix) {
+        return RouteGroup(std::move(prefix), router_, openapi_routes_);
+    }
+
+    // Maximum simultaneous open connections (default 10 000).
+    // Excess connections receive 503 immediately.
+    App& max_connections(int n) { max_connections_ = n; return *this; }
+
     // Start listening — Flask style:
     //   app.run()               → 0.0.0.0:5000
     //   app.run(8080)           → 0.0.0.0:8080
@@ -108,6 +127,8 @@ private:
 
     // Service container — populated before run(), read-only after
     ServiceContainer                          container_;
+
+    int                                       max_connections_ = 10'000;
 };
 
 } // namespace osodio

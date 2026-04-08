@@ -49,17 +49,32 @@ static void parse_query(const std::string& qs,
 // ── HttpConnection ────────────────────────────────────────────────────────────
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
-                               osodio::DispatchFn dispatch)
+                               osodio::DispatchFn dispatch,
+                               std::shared_ptr<std::atomic<int>> conn_count)
     : fd_(fd)
     , loop_(loop)
     , dispatch_(std::move(dispatch))
+    , conn_count_(std::move(conn_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); })
-{}
+{
+    // Arm the header timeout immediately — if we don't receive a complete
+    // HTTP request within kHeaderTimeoutMs, close the connection (Slowloris).
+    auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
+    header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
+        if (auto self = self_weak.lock()) {
+            if (!self->closed_) {
+                self->send_error(408, "Request Header Timeout");
+                self->close();
+            }
+        }
+    });
+}
 
 HttpConnection::~HttpConnection() {
     if (!closed_) {
         // Safe closure: we skip loop_.remove() to avoid re-entrant erase if
         // this destructor is called during EventLoop callbacks_ teardown.
+        if (header_tfd_  >= 0) ::close(header_tfd_);
         if (timeout_tfd_ >= 0) ::close(timeout_tfd_);
         ::close(fd_);
     }
@@ -113,11 +128,15 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->loop    = &loop_;
     parse_query(req_parsed.query, req_ptr->query);
 
+    // Headers fully received — cancel the Slowloris timer.
+    loop_.cancel_timer(header_tfd_);
+    header_tfd_ = -1;
+
     // ── Arm request timeout ───────────────────────────────────────────────────
-    // If the handler + write don't complete within kTimeoutMs, send 408 and close.
+    // If the handler + write don't complete within kRequestTimeoutMs, send 408.
     // cancel_timer() is called in on_write_complete() when everything succeeds.
     auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
-    timeout_tfd_ = loop_.schedule_timer(kTimeoutMs, [self_weak]() {
+    timeout_tfd_ = loop_.schedule_timer(kRequestTimeoutMs, [self_weak]() {
         if (auto self = self_weak.lock()) {
             if (!self->closed_) {
                 self->send_error(408, "Request Timeout");
@@ -181,7 +200,7 @@ void HttpConnection::send_response(std::string data) {
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             close(); return;
         }
-        // EAGAIN on first byte — buffer everything
+        // EAGAIN on first byte — buffer everything, start at offset 0
         write_buf_    = std::move(data);
         write_offset_ = 0;
     } else {
@@ -190,9 +209,10 @@ void HttpConnection::send_response(std::string data) {
             on_write_complete();
             return;
         }
-        // Partial write — buffer the rest
-        write_buf_    = data.substr(written);
-        write_offset_ = 0;
+        // Partial write — keep the full string and advance the offset.
+        // Avoids an O(n) substr copy; do_write() reads from write_offset_.
+        write_buf_    = std::move(data);
+        write_offset_ = written;
     }
 
     // Arm EPOLLOUT only; drop EPOLLIN until write completes
@@ -245,10 +265,13 @@ void HttpConnection::send_error(int code, const char* msg) {
 void HttpConnection::close() {
     if (closed_) return;
     closed_ = true;
+    loop_.cancel_timer(header_tfd_);
+    header_tfd_ = -1;
     loop_.cancel_timer(timeout_tfd_);
     timeout_tfd_ = -1;
     loop_.remove(fd_);
     ::close(fd_);
+    if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
 }
 
 } // namespace osodio::http

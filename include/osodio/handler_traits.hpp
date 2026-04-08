@@ -9,7 +9,7 @@
 #include "request.hpp"
 #include "response.hpp"
 #include "validation.hpp"
-#include "schema.hpp"
+#include "schema.hpp"   // SchemaFields<T>, OptionalFields<T>
 #include "errors.hpp"
 #include "di.hpp"
 
@@ -81,10 +81,14 @@ struct Body {
     explicit operator bool() const { return valid; }
 };
 
-template<typename T, fixed_string Name>
+// Query<T, "name">           — optional param; T{} (or "") if absent
+// Query<T, "name", "default"> — param with explicit default value
+template<typename T, fixed_string Name, fixed_string Default = "">
 struct Query {
     T value;
+    bool present = false;
     operator T() const { return value; }
+    explicit operator bool() const { return present; }
 };
 
 // ─── has_validate ─────────────────────────────────────────────────────────────
@@ -119,8 +123,8 @@ template<> struct is_known_param_type<Response>        : std::true_type {};
 template<> struct is_known_param_type<nlohmann::json>  : std::true_type {};
 template<typename T, fixed_string N>
 struct is_known_param_type<PathParam<T, N>>            : std::true_type {};
-template<typename T, fixed_string N>
-struct is_known_param_type<Query<T, N>>                : std::true_type {};
+template<typename T, fixed_string N, fixed_string D>
+struct is_known_param_type<Query<T, N, D>>             : std::true_type {};
 template<typename T>
 struct is_known_param_type<Body<T>>                    : std::true_type {};
 template<typename T>
@@ -149,11 +153,12 @@ T extract_body(const Request& req, Response& res) {
         return T{};
     }
 
-    // 2. Field-level validation (presence + null)
+    // 2. Field-level validation (presence + null) — skips OSODIO_OPTIONAL fields
     {
         std::vector<std::string> field_errors;
         auto obj = doc.get_object().value();
         for (const auto& field : SchemaFields<T>::names()) {
+            if (OptionalFields<T>::contains(field)) continue;
             simdjson::dom::element val;
             auto ferr = obj[field].get(val);
             if (ferr == simdjson::NO_SUCH_FIELD)
@@ -169,6 +174,12 @@ T extract_body(const Request& req, Response& res) {
 
     // 3. simdjson DOM → nlohmann
     nlohmann::json j = simdjson_to_nlohmann(doc);
+
+    // 3b. Inject null for absent OSODIO_OPTIONAL fields so that
+    //     nlohmann maps them to std::nullopt (null → nullopt is built-in).
+    for (const auto& field : OptionalFields<T>::names()) {
+        if (!j.contains(field)) j[field] = nullptr;
+    }
 
     // 4. Bind to T
     T val;
@@ -247,16 +258,33 @@ struct extractor<PathParam<T, Name>> {
     }
 };
 
-// Query<T, Name>
-template<typename T, fixed_string Name>
-struct extractor<Query<T, Name>> {
-    static Query<T, Name> extract(const Request& req, Response&) {
+// Query<T, Name, Default>
+// If param is present → parse it; if absent → use Default string (converted to T).
+template<typename T, fixed_string Name, fixed_string Default>
+struct extractor<Query<T, Name, Default>> {
+    static Query<T, Name, Default> extract(const Request& req, Response&) {
         std::string_view name = Name;
         auto it = req.query.find(std::string(name));
-        if (it == req.query.end()) return {T{}};
-        if constexpr (std::is_same_v<T, int>)              return {std::stoi(it->second)};
-        else if constexpr (std::is_same_v<T, std::string>) return {it->second};
-        else return {T{}};
+
+        // Helper: parse a string value to T
+        auto parse = [](const std::string& s) -> T {
+            if constexpr (std::is_same_v<T, int>)              return s.empty() ? T{} : std::stoi(s);
+            else if constexpr (std::is_same_v<T, long>)        return s.empty() ? T{} : std::stol(s);
+            else if constexpr (std::is_same_v<T, float>)       return s.empty() ? T{} : std::stof(s);
+            else if constexpr (std::is_same_v<T, double>)      return s.empty() ? T{} : std::stod(s);
+            else if constexpr (std::is_same_v<T, bool>)        return s == "true" || s == "1";
+            else if constexpr (std::is_same_v<T, std::string>) return s;
+            else return T{};
+        };
+
+        if (it != req.query.end())
+            return {parse(it->second), true};
+
+        // Absent: use Default if non-empty, otherwise T{}
+        std::string_view def = Default;
+        if (!def.empty())
+            return {parse(std::string(def)), false};
+        return {T{}, false};
     }
 };
 

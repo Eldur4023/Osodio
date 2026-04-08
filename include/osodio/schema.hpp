@@ -3,11 +3,26 @@
 #include <vector>
 #include <string>
 #include <string_view>
+#include <optional>
+#include <algorithm>
 #include "validation.hpp"
 
-// ─── SchemaFields<T> ─────────────────────────────────────────────────────────
-// Compile-time field name registry populated by OSODIO_SCHEMA.
-// extractor<Body<T>> uses this to produce per-field 422 errors.
+// ─── std::optional<T> support for nlohmann/json ──────────────────────────────
+// nlohmann v3.11 doesn't ship optional serialization by default.
+// null JSON → std::nullopt; any other value → T.
+namespace nlohmann {
+template<typename T>
+struct adl_serializer<std::optional<T>> {
+    static void to_json(json& j, const std::optional<T>& opt) {
+        if (opt) j = *opt;
+        else     j = nullptr;
+    }
+    static void from_json(const json& j, std::optional<T>& opt) {
+        if (j.is_null()) opt = std::nullopt;
+        else             opt = j.get<T>();
+    }
+};
+} // namespace nlohmann
 
 namespace osodio {
 
@@ -32,8 +47,9 @@ namespace detail {
     }
 } // namespace detail
 
-// Primary template: empty (types without OSODIO_SCHEMA have no field list).
-// Types with OSODIO_SCHEMA expose a static _schema_fields() that we detect.
+// ─── SchemaFields<T> ─────────────────────────────────────────────────────────
+// All field names registered by OSODIO_SCHEMA (required + optional).
+
 template<typename T, typename = void>
 struct SchemaFields {
     static const std::vector<std::string>& names() {
@@ -48,11 +64,37 @@ struct SchemaFields<T, std::void_t<decltype(T::_schema_fields())>> {
     }
 };
 
+// ─── OptionalFields<T> ───────────────────────────────────────────────────────
+// Fields listed in OSODIO_OPTIONAL — absent from request body is allowed.
+
+template<typename T, typename = void>
+struct OptionalFields {
+    static const std::vector<std::string>& names() {
+        static const std::vector<std::string> empty;
+        return empty;
+    }
+    static bool contains(const std::string&) { return false; }
+};
+template<typename T>
+struct OptionalFields<T, std::void_t<decltype(T::_optional_fields())>> {
+    static const std::vector<std::string>& names() {
+        return T::_optional_fields();
+    }
+    static bool contains(const std::string& field) {
+        const auto& n = names();
+        return std::find(n.begin(), n.end(), field) != n.end();
+    }
+};
+
 } // namespace osodio
 
 // ─── OSODIO_SCHEMA ────────────────────────────────────────────────────────────
 // Genera from_json / to_json y registra nombres de campos.
 // Uso: DENTRO del struct, después de declarar los campos.
+//
+// Usa NLOHMANN_DEFINE_TYPE_INTRUSIVE (estricto). Los campos opcionales ausentes
+// en el body JSON se inyectan como null antes de la deserialización en
+// extract_body — nlohmann convierte null → nullopt para std::optional<T>.
 //
 //   struct User {
 //       std::string name;
@@ -68,10 +110,28 @@ struct SchemaFields<T, std::void_t<decltype(T::_schema_fields())>> {
         return _n;                                                           \
     }
 
+// ─── OSODIO_OPTIONAL ──────────────────────────────────────────────────────────
+// Marca campos cuya ausencia en el body JSON está permitida.
+// Uso: DENTRO del struct, después de OSODIO_SCHEMA.
+// Los campos deben ser std::optional<T> en C++.
+//
+//   struct UpdateUser {
+//       std::optional<std::string> name;
+//       std::optional<int> age;
+//       OSODIO_SCHEMA(UpdateUser, name, age)
+//       OSODIO_OPTIONAL(name, age)
+//   };
+//
+#define OSODIO_OPTIONAL(...)                                                  \
+    static const std::vector<std::string>& _optional_fields() {             \
+        static const auto _n =                                               \
+            osodio::detail::split_field_names(#__VA_ARGS__);                \
+        return _n;                                                           \
+    }
+
 // ─── OSODIO_VALIDATE ─────────────────────────────────────────────────────────
 // Define reglas de validación de negocio.
-// Uso: DENTRO del struct, después de OSODIO_SCHEMA.
-// No repite el nombre del tipo.
+// Uso: DENTRO del struct. No repite el nombre del tipo.
 //
 //   struct User {
 //       std::string name; int age;
@@ -87,7 +147,6 @@ struct SchemaFields<T, std::void_t<decltype(T::_schema_fields())>> {
         __VA_ARGS__;                                                    \
     }
 
-// check(condition, message)
-// Se usa dentro de OSODIO_VALIDATE. Accede a los campos de `this` directamente.
+// check(condition, message) — usado dentro de OSODIO_VALIDATE.
 #define check(cond, msg) \
     ((cond) ? (void)0 : _errors.push_back(msg))
