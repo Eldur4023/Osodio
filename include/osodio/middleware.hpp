@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <algorithm>
 #include <zlib.h>
 #include "types.hpp"
@@ -187,6 +188,126 @@ inline Middleware compress(CompressOptions opts = {}) {
         res.header("Content-Encoding", "gzip")
            .header("Vary", "Accept-Encoding")
            .send(std::move(compressed));
+    };
+}
+
+// ─── HelmetOptions ────────────────────────────────────────────────────────────
+
+struct HelmetOptions {
+    // Content-Security-Policy.  Set to "" to disable.
+    std::string csp = "default-src 'self'";
+
+    // HTTP Strict-Transport-Security.  Only meaningful behind HTTPS.
+    // Set max_age to 0 to disable HSTS.
+    int  hsts_max_age           = 15'552'000;   // 180 days
+    bool hsts_include_subdomains = true;
+
+    bool no_sniff   = true;   // X-Content-Type-Options: nosniff
+    bool no_iframe  = true;   // X-Frame-Options: SAMEORIGIN
+    bool xss_filter = false;  // X-XSS-Protection: 0  (disabled — modern browsers ignore it)
+};
+
+// ─── helmet() ─────────────────────────────────────────────────────────────────
+//
+// Adds common security headers to every response.  Zero-overhead: headers are
+// built once at call time and reused from the closure.
+//
+//   app.use(osodio::helmet());
+//   app.use(osodio::helmet({ .csp = "default-src 'self' https://cdn.example.com" }));
+//
+inline Middleware helmet(HelmetOptions opts = {}) {
+    // Pre-build the header values once — no allocation per request.
+    struct Headers { std::string key, value; };
+    std::vector<Headers> hdrs;
+    hdrs.reserve(6);
+
+    if (!opts.csp.empty())
+        hdrs.push_back({"Content-Security-Policy", opts.csp});
+    if (opts.hsts_max_age > 0) {
+        std::string hsts = "max-age=" + std::to_string(opts.hsts_max_age);
+        if (opts.hsts_include_subdomains) hsts += "; includeSubDomains";
+        hdrs.push_back({"Strict-Transport-Security", std::move(hsts)});
+    }
+    if (opts.no_sniff)
+        hdrs.push_back({"X-Content-Type-Options", "nosniff"});
+    if (opts.no_iframe)
+        hdrs.push_back({"X-Frame-Options", "SAMEORIGIN"});
+    if (!opts.xss_filter)
+        hdrs.push_back({"X-XSS-Protection", "0"});
+    hdrs.push_back({"Referrer-Policy", "strict-origin-when-cross-origin"});
+
+    return [hdrs = std::move(hdrs)](Request& /*req*/, Response& res, NextFn next) -> Task<void> {
+        co_await next();
+        for (const auto& h : hdrs) res.header(h.key, h.value);
+    };
+}
+
+// ─── RateLimitOptions ─────────────────────────────────────────────────────────
+
+struct RateLimitOptions {
+    // Maximum requests allowed per window per IP.
+    int requests = 100;
+
+    // Window length in seconds.
+    int window_seconds = 60;
+
+    // Custom key extractor.  Default: req.remote_ip.
+    // Override to key by user ID, API key, etc.
+    std::function<std::string(const Request&)> key_fn;
+
+    // Message returned in the 429 response body.
+    std::string message = "Too Many Requests";
+};
+
+// ─── rate_limit() ─────────────────────────────────────────────────────────────
+//
+// Fixed-window rate limiter per key (default: remote IP).
+// State is per-middleware instance.  With SO_REUSEPORT multi-threading, each
+// worker thread has independent limits — effective per-thread rate = total/threads.
+//
+//   app.use(osodio::rate_limit({ .requests = 60, .window_seconds = 60 }));
+//   app.use(osodio::rate_limit({ .requests = 5, .window_seconds = 1 }));
+//
+inline Middleware rate_limit(RateLimitOptions opts = {}) {
+    using Clock = std::chrono::steady_clock;
+
+    struct Bucket {
+        int   count     = 0;
+        Clock::time_point window_start;
+    };
+
+    // Shared state — the lambda is captured by shared_ptr so multiple copies of
+    // the Middleware (std::function) all see the same counters.
+    auto state = std::make_shared<std::unordered_map<std::string, Bucket>>();
+    std::function<std::string(const Request&)> key_fn =
+        opts.key_fn ? opts.key_fn
+                    : [](const Request& r) { return r.remote_ip; };
+
+    return [opts, state, key_fn](Request& req, Response& res, NextFn next) -> Task<void> {
+        using Seconds = std::chrono::seconds;
+        auto now = Clock::now();
+        const std::string key = key_fn(req);
+
+        auto& bucket = (*state)[key];
+        // Reset window if expired
+        if (bucket.count == 0 ||
+            std::chrono::duration_cast<Seconds>(now - bucket.window_start).count()
+                >= opts.window_seconds) {
+            bucket.count        = 0;
+            bucket.window_start = now;
+        }
+
+        ++bucket.count;
+        res.header("X-RateLimit-Limit",     std::to_string(opts.requests));
+        res.header("X-RateLimit-Remaining", std::to_string(
+            std::max(0, opts.requests - bucket.count)));
+
+        if (bucket.count > opts.requests) {
+            res.status(429).json({{"error", opts.message}});
+            co_return;   // do NOT call next()
+        }
+
+        co_await next();
     };
 }
 

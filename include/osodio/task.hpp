@@ -179,15 +179,23 @@ struct SleepAwaitable {
 
     void await_suspend(std::coroutine_handle<> h) noexcept {
         if (!loop) { h.resume(); return; }
-        loop->schedule_timer(ms, [h, tok = token]() mutable {
-            // If the connection was cancelled, resume immediately so the
-            // coroutine frame runs to completion and is properly destroyed.
-            if (auto t = tok.lock(); t && t->is_cancelled()) {
-                if (!h.done()) h.resume();
-                return;
-            }
+
+        // Schedule the timer.  The callback clears the wake slot first so
+        // cancel() can't fire it again after the timer has already won.
+        int tfd = loop->schedule_timer(ms, [h, tok = token]() mutable {
+            if (auto t = tok.lock()) t->clear_wake();
             if (!h.done()) h.resume();
         });
+
+        // Register the early-wake callback.  If the token is already
+        // cancelled, set_wake() fires the callback immediately: we cancel
+        // the timerfd we just armed and resume the coroutine.
+        if (auto t = token.lock()) {
+            t->set_wake([h, tfd, l = loop]() mutable {
+                l->cancel_timer(tfd);
+                if (!h.done()) h.resume();
+            });
+        }
     }
 
     void await_resume() const noexcept {}

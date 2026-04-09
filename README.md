@@ -53,12 +53,17 @@ int main() {
 | **Middleware** | Global `app.use()` chain; `logger()`, `cors()`, `compress()` built-in |
 | **Dependency injection** | `app.provide<T>(...)` / `Inject<T>` in any handler |
 | **Error handlers** | `app.on_error(code, fn)` and catch-all; typed throws: `not_found()`, `bad_request()`, … |
-| **Static files** | `app.serve_static(prefix, dir)` — MIME, ETag, Cache-Control, 304, path-traversal blocked |
+| **Static files** | `app.serve_static(prefix, dir, spa)` — MIME, ETag, Cache-Control, 304, sendfile(2), SPA fallback |
+| **SSE** | `osodio::make_sse(res, req)` — `text/event-stream`, named events, keepalive pings, auto-disconnect |
+| **Multipart** | `osodio::parse_multipart(req)` — file uploads, field names, Content-Type per part |
 | **Templates** | `res.render("page.html", data)` via inja (Jinja2-compatible) |
 | **OpenAPI + Swagger** | `/openapi.json` and `/docs` auto-generated from handler signatures at startup |
-| **Compression** | `compress()` middleware — gzip via zlib, negotiated by `Accept-Encoding` |
-| **HTTP/1.1** | Keep-alive, incremental llhttp parser, non-blocking writes (EPOLLOUT backpressure) |
-| **Security** | 5s header timeout per request (Slowloris), 30s handler timeout, connection limit, 16 MB response cap |
+| **Compression** | `compress()` — gzip via zlib, negotiated by `Accept-Encoding` |
+| **Rate limiting** | `rate_limit({.requests=100, .window_seconds=60})` — fixed-window per IP or custom key |
+| **Security headers** | `helmet()` — CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy |
+| **HTTP/1.1** | Keep-alive, incremental llhttp parser, non-blocking writes, sendfile(2) for statics |
+| **Security** | 5s Slowloris timeout per request, 30s handler timeout, connection limit, 16 MB cap |
+| **Remote IP** | `req.remote_ip` — IPv4/IPv6 resolved via `getpeername()` |
 | **Vendored deps** | 8 files in `third_party/` — no network access during cmake |
 
 ---
@@ -272,6 +277,20 @@ app.use(osodio::cors({
     .credentials = true,
     .max_age     = 86400,
 }));
+
+app.use(osodio::helmet());
+app.use(osodio::helmet({
+    .csp          = "default-src 'self' https://cdn.example.com",
+    .hsts_max_age = 31'536'000,
+}));
+
+app.use(osodio::rate_limit({ .requests = 60, .window_seconds = 60 }));
+app.use(osodio::rate_limit({
+    .requests = 1000,
+    .key_fn   = [](const Request& r) {
+        return r.header("x-api-key").value_or(r.remote_ip);
+    },
+}));
 ```
 
 ### Dependency Injection
@@ -304,6 +323,57 @@ app.on_error(404, [](int, Request& req, Response& res) {
 });
 app.on_error([](int code, Request&, Response& res) {
     res.json({{"error","Something went wrong"},{"code",code}});
+});
+```
+
+### Static Files & SPA
+
+```cpp
+app.serve_static("/static", "./public");          // prefix → directory
+app.serve_static("/", "./dist", true);            // SPA fallback: unknown paths → index.html
+
+// Uses sendfile(2) — zero-copy, no user-space buffer
+// ETag + Cache-Control auto-set; 304 for unchanged files
+// Hashed filenames (e.g. app.abc123.js) → immutable for 1 year
+```
+
+### Server-Sent Events (SSE)
+
+```cpp
+app.get("/stream", [](Request& req, Response& res) -> Task<void> {
+    auto sse = osodio::make_sse(res, req);   // writes headers immediately
+
+    int n = 0;
+    while (sse.is_open()) {
+        sse.send(std::to_string(n++));                     // data: N\n\n
+        sse.send_event("tick", "payload", "evt-42");       // named event + id
+        sse.ping();                                        // keepalive comment
+        co_await osodio::sleep(1000);
+    }
+});
+```
+
+- `is_open()` returns false when the client disconnects (via `CancellationToken`)
+- `sleep()` exits early on disconnect so the loop doesn't linger
+- Browser reconnects automatically using `Last-Event-ID`
+
+### Multipart / File Uploads
+
+```cpp
+app.post("/upload", [](Request& req, Response& res) -> Task<void> {
+    auto parts = osodio::parse_multipart(req);
+    if (!parts) { res.status(400).json({{"error","not multipart"}}); co_return; }
+
+    for (auto& p : *parts) {
+        if (!p.filename.empty()) {
+            // file field: p.name, p.filename, p.content_type, p.body (bytes)
+            std::ofstream f("uploads/" + p.filename, std::ios::binary);
+            f.write(p.body.data(), p.body.size());
+        } else {
+            // text field: p.name, p.body
+        }
+    }
+    res.json({{"uploaded", (int)parts->size()}});
 });
 ```
 
@@ -366,17 +436,18 @@ third_party/
 | `compress()` — gzip, negotiated via Accept-Encoding | ✅ |
 | `cors()` — full preflight handling | ✅ |
 | `logger()` | ✅ |
-| Static files — MIME, ETag, Cache-Control, 304 | ✅ |
+| Static files — MIME, ETag, Cache-Control, 304, sendfile(2) | ✅ |
+| SPA fallback — `serve_static(..., true)` → unknown paths → index.html | ✅ |
+| Server-Sent Events — `make_sse()`, named events, ping, auto-disconnect | ✅ |
+| Multipart/form-data — `parse_multipart()`, file + text fields | ✅ |
+| Rate limiting — fixed-window per IP or custom key | ✅ |
+| `helmet()` — CSP, HSTS, X-Frame-Options, X-Content-Type-Options | ✅ |
+| `req.remote_ip` — IPv4/IPv6 from `getpeername()` | ✅ |
 | HTML templates via inja (Jinja2-compatible) | ✅ |
 | OpenAPI 3.0 + Swagger UI at `/docs` | ✅ |
 | Global error handlers | ✅ |
 | Vendored deps — 8 files, no cmake network | ✅ |
 | WebSockets | ⬜ |
-| Server-Sent Events (SSE) | ⬜ |
-| SPA fallback in static files | ⬜ |
-| Multipart / form-data | ⬜ |
-| Rate limiting middleware | ⬜ |
-| `helmet()` security headers | ⬜ |
 | HTTPS / TLS | ⬜ |
 | HTTP/2 | ⬜ |
 | Brotli compression | ⬜ |

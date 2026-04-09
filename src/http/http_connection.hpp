@@ -51,8 +51,18 @@ private:
     int header_tfd_  = -1;
     int timeout_tfd_ = -1;
 
+    // ── sendfile state ────────────────────────────────────────────────────────
+    // When serving static files, we skip the read-into-buffer step and stream
+    // directly from the file descriptor to the socket.  The connection sends
+    // the HTTP headers via the normal write_buf_ path, then transitions to
+    // do_sendfile() once the headers are fully flushed.
+    int    file_fd_        = -1;
+    off_t  file_offset_    = 0;
+    size_t file_remaining_ = 0;
+
     void do_read();
     void do_write();
+    void do_sendfile();
     void on_write_complete();
 
     // Begin writing `data`; buffers any unsent remainder and arms EPOLLOUT.

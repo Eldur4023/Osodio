@@ -2,7 +2,7 @@
 
 ---
 
-## Estado actual (2026-04-08)
+## Estado actual (2026-04-09)
 
 ### Implementado y funcionando
 
@@ -31,8 +31,15 @@
 | **write_buf_ limit** | Hard cap 16 MB por respuesta; cierre limpio si se supera |
 | **Header timeout per-keepalive** | Timer de 5s rearmado tras cada respuesta en conexiones keep-alive |
 | **Errores tipados** | HttpError, not_found(), bad_request(), unauthorized(), etc. |
-| **Middleware** | logger(), cors(), compress() (gzip zlib) |
-| **Static files** | MIME, path traversal block, ETag, Cache-Control, 304 Not Modified |
+| **Middleware** | logger(), cors(), compress() (gzip zlib), helmet(), rate_limit() |
+| **helmet()** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy; headers pre-built al registrar |
+| **rate_limit()** | Fixed-window por IP (o clave custom); headers X-RateLimit-Limit/Remaining; state por instancia |
+| **Static files** | MIME, path traversal block, ETag, Cache-Control, 304, sendfile(2) zero-copy |
+| **SPA fallback** | serve_static("/", "./dist", true) — rutas sin archivo → index.html con 200 |
+| **SSE** | make_sse(res, req) — text/event-stream, named events, ping, is_open() via CancellationToken |
+| **Multipart** | parse_multipart(req) — boundary extraction, headers por parte, filename, content_type |
+| **remote_ip** | req.remote_ip — IPv4/IPv6 via getpeername() en dispatch() |
+| **sleep() early wake** | CancellationToken.set_wake() — cancel() cancela el timerfd y reanuda el coroutine inmediatamente |
 | **Templates** | res.render() vía inja (Jinja2), Environment cacheado por thread×dir |
 | **OpenAPI** | DocBuilder\<F\> compile-time, /openapi.json, /docs Swagger UI |
 | **DI** | app.provide\<T\>(shared_ptr) y app.provide\<T\>(factory) |
@@ -42,23 +49,17 @@
 
 ## Roadmap
 
-### Nivel siguiente: "Frontend-ready"
+### Nivel siguiente: "WebSocket + Producción"
 
-- [ ] **SPA fallback** en serve_static — redirigir rutas desconocidas a /index.html
-- [ ] **sendfile()** para archivos estáticos — zero-copy, datos van directo de FS a socket
 - [ ] **WebSocket** — upgrade desde HTTP/1.1, framing RFC 6455, pub/sub por topic
-- [ ] **Server-Sent Events (SSE)** — `text/event-stream`, backpressure, reconexión automática
-- [ ] **Multipart/form-data** — parser incremental para file uploads
-- [ ] **Rate limiting** — token bucket por IP, por endpoint; `osodio::rate_limit(opts)`
-- [ ] **helmet()** — headers de seguridad: CSP, HSTS, X-Frame-Options, X-Content-Type-Options
+- [ ] **Graceful shutdown** — drenar conexiones activas antes de exit (SIGTERM)
+- [ ] **Multi-thread real** — activar SO_REUSEPORT con N loops; actualmente forzado a 1 thread
 
 ### Nivel producción
 
 - [ ] **HTTP/2** con nghttp2 — multiplexing, HPACK, server push
 - [ ] **TLS 1.3** con OpenSSL — ALPN para h2, SNI, hot-reload de certificados
 - [ ] **io_uring backend** — batch syscalls, reducir overhead vs epoll (Linux 5.1+)
-- [ ] **Multi-thread real** — SO_REUSEPORT, un EventLoop por core; actualmente forzado a 1 thread para debugging
-- [ ] **Graceful shutdown** — drenar conexiones activas antes de exit
 - [ ] **Brotli** — mejor ratio que gzip para texto; negociado vía Accept-Encoding
 - [ ] **Métricas** — /metrics Prometheus, /health endpoint
 
@@ -76,17 +77,20 @@
 include/osodio/
   osodio.hpp          — include único
   app.hpp             — App, route registration, group(), provide(), run()
-  request.hpp         — Request, headers, query, params, loop, container
-  response.hpp        — Response builder (json/html/text/render/send)
+  request.hpp         — Request, headers, query, params, loop, container, remote_ip
+  response.hpp        — Response builder (json/html/text/render/send/send_file)
   router.hpp          — Radix tree, RouteMatch
   types.hpp           — Middleware, Handler, DispatchFn, ErrorHandler
-  task.hpp            — Task<T>, Task<void>, SleepAwaitable, thread_local current_loop
+  task.hpp            — Task<T>, Task<void>, SleepAwaitable, set_wake early cancel
+  cancel.hpp          — CancellationToken con set_wake() para early-wake de sleep()
   handler_traits.hpp  — HandlerTraits, extractor<T>, fixed_string, has_to_json
   schema.hpp          — OSODIO_SCHEMA, OSODIO_OPTIONAL, OSODIO_VALIDATE, check()
   validation.hpp      — ValidationError, min/max/len_min/len_max validators
   errors.hpp          — HttpError, not_found(), bad_request(), etc.
   di.hpp              — ServiceContainer, Inject<T>
-  middleware.hpp      — logger(), cors(), compress()
+  middleware.hpp      — logger(), cors(), compress(), helmet(), rate_limit()
+  sse.hpp             — SSEWriter, make_sse(res, req)
+  multipart.hpp       — MultipartPart, parse_multipart(req)
   openapi.hpp         — DocBuilder<F>, build_openapi_doc(), swagger_ui_html()
   group.hpp           — RouteGroup (prefix + middleware snapshot)
   core/event_loop.hpp — EventLoop interface

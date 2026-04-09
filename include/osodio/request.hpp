@@ -15,6 +15,7 @@ public:
     std::string path;
     std::string version;
     std::string body;
+    std::string remote_ip;  // IPv4/IPv6 of the connected peer
 
     // Headers stored with lowercase keys
     std::unordered_map<std::string, std::string> headers;
@@ -27,6 +28,10 @@ public:
 
     // Pointer to the event loop for scheduling tasks
     core::EventLoop* loop = nullptr;
+
+    // Raw socket fd — used by res.sse(req) to write SSE headers and stream
+    // events directly.  Not intended for general handler use.
+    int _conn_fd = -1;
 
     // Pointer to the service container (set by App::run before dispatch).
     // Non-owning: the App owns the container and outlives all requests.

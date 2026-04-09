@@ -4,6 +4,12 @@
 #include "../../include/osodio/task.hpp"
 
 #include <sys/epoll.h>
+#include <sys/sendfile.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
@@ -79,6 +85,7 @@ HttpConnection::~HttpConnection() {
         // this destructor is called during EventLoop callbacks_ teardown.
         if (header_tfd_  >= 0) ::close(header_tfd_);
         if (timeout_tfd_ >= 0) ::close(timeout_tfd_);
+        if (file_fd_     >= 0) ::close(file_fd_);
         ::close(fd_);
     }
 }
@@ -134,7 +141,23 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->body         = std::move(req_parsed.body);
     req_ptr->loop         = &loop_;
     req_ptr->cancel_token = cancel_token_;
+    req_ptr->_conn_fd     = fd_;
     parse_query(req_parsed.query, req_ptr->query);
+
+    // Resolve remote IP from the socket
+    sockaddr_storage ss{};
+    socklen_t sslen = sizeof(ss);
+    if (::getpeername(fd_, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
+        char ipbuf[INET6_ADDRSTRLEN]{};
+        if (ss.ss_family == AF_INET) {
+            inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&ss)->sin_addr,
+                      ipbuf, sizeof(ipbuf));
+        } else if (ss.ss_family == AF_INET6) {
+            inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&ss)->sin6_addr,
+                      ipbuf, sizeof(ipbuf));
+        }
+        req_ptr->remote_ip = ipbuf;
+    }
 
     // Headers fully received — cancel the Slowloris timer.
     loop_.cancel_timer(header_tfd_);
@@ -186,6 +209,31 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
         keep_alive_ = (val != "close");
     }
     response.header("Connection", keep_alive_ ? "keep-alive" : "close");
+
+    // SSE mode: headers were already written directly by make_sse().
+    // Just close the connection without sending a second response.
+    if (response.sse_started()) {
+        keep_alive_ = false;
+        close();
+        return;
+    }
+
+    // sendfile path: open the file and set up state; build() emits only headers
+    if (!response.sendfile_path().empty()) {
+        int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            osodio::Response err;
+            err.status(500).json({{"error", "Cannot open file"}});
+            err.header("Connection", "close");
+            keep_alive_ = false;
+            send_response(err.build());
+            return;
+        }
+        file_fd_        = fd;
+        file_offset_    = 0;
+        file_remaining_ = static_cast<size_t>(response.sendfile_size());
+    }
+
     send_response(response.build());
 }
 
@@ -248,9 +296,33 @@ void HttpConnection::do_write() {
         write_offset_ += static_cast<size_t>(n);
     }
 
-    // All bytes sent — reset buffer
+    // All header/body bytes sent — reset buffer
     write_buf_.clear();
     write_offset_ = 0;
+
+    // If a file is pending, stream it via sendfile(2)
+    if (file_fd_ >= 0) { do_sendfile(); return; }
+
+    on_write_complete();
+}
+
+void HttpConnection::do_sendfile() {
+    while (file_remaining_ > 0) {
+        ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
+                               std::min(file_remaining_, size_t{256 * 1024}));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return; // wait for EPOLLOUT
+            if (errno == EINTR) continue;
+            close(); return;
+        }
+        if (n == 0) break; // EOF
+        file_remaining_ -= static_cast<size_t>(n);
+    }
+
+    ::close(file_fd_);
+    file_fd_        = -1;
+    file_offset_    = 0;
+    file_remaining_ = 0;
     on_write_complete();
 }
 
@@ -306,6 +378,7 @@ void HttpConnection::close() {
     timeout_tfd_ = -1;
     loop_.remove(fd_);
     ::close(fd_);
+    if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
 }
 

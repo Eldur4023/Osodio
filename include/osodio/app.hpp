@@ -31,8 +31,13 @@ public:
     // Serve a directory of static files under a URL prefix.
     //   app.serve_static("/static", "./public")
     //   GET /static/app.js  →  ./public/app.js
-    App& serve_static(std::string url_prefix, std::string fs_root) {
-        static_mounts_.push_back({std::move(url_prefix), std::move(fs_root)});
+    //
+    // SPA fallback (spa = true): any path that doesn't match a real file is
+    // served as ./public/index.html with status 200.  Enables client-side
+    // routing for React/Vue/Svelte apps.
+    //   app.serve_static("/", "./dist", true)
+    App& serve_static(std::string url_prefix, std::string fs_root, bool spa = false) {
+        static_mounts_.push_back({std::move(url_prefix), std::move(fs_root), spa});
         return *this;
     }
 
@@ -104,7 +109,7 @@ public:
     void run(const std::string& host = "0.0.0.0", uint16_t port = 5000);
     void run(uint16_t port) { run("0.0.0.0", port); }
 
-    struct StaticMount { std::string prefix; std::string root; };
+    struct StaticMount { std::string prefix; std::string root; bool spa = false; };
 
 private:
     // Called once per route registration to capture type metadata for OpenAPI.

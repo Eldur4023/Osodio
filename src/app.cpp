@@ -9,7 +9,6 @@
 #include <csignal>
 #include <iostream>
 #include <memory>
-#include <fstream>
 #include <filesystem>
 #include <thread>
 #include <vector>
@@ -80,8 +79,20 @@ static bool try_serve_static(
         std::error_code ec;
         auto status = fs::status(canonical_file, ec);
         if (ec || !fs::is_regular_file(status)) {
-            res.status(404).json({{"error", "Not Found"}});
-            return true;
+            // SPA fallback: serve index.html for unknown paths so client-side
+            // routers (React Router, Vue Router, etc.) can handle the URL.
+            if (m.spa) {
+                canonical_file = fs::weakly_canonical(fs::path(m.root) / "index.html");
+                auto spa_status = fs::status(canonical_file, ec);
+                if (ec || !fs::is_regular_file(spa_status)) {
+                    res.status(404).json({{"error", "Not Found"}});
+                    return true;
+                }
+                // Continue below with canonical_file = index.html
+            } else {
+                res.status(404).json({{"error", "Not Found"}});
+                return true;
+            }
         }
 
         // ── ETag ──────────────────────────────────────────────────────────────
@@ -110,14 +121,9 @@ static bool try_serve_static(
             return true;
         }
 
-        // ── Read and serve ────────────────────────────────────────────────────
-        std::ifstream f(canonical_file, std::ios::binary);
-        if (!f) { res.status(500).json({{"error", "Could not read file"}}); return true; }
-
-        std::string body{std::istreambuf_iterator<char>(f),
-                         std::istreambuf_iterator<char>()};
+        // ── Serve via sendfile(2) — zero-copy ─────────────────────────────────
         const char* mime = mime_for_ext(ext);
-        res.header("Content-Type", mime).send(std::move(body));
+        res.header("Content-Type", mime).send_file(canonical_file);
         return true;
     }
     return false;
