@@ -1,4 +1,5 @@
 #include "../include/osodio/app.hpp"
+#include "../include/osodio/metrics.hpp"
 #include "../include/osodio/request.hpp"
 #include "../include/osodio/response.hpp"
 #include "../include/osodio/task.hpp"
@@ -11,6 +12,8 @@
 #include <memory>
 #include <filesystem>
 #include <thread>
+#include <chrono>
+#include <algorithm>
 #include <vector>
 #include <mutex>
 #include <functional>
@@ -129,12 +132,20 @@ static bool try_serve_static(
     return false;
 }
 
-// Global stop callback — set before spawning threads, read only after.
-static std::function<void()> g_stop_all;
+// Graceful shutdown state — written once before spawning threads, called from
+// the signal handler.  The signal handler itself must remain async-signal-safe;
+// the heavy work is dispatched onto the event loop thread via post().
+static std::function<void()> g_initiate_drain;
+static std::atomic<bool>     g_shutting_down{false};
 
 static void signal_handler(int) {
-    std::cout << "\nShutting down...\n";
-    if (g_stop_all) g_stop_all();
+    if (g_shutting_down.exchange(true)) {
+        // Second signal: user is impatient — force exit immediately.
+        std::cout << "\nForced exit.\n";
+        std::_Exit(1);
+    }
+    std::cout << "\nShutting down gracefully... (CTRL+C again to force)\n";
+    if (g_initiate_drain) g_initiate_drain();
 }
 
 } // anonymous namespace
@@ -144,15 +155,16 @@ static void signal_handler(int) {
 void App::run(const std::string& host, uint16_t port) {
     std::signal(SIGPIPE, SIG_IGN);
 
-    // ── Built-in: /openapi.json and /docs ─────────────────────────────────────
-    // Build the spec once, capture by value into the handler lambda.
-    {
+    // ── Optional: /openapi.json and /docs (only when enable_docs() was called) ──
+    if (openapi_enabled_) {
         std::string spec = build_openapi_doc(api_title_, api_version_, openapi_routes_).dump(2);
-        router_.add("GET", "/openapi.json", [spec](Request&, Response& res) {
+        std::string spec_path = openapi_spec_path_;
+        std::string ui_path   = openapi_ui_path_;
+        router_.add("GET", spec_path, [spec](Request&, Response& res) {
             res.header("Content-Type", "application/json; charset=utf-8").send(spec);
         });
-        router_.add("GET", "/docs", [](Request&, Response& res) {
-            res.html(swagger_ui_html());
+        router_.add("GET", ui_path, [spec_path](Request&, Response& res) {
+            res.html(swagger_ui_html(spec_path));
         });
     }
 
@@ -205,43 +217,101 @@ void App::run(const std::string& host, uint16_t port) {
     };
 
     // ── Multi-core: one event loop per hardware thread ────────────────────────
-    unsigned num_threads = 1; // Forced for debugging
+    unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
 
-    std::vector<core::EventLoop*> all_loops;
-    std::mutex loops_mutex;
+    // Shared connection counter — enforces max_connections_ across all threads.
+    auto shared_conn_count = std::make_shared<std::atomic<int>>(0);
+    Metrics::instance().active_connections_ = shared_conn_count.get();
 
-    // Stop callback: called from SIGINT/SIGTERM, stops every loop.
-    g_stop_all = [&all_loops, &loops_mutex]() {
-        std::lock_guard<std::mutex> lk(loops_mutex);
-        for (auto* l : all_loops) l->stop();
+    std::vector<core::EventLoop*>  all_loops;
+    std::vector<core::TcpServer*>  all_servers;
+    std::mutex                     all_mutex;
+
+    // ── Graceful shutdown ─────────────────────────────────────────────────────
+    // On first SIGINT/SIGTERM:
+    //   1. Stop accepting new connections on all workers.
+    //   2. Post a drain-checker task to the main event loop that polls every
+    //      100 ms.  When conn_count reaches 0 (or 30 s elapse), all loops are
+    //      stopped cleanly.
+    // On second signal: std::_Exit(1) — see signal_handler above.
+    g_shutting_down = false;
+    core::EventLoop main_loop;   // declared before g_initiate_drain so it can be captured
+    {
+        std::lock_guard<std::mutex> lk(all_mutex);
+        all_loops.push_back(&main_loop);
+    }
+
+    g_initiate_drain = [&main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
+        // Stop all acceptors (runs on signal-handler thread; post() is used
+        // for the heavy work so it executes on the event loop thread).
+        {
+            std::lock_guard<std::mutex> lk(all_mutex);
+            for (auto* s : all_servers) s->stop_accepting();
+        }
+
+        // Dispatch the drain poll to the main loop thread.
+        main_loop.post([&main_loop, shared_conn_count, &all_loops, &all_mutex]() {
+            using Clock = std::chrono::steady_clock;
+            auto deadline = Clock::now() + std::chrono::seconds(30);
+
+            auto fn = std::make_shared<std::function<void()>>();
+            *fn = [fn, &main_loop, shared_conn_count, deadline,
+                   &all_loops, &all_mutex]() mutable {
+                bool timed_out = Clock::now() >= deadline;
+                int  remaining = shared_conn_count->load(std::memory_order_acquire);
+
+                if (remaining == 0 || timed_out) {
+                    if (timed_out && remaining > 0)
+                        std::cout << "Grace period expired — " << remaining
+                                  << " connection(s) dropped.\n";
+                    else
+                        std::cout << "All connections drained.\n";
+                    std::lock_guard<std::mutex> lk(all_mutex);
+                    for (auto* l : all_loops) l->stop();
+                    return;
+                }
+                main_loop.schedule_timer(100, *fn);
+            };
+            (*fn)();  // first check immediately
+        });
     };
+
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    // Worker threads (cores 1..N-1)
+    // ── Worker threads (cores 1..N-1) ─────────────────────────────────────────
+    // Each thread runs its own EventLoop + TcpServer.  SO_REUSEPORT lets the
+    // kernel distribute incoming connections evenly across all workers.
     std::vector<std::thread> threads;
     threads.reserve(num_threads - 1);
     for (unsigned i = 1; i < num_threads; ++i) {
         threads.emplace_back([&]() {
             core::EventLoop loop;
+            core::TcpServer server(host, port, loop, dispatch,
+                                   max_connections_, shared_conn_count);
             {
-                std::lock_guard<std::mutex> lk(loops_mutex);
+                std::lock_guard<std::mutex> lk(all_mutex);
                 all_loops.push_back(&loop);
+                all_servers.push_back(&server);
             }
-            // Each TcpServer binds to the same port via SO_REUSEPORT; the
-            // kernel load-balances incoming connections across all loops.
-            core::TcpServer server(host, port, loop, dispatch, max_connections_);
             loop.run();
+            {
+                // Remove from tracking after the loop exits so stop_accepting()
+                // is never called on a destroyed server.
+                std::lock_guard<std::mutex> lk(all_mutex);
+                all_loops.erase(std::remove(all_loops.begin(), all_loops.end(), &loop), all_loops.end());
+                all_servers.erase(std::remove(all_servers.begin(), all_servers.end(), &server), all_servers.end());
+            }
         });
     }
 
-    // Main thread (core 0)
-    core::EventLoop main_loop;
+    // ── Main thread (core 0) ──────────────────────────────────────────────────
+    core::TcpServer main_server(host, port, main_loop, dispatch,
+                                max_connections_, shared_conn_count);
     {
-        std::lock_guard<std::mutex> lk(loops_mutex);
-        all_loops.push_back(&main_loop);
+        std::lock_guard<std::mutex> lk(all_mutex);
+        all_servers.push_back(&main_server);
     }
-    core::TcpServer main_server(host, port, main_loop, dispatch, max_connections_);
 
     std::cout << " * Osodio running on http://" << host << ":" << port
               << "  (threads=" << num_threads << ", press CTRL+C to quit)\n";
@@ -250,7 +320,9 @@ void App::run(const std::string& host, uint16_t port) {
 
     for (auto& t : threads) t.join();
 
-    g_stop_all = nullptr;
+    Metrics::instance().active_connections_ = nullptr;
+    g_initiate_drain = nullptr;
+    g_shutting_down  = false;
 }
 
 } // namespace osodio

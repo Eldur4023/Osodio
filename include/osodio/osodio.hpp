@@ -20,3 +20,5 @@
 #include "group.hpp"
 #include "sse.hpp"
 #include "multipart.hpp"
+#include "websocket.hpp"
+#include "metrics.hpp"

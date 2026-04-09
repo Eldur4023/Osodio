@@ -41,19 +41,19 @@
 | **remote_ip** | req.remote_ip — IPv4/IPv6 via getpeername() en dispatch() |
 | **sleep() early wake** | CancellationToken.set_wake() — cancel() cancela el timerfd y reanuda el coroutine inmediatamente |
 | **Templates** | res.render() vía inja (Jinja2), Environment cacheado por thread×dir |
-| **OpenAPI** | DocBuilder\<F\> compile-time, /openapi.json, /docs Swagger UI |
+| **OpenAPI** | DocBuilder\<F\> compile-time, opt-in con app.enable_docs() |
 | **DI** | app.provide\<T\>(shared_ptr) y app.provide\<T\>(factory) |
+| **WebSocket** | RFC 6455: SHA-1/base64 handshake, framing (text/binary/ping/pong/close), fragmentación |
+| **Multi-thread** | hardware_concurrency() threads, SO_REUSEPORT, conn_count compartido |
+| **Graceful shutdown** | SIGTERM → stop_accepting() + drain poll 100ms, 30s timeout; 2º SIGINT → force exit |
+| **Metrics + Health** | app.enable_metrics() → GET /metrics Prometheus; app.enable_health() → GET /health JSON |
 | **Deps vendored** | 8 archivos en third_party/, cero red en cmake |
 
 ---
 
 ## Roadmap
 
-### Nivel siguiente: "WebSocket + Producción"
-
-- [ ] **WebSocket** — upgrade desde HTTP/1.1, framing RFC 6455, pub/sub por topic
-- [ ] **Graceful shutdown** — drenar conexiones activas antes de exit (SIGTERM)
-- [ ] **Multi-thread real** — activar SO_REUSEPORT con N loops; actualmente forzado a 1 thread
+### Nivel siguiente: "Producción"
 
 ### Nivel producción
 
@@ -61,7 +61,7 @@
 - [ ] **TLS 1.3** con OpenSSL — ALPN para h2, SNI, hot-reload de certificados
 - [ ] **io_uring backend** — batch syscalls, reducir overhead vs epoll (Linux 5.1+)
 - [ ] **Brotli** — mejor ratio que gzip para texto; negociado vía Accept-Encoding
-- [ ] **Métricas** — /metrics Prometheus, /health endpoint
+- [x] **Métricas** — /metrics Prometheus, /health endpoint
 
 ### Nivel ecosistema
 
@@ -91,7 +91,9 @@ include/osodio/
   middleware.hpp      — logger(), cors(), compress(), helmet(), rate_limit()
   sse.hpp             — SSEWriter, make_sse(res, req)
   multipart.hpp       — MultipartPart, parse_multipart(req)
+  websocket.hpp       — WSMessage, WSConnection, detail::WSState, SHA-1, base64, frame builder
   openapi.hpp         — DocBuilder<F>, build_openapi_doc(), swagger_ui_html()
+  metrics.hpp         — Metrics singleton; atomics para requests/conns/uptime; Prometheus + JSON
   group.hpp           — RouteGroup (prefix + middleware snapshot)
   core/event_loop.hpp — EventLoop interface
 

@@ -272,24 +272,25 @@ inline Middleware rate_limit(RateLimitOptions opts = {}) {
     using Clock = std::chrono::steady_clock;
 
     struct Bucket {
-        int   count     = 0;
+        int               count = 0;
         Clock::time_point window_start;
     };
 
-    // Shared state — the lambda is captured by shared_ptr so multiple copies of
-    // the Middleware (std::function) all see the same counters.
-    auto state = std::make_shared<std::unordered_map<std::string, Bucket>>();
     std::function<std::string(const Request&)> key_fn =
         opts.key_fn ? opts.key_fn
                     : [](const Request& r) { return r.remote_ip; };
 
-    return [opts, state, key_fn](Request& req, Response& res, NextFn next) -> Task<void> {
+    // State is thread_local: each worker thread has independent counters.
+    // With N threads, effective per-IP rate ≈ opts.requests × N.
+    // This avoids cross-thread locking and is idiomatic for SO_REUSEPORT servers.
+    return [opts, key_fn](Request& req, Response& res, NextFn next) -> Task<void> {
         using Seconds = std::chrono::seconds;
+        thread_local std::unordered_map<std::string, Bucket> state;
+
         auto now = Clock::now();
         const std::string key = key_fn(req);
 
-        auto& bucket = (*state)[key];
-        // Reset window if expired
+        auto& bucket = state[key];
         if (bucket.count == 0 ||
             std::chrono::duration_cast<Seconds>(now - bucket.window_start).count()
                 >= opts.window_seconds) {
@@ -304,7 +305,7 @@ inline Middleware rate_limit(RateLimitOptions opts = {}) {
 
         if (bucket.count > opts.requests) {
             res.status(429).json({{"error", opts.message}});
-            co_return;   // do NOT call next()
+            co_return;
         }
 
         co_await next();

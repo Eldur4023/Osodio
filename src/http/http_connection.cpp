@@ -2,6 +2,7 @@
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/response.hpp"
 #include "../../include/osodio/task.hpp"
+#include "../../include/osodio/metrics.hpp"
 
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -104,6 +105,12 @@ void HttpConnection::on_event(uint32_t events) {
 // ── Read path ─────────────────────────────────────────────────────────────────
 
 void HttpConnection::do_read() {
+    // WebSocket mode: delegate all reading to the WS frame parser.
+    if (auto req = current_req_.lock(); req && req->_ws_on_readable) {
+        req->_ws_on_readable();
+        return;
+    }
+
     char buf[16384];
     while (!closed_) {
         ssize_t n = ::read(fd_, buf, sizeof(buf));
@@ -143,6 +150,9 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->cancel_token = cancel_token_;
     req_ptr->_conn_fd     = fd_;
     parse_query(req_parsed.query, req_ptr->query);
+
+    // Keep a weak ref for WebSocket mode — do_read() routes through it.
+    current_req_ = req_ptr;
 
     // Resolve remote IP from the socket
     sockaddr_storage ss{};
@@ -201,6 +211,9 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
 
 void HttpConnection::finish_dispatch(osodio::Request& request,
                                      osodio::Response& response) {
+    // Record the request in the global metrics counter.
+    osodio::Metrics::instance().record(response.status_code());
+
     // Determine keep-alive before building the response
     keep_alive_ = (request.version == "HTTP/1.1");
     if (auto conn = request.header("connection")) {
@@ -210,9 +223,9 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
     }
     response.header("Connection", keep_alive_ ? "keep-alive" : "close");
 
-    // SSE mode: headers were already written directly by make_sse().
-    // Just close the connection without sending a second response.
-    if (response.sse_started()) {
+    // SSE / WebSocket mode: headers were already written directly.
+    // Just close the connection — do not send a second response.
+    if (response.sse_started() || response.ws_started()) {
         keep_alive_ = false;
         close();
         return;
@@ -368,9 +381,18 @@ void HttpConnection::close() {
     if (closed_) return;
     closed_ = true;
 
-    // Signal any suspended coroutines (e.g. co_await sleep()) to wake up and
-    // exit rather than waiting out their full timer duration.
+    // Signal any suspended coroutines (sleep, ws.recv()) to wake up and exit.
     if (cancel_token_) cancel_token_->cancel();
+
+    // Wake any suspended ws.recv() awaitable directly.
+    if (auto req = current_req_.lock(); req && req->_ws_on_readable) {
+        // _ws_on_readable holds a shared_ptr to WSState; access it via the
+        // lambda's closure.  We notify closed via cancel_token (already done
+        // above via set_wake), but also call notify_closed in case recv_waiter
+        // was registered after the last set_wake.
+        req->_ws_on_readable = nullptr;  // prevent further calls after close
+    }
+    current_req_.reset();
 
     loop_.cancel_timer(header_tfd_);
     header_tfd_ = -1;

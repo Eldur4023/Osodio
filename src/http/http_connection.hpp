@@ -28,6 +28,10 @@ private:
     HttpParser         parser_;
     bool               closed_       = false;
 
+    // Weak reference to the current request — used in WebSocket mode to route
+    // do_read() bytes into the WS frame parser instead of the HTTP parser.
+    std::weak_ptr<osodio::Request> current_req_;
+
     // ── Response buffer limit ─────────────────────────────────────────────────
     // Hard cap on the size of a single response.  Connections that exceed this
     // are closed to prevent unbounded RAM growth from slow-reading clients.

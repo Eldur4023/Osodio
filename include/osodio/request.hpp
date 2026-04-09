@@ -29,9 +29,12 @@ public:
     // Pointer to the event loop for scheduling tasks
     core::EventLoop* loop = nullptr;
 
-    // Raw socket fd — used by res.sse(req) to write SSE headers and stream
-    // events directly.  Not intended for general handler use.
+    // Raw socket fd — used by res.sse(req) and WebSocket upgrade.
     int _conn_fd = -1;
+
+    // WebSocket mode: called by HttpConnection::do_read() to feed incoming
+    // bytes into the WSState frame parser.  Set by the ws() upgrade wrapper.
+    std::function<void()> _ws_on_readable;
 
     // Pointer to the service container (set by App::run before dispatch).
     // Non-owning: the App owns the container and outlives all requests.

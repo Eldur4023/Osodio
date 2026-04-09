@@ -17,11 +17,13 @@ namespace osodio::core {
 
 TcpServer::TcpServer(const std::string& host, uint16_t port,
                      EventLoop& loop, osodio::DispatchFn dispatch,
-                     int max_connections)
+                     int max_connections,
+                     std::shared_ptr<std::atomic<int>> conn_count)
     : loop_(loop)
     , dispatch_(std::move(dispatch))
     , max_connections_(max_connections)
-    , conn_count_(std::make_shared<std::atomic<int>>(0))
+    , conn_count_(conn_count ? std::move(conn_count)
+                             : std::make_shared<std::atomic<int>>(0))
 {
     // Usamos IPv4 cuando el host lo indica (0.0.0.0 o IP v4)
     // y IPv6 solo cuando se pide explícitamente (::)
@@ -62,9 +64,14 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
 }
 
 TcpServer::~TcpServer() {
+    stop_accepting();
+}
+
+void TcpServer::stop_accepting() {
     if (listen_fd_ >= 0) {
         loop_.remove(listen_fd_);
         ::close(listen_fd_);
+        listen_fd_ = -1;
     }
 }
 

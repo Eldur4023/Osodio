@@ -3,11 +3,14 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <unistd.h>
 #include "types.hpp"
 #include "router.hpp"
 #include "openapi.hpp"
 #include "di.hpp"
 #include "group.hpp"
+#include "websocket.hpp"
+#include "metrics.hpp"
 
 namespace osodio {
 
@@ -64,6 +67,21 @@ public:
         return *this;
     }
 
+    // ── OpenAPI / Swagger UI ─────────────────────────────────────────────────
+    //
+    // Opt-in: call enable_docs() to expose the spec and the Swagger UI.
+    //
+    //   app.enable_docs();                  // /openapi.json + /docs
+    //   app.enable_docs("/api.json", "/ui"); // custom paths
+    //
+    App& enable_docs(std::string spec_path = "/openapi.json",
+                     std::string ui_path   = "/docs") {
+        openapi_spec_path_ = std::move(spec_path);
+        openapi_ui_path_   = std::move(ui_path);
+        openapi_enabled_   = true;
+        return *this;
+    }
+
     // ── Dependency injection ─────────────────────────────────────────────────
     //
     // Register a singleton — the same shared_ptr is returned for every request.
@@ -98,6 +116,84 @@ public:
         return RouteGroup(std::move(prefix), router_, openapi_routes_);
     }
 
+    // ── WebSocket ────────────────────────────────────────────────────────────
+    //
+    // Register a WebSocket handler.  The framework performs the RFC 6455
+    // handshake and hands a WSConnection to the handler.
+    //
+    //   app.ws("/chat", [](WSConnection ws) -> Task<void> {
+    //       while (ws.is_open()) {
+    //           auto msg = co_await ws.recv();
+    //           if (!msg) break;
+    //           ws.send("echo: " + msg->data);
+    //       }
+    //   });
+    //
+    template<typename F>
+    App& ws(std::string path, F&& fn) {
+        auto wrapper = [fn = std::forward<F>(fn)](Request& req, Response& res) mutable -> Task<void> {
+            // ── Validate upgrade headers ─────────────────────────────────────
+            auto upgrade = req.header("upgrade");
+            auto key     = req.header("sec-websocket-key");
+            if (!upgrade || upgrade->find("websocket") == std::string::npos || !key) {
+                res.status(426).json({{"error","WebSocket upgrade required"}});
+                co_return;
+            }
+
+            // ── Send 101 Switching Protocols ─────────────────────────────────
+            if (req._conn_fd < 0) {
+                res.status(500).json({{"error","no fd for WS upgrade"}});
+                co_return;
+            }
+            std::string hs =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + detail::ws_accept(*key) + "\r\n\r\n";
+            size_t sent = 0;
+            while (sent < hs.size()) {
+                ssize_t n = ::write(req._conn_fd, hs.data()+sent, hs.size()-sent);
+                if (n <= 0) co_return;
+                sent += n;
+            }
+
+            // ── Create WSState and hook into the connection's read path ──────
+            auto ws_state = std::make_shared<detail::WSState>();
+            ws_state->fd    = req._conn_fd;
+            ws_state->token = req.cancel_token;
+            ws_state->loop  = req.loop;
+
+            req._ws_on_readable = [ws_state]() { ws_state->on_readable(); };
+            res.mark_ws_started();   // tell finish_dispatch: don't send response
+
+            // ── Run user handler ─────────────────────────────────────────────
+            WSConnection ws_conn(ws_state);
+            co_await fn(std::move(ws_conn));
+        };
+        router_.add("GET", std::move(path), std::move(wrapper));
+        return *this;
+    }
+
+    // ── Operational endpoints ────────────────────────────────────────────────
+    //
+    //   app.enable_health();    // GET /health  → JSON {status, uptime, …}
+    //   app.enable_metrics();   // GET /metrics → Prometheus text
+    //
+    App& enable_health(std::string path = "/health") {
+        router_.add("GET", std::move(path), [](Request&, Response& res) {
+            res.json(Metrics::instance().to_health_json());
+        });
+        return *this;
+    }
+
+    App& enable_metrics(std::string path = "/metrics") {
+        router_.add("GET", std::move(path), [](Request&, Response& res) {
+            res.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+               .send(Metrics::instance().to_prometheus());
+        });
+        return *this;
+    }
+
     // Maximum simultaneous open connections (default 10 000).
     // Excess connections receive 503 immediately.
     App& max_connections(int n) { max_connections_ = n; return *this; }
@@ -127,8 +223,11 @@ private:
 
     // OpenAPI state
     std::vector<RouteDoc>                     openapi_routes_;
-    std::string                               api_title_   = "Osodio API";
-    std::string                               api_version_ = "0.1.0";
+    std::string                               api_title_       = "Osodio API";
+    std::string                               api_version_     = "0.1.0";
+    bool                                      openapi_enabled_ = false;
+    std::string                               openapi_spec_path_ = "/openapi.json";
+    std::string                               openapi_ui_path_   = "/docs";
 
     // Service container — populated before run(), read-only after
     ServiceContainer                          container_;

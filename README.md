@@ -447,8 +447,9 @@ third_party/
 | OpenAPI 3.0 + Swagger UI at `/docs` | ✅ |
 | Global error handlers | ✅ |
 | Vendored deps — 8 files, no cmake network | ✅ |
+| Multi-thread — one epoll loop per core, SO_REUSEPORT, shared connection limit | ✅ |
+| Graceful shutdown — SIGTERM drains connections (30s), second SIGINT forces exit | ✅ |
 | WebSockets | ⬜ |
 | HTTPS / TLS | ⬜ |
 | HTTP/2 | ⬜ |
 | Brotli compression | ⬜ |
-| Multi-thread (one loop per core) | ⬜ |

@@ -24,9 +24,10 @@ class Response {
         std::string     sendfile_path;
         std::uintmax_t  sendfile_size = 0;
 
-        // SSE mode: headers were already written directly to the socket by
-        // sse(); finish_dispatch must not send a second response.
+        // SSE / WebSocket mode: headers already written directly to the socket;
+        // finish_dispatch must not send a second response.
         bool sse_started = false;
+        bool ws_started  = false;
     };
     std::shared_ptr<State> state_;
 
@@ -133,6 +134,8 @@ public:
     std::uintmax_t         sendfile_size()  const { return state_->sendfile_size; }
     bool                   sse_started()    const { return state_->sse_started; }
     void                   mark_sse_started()    { state_->sse_started = true; }
+    bool                   ws_started()     const { return state_->ws_started; }
+    void                   mark_ws_started()     { state_->ws_started  = true; }
     std::string            content_type()   const {
         auto it = state_->headers.find("Content-Type");
         return (it != state_->headers.end()) ? it->second : "";
