@@ -48,6 +48,8 @@ int main() {
         .origins = {"http://localhost:5173", "http://localhost:3000"},
     }));
 
+    //app.enable_health("/health");
+    //app.enable_metrics("/metrics")
     app.use([](Request&, Response& res, auto next) -> Task<void> {
         res.header("X-Powered-By", "Osodio");
         co_await next();

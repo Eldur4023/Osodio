@@ -130,6 +130,8 @@ public:
 
     int                    status_code()    const { return state_->status_code; }
     const std::string&     body()           const { return state_->body; }
+    const std::unordered_map<std::string, std::string>&
+                           headers_map()    const { return state_->headers; }
     const std::string&     sendfile_path()  const { return state_->sendfile_path; }
     std::uintmax_t         sendfile_size()  const { return state_->sendfile_size; }
     bool                   sse_started()    const { return state_->sse_started; }

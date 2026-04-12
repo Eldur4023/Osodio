@@ -136,6 +136,10 @@ struct WSState {
     std::weak_ptr<CancellationToken> token;
     core::EventLoop* loop = nullptr;
 
+    // HTTP/2 path: instead of writing to fd, frames are enqueued via this
+    // callback (set by app.ws() when _h2_ws_ctx is present).
+    std::function<void(std::string)> send_fn;
+
     std::string          read_buf;
     std::vector<WSMessage> pending;
 
@@ -145,6 +149,17 @@ struct WSState {
 
     std::coroutine_handle<> recv_waiter;
     bool closed = false;
+
+    // ── raw_send — routes through send_fn (H2) or ::write(fd) (HTTP/1.1) ─────
+    void raw_send(const std::string& frame) {
+        if (send_fn) { send_fn(frame); return; }
+        size_t w = 0;
+        while (w < frame.size()) {
+            ssize_t n = ::write(fd, frame.data()+w, frame.size()-w);
+            if (n <= 0) break;
+            w += static_cast<size_t>(n);
+        }
+    }
 
     // ── Parse as many complete frames as possible ─────────────────────────────
     void try_parse() {
@@ -179,14 +194,13 @@ struct WSState {
             // Control frames (RFC 6455 §5.5): never fragmented
             if (opcode == 0x8) {  // Close
                 closed = true;
-                // Echo close frame back
-                ::write(fd, "\x88\x00", 2);
+                raw_send(std::string("\x88\x00", 2));  // echo close frame
                 pending.push_back({WSMessage::Opcode::Close, std::move(payload)});
                 return;
             }
             if (opcode == 0x9) {  // Ping → auto-pong
                 auto pong = build_frame(payload, 0xA);
-                ::write(fd, pong.data(), pong.size());
+                raw_send(pong);
                 continue;
             }
             if (opcode == 0xA) {  // Pong
@@ -212,7 +226,7 @@ struct WSState {
         }
     }
 
-    // ── Called by HttpConnection::do_read() when in WS mode ──────────────────
+    // ── Called by HttpConnection::do_read() when in WS mode (HTTP/1.1 only) ──
     void on_readable() {
         char buf[65536];
         while (true) {
@@ -224,6 +238,13 @@ struct WSState {
             }
             read_buf.append(buf, n);
         }
+        try_parse();
+        resume_waiter_if_ready();
+    }
+
+    // ── Called by Http2Connection::on_data_chunk_recv_cb (HTTP/2 only) ───────
+    void feed(const uint8_t* data, size_t len) {
+        read_buf.append(reinterpret_cast<const char*>(data), len);
         try_parse();
         resume_waiter_if_ready();
     }
@@ -324,7 +345,7 @@ public:
         frame[1] = 2;
         frame[2] = char(code >> 8);
         frame[3] = char(code & 0xFF);
-        ::write(s_->fd, frame, 4);
+        s_->raw_send(std::string(frame, 4));
     }
 
     bool is_open() const {
@@ -339,6 +360,10 @@ private:
     bool write_frame(std::string_view payload, uint8_t opcode) {
         if (!is_open()) return false;
         auto frame = detail::build_frame(payload, opcode);
+        if (s_->send_fn) {
+            s_->send_fn(frame);
+            return true;
+        }
         size_t w = 0;
         while (w < frame.size()) {
             ssize_t n = ::write(s_->fd, frame.data()+w, frame.size()-w);
@@ -348,7 +373,7 @@ private:
                 s_->closed = true;
                 return false;
             }
-            w += n;
+            w += static_cast<size_t>(n);
         }
         return true;
     }

@@ -1,4 +1,5 @@
 #include "http_connection.hpp"
+#include "http2_connection.hpp"
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/response.hpp"
 #include "../../include/osodio/task.hpp"
@@ -6,6 +7,7 @@
 
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
+#include <fstream>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -57,18 +59,24 @@ static void parse_query(const std::string& qs,
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
                                osodio::DispatchFn dispatch,
-                               std::shared_ptr<std::atomic<int>> conn_count)
+                               std::shared_ptr<std::atomic<int>> conn_count,
+                               SSL_CTX* ssl_ctx)
     : fd_(fd)
     , loop_(loop)
     , dispatch_(std::move(dispatch))
     , conn_count_(std::move(conn_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); })
 {
+    if (ssl_ctx) {
+        ssl_ = SSL_new(ssl_ctx);
+        if (!ssl_) return; // close() will be called in start() → error path
+        SSL_set_fd(ssl_, fd_);
+        SSL_set_accept_state(ssl_);
+    }
 }
 
 void HttpConnection::start() {
-    // Arm the header timeout immediately — if we don't receive a complete
-    // HTTP request within kHeaderTimeoutMs, close the connection (Slowloris).
+    // Arm the header timeout — covers both TLS handshake + HTTP header receive.
     auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
     header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
         if (auto self = self_weak.lock()) {
@@ -78,6 +86,10 @@ void HttpConnection::start() {
             }
         }
     });
+
+    // TLS: wait for first EPOLLIN before starting the handshake.
+    // (The fd is added to epoll by TcpServer immediately after start().)
+    if (ssl_) tls_handshaking_ = true;
 }
 
 HttpConnection::~HttpConnection() {
@@ -87,6 +99,7 @@ HttpConnection::~HttpConnection() {
         if (header_tfd_  >= 0) ::close(header_tfd_);
         if (timeout_tfd_ >= 0) ::close(timeout_tfd_);
         if (file_fd_     >= 0) ::close(file_fd_);
+        if (ssl_) { SSL_shutdown(ssl_); SSL_free(ssl_); ssl_ = nullptr; }
         ::close(fd_);
     }
 }
@@ -96,10 +109,68 @@ HttpConnection::~HttpConnection() {
 void HttpConnection::on_event(uint32_t events) {
     if (events & (EPOLLERR | EPOLLHUP)) { close(); return; }
 
+    // TLS handshake: route ALL events until SSL_accept() completes.
+    if (tls_handshaking_) { do_tls_handshake(); return; }
+
     // While write_buf_ has data, only EPOLLOUT is armed.
     // Once the buffer is drained, EPOLLIN is re-armed (see on_write_complete).
     if (events & EPOLLOUT) do_write();
     if (events & EPOLLIN)  do_read();
+}
+
+// ── TLS handshake ─────────────────────────────────────────────────────────────
+//
+// Called for every epoll event while tls_handshaking_ is true.
+// SSL_accept() is non-blocking: it may need multiple EPOLLIN/EPOLLOUT rounds
+// before the handshake finishes.
+
+void HttpConnection::do_tls_handshake() {
+    int r = SSL_accept(ssl_);
+    if (r == 1) {
+        // Handshake complete — check ALPN-negotiated protocol.
+        const unsigned char* proto     = nullptr;
+        unsigned int         proto_len = 0;
+        SSL_get0_alpn_selected(ssl_, &proto, &proto_len);
+
+        if (proto_len == 2 && memcmp(proto, "h2", 2) == 0) {
+            // ── Upgrade to HTTP/2 ──────────────────────────────────────────
+            // Transfer fd and ssl* ownership to Http2Connection.
+            // The EventLoop copies the callback before calling it (see run()),
+            // so loop_.remove() + loop_.add() here are safe.
+            int  xfd  = fd_;
+            SSL* xssl = ssl_;
+            fd_   = -1;    // prevent close() from touching these
+            ssl_  = nullptr;
+            closed_ = true; // suppress any further activity on this object
+            loop_.cancel_timer(header_tfd_);
+            header_tfd_ = -1;
+
+            loop_.remove(xfd);
+
+            auto h2 = std::make_shared<Http2Connection>(
+                xfd, xssl, loop_, dispatch_, conn_count_);
+
+            if (!h2->init()) return; // Http2Connection::init() cleaned up on failure
+
+            loop_.add(xfd, EPOLLIN | EPOLLOUT,
+                      [h2](uint32_t ev) { h2->on_event(ev); });
+            return;
+        }
+
+        // HTTP/1.1 (or no ALPN) — proceed normally.
+        tls_handshaking_ = false;
+        loop_.modify(fd_, EPOLLIN);
+        return;
+    }
+    int err = SSL_get_error(ssl_, r);
+    if (err == SSL_ERROR_WANT_READ) {
+        loop_.modify(fd_, EPOLLIN);   // already default, but be explicit
+    } else if (err == SSL_ERROR_WANT_WRITE) {
+        loop_.modify(fd_, EPOLLOUT);  // need to flush handshake data
+    } else {
+        // Fatal TLS error (bad client hello, cert mismatch, etc.)
+        close();
+    }
 }
 
 // ── Read path ─────────────────────────────────────────────────────────────────
@@ -113,12 +184,24 @@ void HttpConnection::do_read() {
 
     char buf[16384];
     while (!closed_) {
-        ssize_t n = ::read(fd_, buf, sizeof(buf));
-        if (n == 0)  { close(); return; }
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-            if (errno == EINTR) continue;
-            close(); return;
+        ssize_t n;
+        if (ssl_) {
+            n = SSL_read(ssl_, buf, sizeof(buf));
+            if (n <= 0) {
+                int err = SSL_get_error(ssl_, static_cast<int>(n));
+                if (err == SSL_ERROR_WANT_READ)  return; // wait for more data
+                if (err == SSL_ERROR_ZERO_RETURN) { close(); return; } // clean shutdown
+                if (err == SSL_ERROR_WANT_WRITE)  return; // rare renegotiation case
+                close(); return;
+            }
+        } else {
+            n = ::read(fd_, buf, sizeof(buf));
+            if (n == 0) { close(); return; }
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+                if (errno == EINTR) continue;
+                close(); return;
+            }
         }
         if (!parser_.feed(buf, static_cast<size_t>(n))) {
             send_error(400, "Bad Request");
@@ -231,8 +314,21 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
         return;
     }
 
-    // sendfile path: open the file and set up state; build() emits only headers
+    // sendfile path
     if (!response.sendfile_path().empty()) {
+        if (ssl_) {
+            // TLS: sendfile(2) bypasses OpenSSL — must read file into userspace.
+            // response.build() emits headers with the correct Content-Length;
+            // we append the raw file bytes to form a complete HTTP response.
+            std::ifstream f(response.sendfile_path(), std::ios::binary);
+            if (!f) { send_error(500, "Cannot open file"); return; }
+            std::string file_body(
+                (std::istreambuf_iterator<char>(f)),
+                std::istreambuf_iterator<char>());
+            send_response(response.build() + file_body);
+            return;
+        }
+        // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             osodio::Response err;
@@ -272,22 +368,39 @@ void HttpConnection::send_response(std::string data) {
     }
 
     // Try immediate write
-    ssize_t n = ::write(fd_, data.data(), data.size());
-    if (n < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            close(); return;
+    ssize_t n;
+    if (ssl_) {
+        n = SSL_write(ssl_, data.data(), static_cast<int>(data.size()));
+        if (n <= 0) {
+            int err = SSL_get_error(ssl_, static_cast<int>(n));
+            if (err != SSL_ERROR_WANT_WRITE && err != SSL_ERROR_WANT_READ) {
+                close(); return;
+            }
+            write_buf_    = std::move(data);
+            write_offset_ = 0;
+            loop_.modify(fd_, EPOLLOUT);
+            return;
         }
-        // EAGAIN on first byte — buffer everything, start at offset 0
-        write_buf_    = std::move(data);
-        write_offset_ = 0;
     } else {
+        n = ::write(fd_, data.data(), data.size());
+        if (n < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                close(); return;
+            }
+            write_buf_    = std::move(data);
+            write_offset_ = 0;
+            loop_.modify(fd_, EPOLLOUT);
+            return;
+        }
+    }
+
+    {
         size_t written = static_cast<size_t>(n);
         if (written == data.size()) {
             on_write_complete();
             return;
         }
         // Partial write — keep the full string and advance the offset.
-        // Avoids an O(n) substr copy; do_write() reads from write_offset_.
         write_buf_    = std::move(data);
         write_offset_ = written;
     }
@@ -298,13 +411,25 @@ void HttpConnection::send_response(std::string data) {
 
 void HttpConnection::do_write() {
     while (write_offset_ < write_buf_.size()) {
-        ssize_t n = ::write(fd_,
-                            write_buf_.data()  + write_offset_,
-                            write_buf_.size()  - write_offset_);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;  // try next EPOLLOUT
-            if (errno == EINTR) continue;
-            close(); return;
+        ssize_t n;
+        if (ssl_) {
+            n = SSL_write(ssl_,
+                          write_buf_.data()  + write_offset_,
+                          static_cast<int>(write_buf_.size() - write_offset_));
+            if (n <= 0) {
+                int err = SSL_get_error(ssl_, static_cast<int>(n));
+                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) return;
+                close(); return;
+            }
+        } else {
+            n = ::write(fd_,
+                        write_buf_.data()  + write_offset_,
+                        write_buf_.size()  - write_offset_);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+                if (errno == EINTR) continue;
+                close(); return;
+            }
         }
         write_offset_ += static_cast<size_t>(n);
     }
@@ -320,11 +445,12 @@ void HttpConnection::do_write() {
 }
 
 void HttpConnection::do_sendfile() {
+    // Only reachable when ssl_ is null (TLS path reads the file in finish_dispatch).
     while (file_remaining_ > 0) {
         ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
                                std::min(file_remaining_, size_t{256 * 1024}));
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return; // wait for EPOLLOUT
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
             if (errno == EINTR) continue;
             close(); return;
         }
@@ -399,6 +525,14 @@ void HttpConnection::close() {
     loop_.cancel_timer(timeout_tfd_);
     timeout_tfd_ = -1;
     loop_.remove(fd_);
+
+    // TLS shutdown: best-effort (non-blocking); we close the fd regardless.
+    if (ssl_) {
+        SSL_shutdown(ssl_);
+        SSL_free(ssl_);
+        ssl_ = nullptr;
+    }
+
     ::close(fd_);
     if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);

@@ -33,8 +33,32 @@ namespace osodio {
 //
 class SSEWriter {
 public:
+    // HTTP/1.1 path — writes directly to a socket fd.
     SSEWriter(int fd, std::shared_ptr<CancellationToken> token)
         : fd_(fd), token_(std::move(token)) {}
+
+    // HTTP/2 path — routes through the nghttp2 DATA frame pipeline.
+    SSEWriter(std::shared_ptr<Request::H2SSEContext> ctx,
+              std::shared_ptr<CancellationToken>     token)
+        : fd_(-1), token_(std::move(token)), h2_ctx_(std::move(ctx)) {}
+
+    // Non-copyable, movable — move clears h2_ctx_ so the destructor
+    // doesn't end the stream twice.
+    SSEWriter(const SSEWriter&)            = delete;
+    SSEWriter& operator=(const SSEWriter&) = delete;
+    SSEWriter(SSEWriter&& o) noexcept
+        : fd_(o.fd_), token_(std::move(o.token_)),
+          h2_ctx_(std::move(o.h2_ctx_)), ended_(o.ended_)
+    { o.fd_ = -1; o.ended_ = true; }
+    SSEWriter& operator=(SSEWriter&&) = delete;
+
+    // On HTTP/2, closing the SSEWriter sends the DATA+END_STREAM frame.
+    ~SSEWriter() {
+        if (h2_ctx_ && !ended_) {
+            ended_ = true;
+            h2_ctx_->end();
+        }
+    }
 
     // Send a "data: <text>\n\n" event.
     // Returns false if the connection is gone.
@@ -58,11 +82,13 @@ public:
     }
 
     // True while the underlying connection is alive.
-    bool is_open() const { return fd_ >= 0 && token_ && !token_->is_cancelled(); }
+    bool is_open() const { return token_ && !token_->is_cancelled(); }
 
 private:
-    int fd_;
-    std::shared_ptr<CancellationToken> token_;
+    int  fd_;
+    std::shared_ptr<CancellationToken>     token_;
+    std::shared_ptr<Request::H2SSEContext> h2_ctx_;
+    bool ended_ = false;
 
     bool write_frame(std::string_view event, std::string_view data, std::string_view id) {
         if (!is_open()) return false;
@@ -89,11 +115,20 @@ private:
     // means the connection is gone; the epoll EPOLLHUP will fire shortly and
     // cancel the token — is_open() will return false on the next loop check.
     bool raw_write(const std::string& frame) {
+        if (!is_open()) return false;
+
+        // HTTP/2 path: enqueue into the nghttp2 DATA provider.
+        if (h2_ctx_) {
+            h2_ctx_->push(frame);
+            return true;
+        }
+
+        // HTTP/1.1 path: write directly to the socket fd.
         size_t written = 0;
         while (written < frame.size()) {
             ssize_t n = ::write(fd_, frame.data() + written, frame.size() - written);
             if (n < 0) {
-                if (errno == EINTR)                         continue;
+                if (errno == EINTR)                          continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return true;  // drop
                 return false;   // EPIPE / ECONNRESET — connection dead
             }
@@ -115,8 +150,20 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
     res.status(200)
        .header("Content-Type",     "text/event-stream")
        .header("Cache-Control",    "no-cache")
-       .header("X-Accel-Buffering","no")   // disable nginx / proxy buffering
-       .header("Connection",       "keep-alive");
+       .header("X-Accel-Buffering","no");  // disable nginx / proxy buffering
+
+    // ── HTTP/2 path ───────────────────────────────────────────────────────────
+    // Http2Connection sets _h2_sse_ctx on every stream.  We submit a HEADERS
+    // frame immediately (no END_STREAM) and hand back an SSEWriter that pushes
+    // DATA frames via the nghttp2 data provider.
+    if (req._h2_sse_ctx) {
+        req._h2_sse_ctx->begin();
+        res.mark_sse_started();
+        return SSEWriter(req._h2_sse_ctx, req.cancel_token);
+    }
+
+    // ── HTTP/1.1 path ─────────────────────────────────────────────────────────
+    res.header("Connection", "keep-alive");
 
     // Build and write headers directly to the socket — bypasses write_buf_
     std::string headers = res.build_sse_headers();

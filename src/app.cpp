@@ -1,5 +1,7 @@
 #include "../include/osodio/app.hpp"
 #include "../include/osodio/metrics.hpp"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include "../include/osodio/request.hpp"
 #include "../include/osodio/response.hpp"
 #include "../include/osodio/task.hpp"
@@ -23,6 +25,28 @@
 namespace osodio {
 
 namespace {
+
+// ── ALPN protocol selection ───────────────────────────────────────────────────
+// Prefer "h2" (HTTP/2); accept "http/1.1" as fallback.
+// Called during TLS handshake when the client presents its ALPN list.
+static int alpn_select_cb(SSL*, const unsigned char** out, unsigned char* outlen,
+                          const unsigned char* in, unsigned int inlen, void*)
+{
+    const unsigned char* p   = in;
+    const unsigned char* end = in + inlen;
+    const unsigned char* h11 = nullptr;
+    unsigned char        h11_len = 0;
+
+    while (p < end) {
+        unsigned char len = *p++;
+        if (p + len > end) break;
+        if (len == 2 && memcmp(p, "h2",       2) == 0) { *out = p; *outlen = len; return SSL_TLSEXT_ERR_OK; }
+        if (len == 8 && memcmp(p, "http/1.1", 8) == 0) { h11 = p; h11_len = len; }
+        p += len;
+    }
+    if (h11) { *out = h11; *outlen = h11_len; return SSL_TLSEXT_ERR_OK; }
+    return SSL_TLSEXT_ERR_NOACK;
+}
 
 static const char* mime_for_ext(const std::string& ext) {
     if (ext == ".html" || ext == ".htm")  return "text/html; charset=utf-8";
@@ -219,6 +243,37 @@ void App::run(const std::string& host, uint16_t port) {
     // ── Multi-core: one event loop per hardware thread ────────────────────────
     unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
 
+    // ── TLS context ───────────────────────────────────────────────────────────
+    // Created once here; SSL_CTX is thread-safe for SSL_new() across threads.
+    // Passed to each TcpServer → HttpConnection as a raw pointer (lifetime is
+    // the entire duration of run(), guarded by ssl_ctx_guard below).
+    SSL_CTX* ssl_ctx = nullptr;
+    std::shared_ptr<SSL_CTX> ssl_ctx_guard; // ensures SSL_CTX_free on exit
+
+    if (!ssl_cert_.empty()) {
+        ssl_ctx = SSL_CTX_new(TLS_server_method());
+        if (!ssl_ctx) throw std::runtime_error("SSL_CTX_new failed");
+
+        SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION);
+        SSL_CTX_set_mode(ssl_ctx,
+            SSL_MODE_ENABLE_PARTIAL_WRITE |
+            SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+
+        if (SSL_CTX_use_certificate_chain_file(ssl_ctx, ssl_cert_.c_str()) != 1)
+            throw std::runtime_error("Failed to load certificate: " + ssl_cert_);
+
+        if (SSL_CTX_use_PrivateKey_file(ssl_ctx, ssl_key_.c_str(), SSL_FILETYPE_PEM) != 1)
+            throw std::runtime_error("Failed to load private key: " + ssl_key_);
+
+        if (SSL_CTX_check_private_key(ssl_ctx) != 1)
+            throw std::runtime_error("Certificate and private key do not match");
+
+        // Advertise h2 and http/1.1 via ALPN so browsers can upgrade to HTTP/2.
+        SSL_CTX_set_alpn_select_cb(ssl_ctx, alpn_select_cb, nullptr);
+
+        ssl_ctx_guard = std::shared_ptr<SSL_CTX>(ssl_ctx, SSL_CTX_free);
+    }
+
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);
     Metrics::instance().active_connections_ = shared_conn_count.get();
@@ -288,7 +343,7 @@ void App::run(const std::string& host, uint16_t port) {
         threads.emplace_back([&]() {
             core::EventLoop loop;
             core::TcpServer server(host, port, loop, dispatch,
-                                   max_connections_, shared_conn_count);
+                                   max_connections_, shared_conn_count, ssl_ctx);
             {
                 std::lock_guard<std::mutex> lk(all_mutex);
                 all_loops.push_back(&loop);
@@ -307,13 +362,14 @@ void App::run(const std::string& host, uint16_t port) {
 
     // ── Main thread (core 0) ──────────────────────────────────────────────────
     core::TcpServer main_server(host, port, main_loop, dispatch,
-                                max_connections_, shared_conn_count);
+                                max_connections_, shared_conn_count, ssl_ctx);
     {
         std::lock_guard<std::mutex> lk(all_mutex);
         all_servers.push_back(&main_server);
     }
 
-    std::cout << " * Osodio running on http://" << host << ":" << port
+    const char* scheme = ssl_ctx ? "https" : "http";
+    std::cout << " * Osodio running on " << scheme << "://" << host << ":" << port
               << "  (threads=" << num_threads << ", press CTRL+C to quit)\n";
 
     main_loop.run();

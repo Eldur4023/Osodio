@@ -7,10 +7,15 @@
 
 namespace osodio::core {
 
-class EventLoop {
+// ── EpollLoop ─────────────────────────────────────────────────────────────────
+//
+// Default event loop backend — uses epoll + timerfd + eventfd.
+// All existing code refers to this as "EventLoop" via the alias below.
+
+class EpollLoop {
 public:
-    EventLoop();
-    ~EventLoop();
+    EpollLoop();
+    ~EpollLoop();
 
     using Callback = std::function<void(uint32_t events)>;
 
@@ -18,18 +23,11 @@ public:
     void modify(int fd, uint32_t events);
     void remove(int fd);
 
-    // Schedule a task to run in the next loop iteration
     void post(std::function<void()> cb);
 
-    // Schedule a one-shot timer: fires cb after `ms` milliseconds.
-    // Uses timerfd — scalable, no extra threads.
-    // Returns the timerfd so it can be cancelled with cancel_timer().
     int  schedule_timer(int ms, std::function<void()> cb);
+    void cancel_timer  (int tfd);
 
-    // Cancel a previously scheduled timer (safe to call with -1 or already-fired tfd).
-    void cancel_timer(int tfd);
-
-    // Blocks until stop() is called
     void run();
     void stop();
 
@@ -46,3 +44,15 @@ private:
 };
 
 } // namespace osodio::core
+
+// ── Backend alias ─────────────────────────────────────────────────────────────
+//
+// When OSODIO_IO_URING is defined, EventLoop resolves to IoUringLoop.
+// All connection and server code uses core::EventLoop without any changes.
+
+#ifdef OSODIO_IO_URING
+#  include "io_uring_loop.hpp"
+   namespace osodio::core { using EventLoop = IoUringLoop; }
+#else
+   namespace osodio::core { using EventLoop = EpollLoop; }
+#endif

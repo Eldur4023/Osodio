@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <zlib.h>
+#include <brotli/encode.h>
 #include "types.hpp"
 #include "request.hpp"
 #include "response.hpp"
@@ -120,28 +121,32 @@ inline Middleware cors(CorsOptions opts = {}) {
 
 // ─── compress() ───────────────────────────────────────────────────────────────
 //
-// gzip compression middleware.  Runs after the handler; compresses the response
-// body if the client signals Accept-Encoding: gzip and the body is large enough.
+// Compression middleware (Brotli preferred, gzip fallback).
+// Runs after the handler; compresses the response body based on Accept-Encoding.
 //
-//   app.use(osodio::compress());                // default: min_size=1024, level=6
-//   app.use(osodio::compress({.min_size=512, .level=9}));
+//   app.use(osodio::compress());
+//   app.use(osodio::compress({.min_size=512, .level=9, .brotli_quality=5}));
 //
+// Priority: br > gzip (Brotli gives ~20% better ratio for text).
 // Skips: already-compressed types (images, video, fonts, zip), bodies < min_size,
-// clients that don't accept gzip, 304/204 responses (no body).
+// clients that advertise neither encoding, 304/204 responses (no body).
 //
 struct CompressOptions {
-    std::size_t min_size = 1024;   // bytes — don't compress smaller responses
-    int         level    = 6;      // zlib level 1-9  (1=fast, 9=best ratio)
+    std::size_t min_size       = 1024;  // bytes — don't compress smaller responses
+    int         level          = 6;     // gzip: zlib level 1–9  (1=fast, 9=best)
+    int         brotli_quality = 6;     // brotli: 0–11 (0=fast, 11=best ratio)
 };
 
 inline Middleware compress(CompressOptions opts = {}) {
     return [opts](Request& req, Response& res, NextFn next) -> Task<void> {
         co_await next();
 
-        // Only compress if client advertises gzip
         auto ae = req.header("accept-encoding");
         if (!ae) co_return;
-        if (ae->find("gzip") == std::string::npos) co_return;
+
+        bool want_br   = ae->find("br")   != std::string::npos;
+        bool want_gzip = ae->find("gzip") != std::string::npos;
+        if (!want_br && !want_gzip) co_return;
 
         // Skip no-body statuses
         int sc = res.status_code();
@@ -165,8 +170,35 @@ inline Middleware compress(CompressOptions opts = {}) {
             }
         }
 
-        // ── gzip compress with zlib ───────────────────────────────────────────
-        uLongf bound = compressBound(static_cast<uLong>(body.size())) + 18; // gzip header
+        // ── Brotli (preferred) ────────────────────────────────────────────────
+        if (want_br) {
+            std::size_t bound = BrotliEncoderMaxCompressedSize(body.size());
+            std::string compressed(bound, '\0');
+            std::size_t encoded_size = bound;
+
+            BROTLI_BOOL ok = BrotliEncoderCompress(
+                opts.brotli_quality,
+                BROTLI_DEFAULT_WINDOW,
+                BROTLI_MODE_TEXT,
+                body.size(),
+                reinterpret_cast<const uint8_t*>(body.data()),
+                &encoded_size,
+                reinterpret_cast<uint8_t*>(compressed.data())
+            );
+            if (ok == BROTLI_TRUE) {
+                compressed.resize(encoded_size);
+                res.header("Content-Encoding", "br")
+                   .header("Vary", "Accept-Encoding")
+                   .send(std::move(compressed));
+                co_return;
+            }
+            // fall through to gzip on error
+        }
+
+        // ── gzip (fallback) ───────────────────────────────────────────────────
+        if (!want_gzip) co_return;
+
+        uLongf bound = compressBound(static_cast<uLong>(body.size())) + 18;
         std::string compressed(bound, '\0');
 
         z_stream zs{};
@@ -175,7 +207,6 @@ inline Middleware compress(CompressOptions opts = {}) {
         zs.next_out  = reinterpret_cast<Bytef*>(compressed.data());
         zs.avail_out = static_cast<uInt>(bound);
 
-        // windowBits = 15 + 16 → gzip format (not raw deflate)
         if (deflateInit2(&zs, opts.level, Z_DEFLATED,
                          15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) co_return;
 

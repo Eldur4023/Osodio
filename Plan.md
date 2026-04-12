@@ -31,22 +31,24 @@
 | **write_buf_ limit** | Hard cap 16 MB por respuesta; cierre limpio si se supera |
 | **Header timeout per-keepalive** | Timer de 5s rearmado tras cada respuesta en conexiones keep-alive |
 | **Errores tipados** | HttpError, not_found(), bad_request(), unauthorized(), etc. |
-| **Middleware** | logger(), cors(), compress() (gzip zlib), helmet(), rate_limit() |
+| **Middleware** | logger(), cors(), compress() (Brotli preferido, gzip fallback), helmet(), rate_limit() |
 | **helmet()** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy; headers pre-built al registrar |
 | **rate_limit()** | Fixed-window por IP (o clave custom); headers X-RateLimit-Limit/Remaining; state por instancia |
 | **Static files** | MIME, path traversal block, ETag, Cache-Control, 304, sendfile(2) zero-copy |
 | **SPA fallback** | serve_static("/", "./dist", true) — rutas sin archivo → index.html con 200 |
-| **SSE** | make_sse(res, req) — text/event-stream, named events, ping, is_open() via CancellationToken |
+| **SSE** | make_sse(res, req) — text/event-stream, named events, ping, is_open() via CancellationToken; HTTP/2: nghttp2 DATA frames via H2SSEContext |
 | **Multipart** | parse_multipart(req) — boundary extraction, headers por parte, filename, content_type |
 | **remote_ip** | req.remote_ip — IPv4/IPv6 via getpeername() en dispatch() |
 | **sleep() early wake** | CancellationToken.set_wake() — cancel() cancela el timerfd y reanuda el coroutine inmediatamente |
 | **Templates** | res.render() vía inja (Jinja2), Environment cacheado por thread×dir |
 | **OpenAPI** | DocBuilder\<F\> compile-time, opt-in con app.enable_docs() |
 | **DI** | app.provide\<T\>(shared_ptr) y app.provide\<T\>(factory) |
-| **WebSocket** | RFC 6455: SHA-1/base64 handshake, framing (text/binary/ping/pong/close), fragmentación |
+| **WebSocket** | RFC 6455: SHA-1/base64 handshake, framing (text/binary/ping/pong/close), fragmentación; HTTP/2: RFC 8441 CONNECT+websocket, nghttp2 DATA frames bidireccionales |
 | **Multi-thread** | hardware_concurrency() threads, SO_REUSEPORT, conn_count compartido |
 | **Graceful shutdown** | SIGTERM → stop_accepting() + drain poll 100ms, 30s timeout; 2º SIGINT → force exit |
 | **Metrics + Health** | app.enable_metrics() → GET /metrics Prometheus; app.enable_health() → GET /health JSON |
+| **TLS 1.3** | app.tls("cert.pem","key.pem").run(443); handshake async no-blocking; sendfile→read para HTTPS |
+| **HTTP/2** | ALPN (h2/http1.1); Http2Connection + nghttp2; streams concurrentes; HPACK; BodySrc owned por stream |
 | **Deps vendored** | 8 archivos en third_party/, cero red en cmake |
 
 ---
@@ -57,10 +59,10 @@
 
 ### Nivel producción
 
-- [ ] **HTTP/2** con nghttp2 — multiplexing, HPACK, server push
-- [ ] **TLS 1.3** con OpenSSL — ALPN para h2, SNI, hot-reload de certificados
-- [ ] **io_uring backend** — batch syscalls, reducir overhead vs epoll (Linux 5.1+)
-- [ ] **Brotli** — mejor ratio que gzip para texto; negociado vía Accept-Encoding
+- [x] **HTTP/2** con nghttp2 — ALPN, streams concurrentes, HPACK, flujo completo sin server push
+- [x] **TLS 1.3** con OpenSSL — app.tls(cert, key).run(443); handshake async + epoll; sendfile fallback para HTTPS
+- [x] **io_uring backend** — IORING_POLL_ADD_MULTI, token-based, raw syscalls; `-DUSE_IO_URING=ON`
+- [x] **Brotli** — mejor ratio que gzip para texto; negociado vía Accept-Encoding; gzip fallback
 - [x] **Métricas** — /metrics Prometheus, /health endpoint
 
 ### Nivel ecosistema

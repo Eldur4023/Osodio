@@ -11,7 +11,7 @@
 
 namespace osodio::core {
 
-EventLoop::EventLoop() {
+EpollLoop::EpollLoop() {
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ < 0)
         throw std::runtime_error(std::string("epoll_create1: ") + strerror(errno));
@@ -27,12 +27,12 @@ EventLoop::EventLoop() {
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wakeup_fd_, &ev);
 }
 
-EventLoop::~EventLoop() {
+EpollLoop::~EpollLoop() {
     if (wakeup_fd_ >= 0) ::close(wakeup_fd_);
     if (epoll_fd_  >= 0) ::close(epoll_fd_);
 }
 
-void EventLoop::add(int fd, uint32_t events, Callback cb) {
+void EpollLoop::add(int fd, uint32_t events, Callback cb) {
     callbacks_[fd] = std::move(cb);
 
     epoll_event ev{};
@@ -44,19 +44,19 @@ void EventLoop::add(int fd, uint32_t events, Callback cb) {
     }
 }
 
-void EventLoop::modify(int fd, uint32_t events) {
+void EpollLoop::modify(int fd, uint32_t events) {
     epoll_event ev{};
     ev.events  = events;
     ev.data.fd = fd;
     epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
 }
 
-void EventLoop::remove(int fd) {
+void EpollLoop::remove(int fd) {
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
     callbacks_.erase(fd);
 }
 
-void EventLoop::post(std::function<void()> cb) {
+void EpollLoop::post(std::function<void()> cb) {
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         task_queue_.push_back(std::move(cb));
@@ -65,7 +65,7 @@ void EventLoop::post(std::function<void()> cb) {
     (void)write(wakeup_fd_, &val, sizeof(val));
 }
 
-void EventLoop::process_tasks() {
+void EpollLoop::process_tasks() {
     std::vector<std::function<void()>> current_tasks;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -76,7 +76,7 @@ void EventLoop::process_tasks() {
     }
 }
 
-void EventLoop::run() {
+void EpollLoop::run() {
     running_ = true;
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
@@ -113,7 +113,7 @@ void EventLoop::run() {
     }
 }
 
-int EventLoop::schedule_timer(int ms, std::function<void()> cb) {
+int EpollLoop::schedule_timer(int ms, std::function<void()> cb) {
     int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (tfd < 0) {
         post(std::move(cb));
@@ -139,13 +139,13 @@ int EventLoop::schedule_timer(int ms, std::function<void()> cb) {
     return tfd;
 }
 
-void EventLoop::cancel_timer(int tfd) {
+void EpollLoop::cancel_timer(int tfd) {
     if (tfd < 0) return;
     remove(tfd);
     ::close(tfd);
 }
 
-void EventLoop::stop() {
+void EpollLoop::stop() {
     running_ = false;
     uint64_t val = 1;
     (void)write(wakeup_fd_, &val, sizeof(val));

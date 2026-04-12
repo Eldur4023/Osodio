@@ -18,10 +18,12 @@ namespace osodio::core {
 TcpServer::TcpServer(const std::string& host, uint16_t port,
                      EventLoop& loop, osodio::DispatchFn dispatch,
                      int max_connections,
-                     std::shared_ptr<std::atomic<int>> conn_count)
+                     std::shared_ptr<std::atomic<int>> conn_count,
+                     SSL_CTX* ssl_ctx)
     : loop_(loop)
     , dispatch_(std::move(dispatch))
     , max_connections_(max_connections)
+    , ssl_ctx_(ssl_ctx)
     , conn_count_(conn_count ? std::move(conn_count)
                              : std::make_shared<std::atomic<int>>(0))
 {
@@ -106,7 +108,7 @@ void TcpServer::on_accept() {
         }
 
         auto conn = std::make_shared<http::HttpConnection>(
-            client_fd, loop_, dispatch_, conn_count_);
+            client_fd, loop_, dispatch_, conn_count_, ssl_ctx_);
 
         conn->start();
 

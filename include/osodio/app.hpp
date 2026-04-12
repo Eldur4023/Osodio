@@ -67,6 +67,21 @@ public:
         return *this;
     }
 
+    // ── TLS ──────────────────────────────────────────────────────────────────
+    //
+    // Enable HTTPS.  Must be called before run().
+    //
+    //   app.tls("server.crt", "server.key").run(443);
+    //
+    // cert_path and key_path are PEM files.
+    // Throws std::runtime_error if the files can't be loaded or OpenSSL fails.
+    //
+    App& tls(std::string cert_path, std::string key_path) {
+        ssl_cert_ = std::move(cert_path);
+        ssl_key_  = std::move(key_path);
+        return *this;
+    }
+
     // ── OpenAPI / Swagger UI ─────────────────────────────────────────────────
     //
     // Opt-in: call enable_docs() to expose the spec and the Swagger UI.
@@ -132,7 +147,30 @@ public:
     template<typename F>
     App& ws(std::string path, F&& fn) {
         auto wrapper = [fn = std::forward<F>(fn)](Request& req, Response& res) mutable -> Task<void> {
-            // ── Validate upgrade headers ─────────────────────────────────────
+
+            // ── HTTP/2 path (RFC 8441 — CONNECT + :protocol: websocket) ──────
+            if (req._h2_ws_ctx) {
+                auto ws_state = std::make_shared<detail::WSState>();
+                ws_state->token   = req.cancel_token;
+                ws_state->loop    = req.loop;
+                // Outgoing WS frames are sent as nghttp2 DATA chunks.
+                ws_state->send_fn = [ctx = req._h2_ws_ctx](std::string frame) {
+                    ctx->push(std::move(frame));
+                };
+                // begin() sends 200 HEADERS and wires incoming DATA → feed()
+                req._h2_ws_ctx->begin([ws_state](const uint8_t* data, size_t len) {
+                    ws_state->feed(data, len);
+                });
+                res.mark_ws_started();
+
+                WSConnection ws_conn(ws_state);
+                co_await fn(std::move(ws_conn));
+
+                req._h2_ws_ctx->close_stream();
+                co_return;
+            }
+
+            // ── HTTP/1.1 path (RFC 6455 — 101 Switching Protocols) ───────────
             auto upgrade = req.header("upgrade");
             auto key     = req.header("sec-websocket-key");
             if (!upgrade || upgrade->find("websocket") == std::string::npos || !key) {
@@ -140,7 +178,6 @@ public:
                 co_return;
             }
 
-            // ── Send 101 Switching Protocols ─────────────────────────────────
             if (req._conn_fd < 0) {
                 res.status(500).json({{"error","no fd for WS upgrade"}});
                 co_return;
@@ -154,22 +191,21 @@ public:
             while (sent < hs.size()) {
                 ssize_t n = ::write(req._conn_fd, hs.data()+sent, hs.size()-sent);
                 if (n <= 0) co_return;
-                sent += n;
+                sent += static_cast<size_t>(n);
             }
 
-            // ── Create WSState and hook into the connection's read path ──────
             auto ws_state = std::make_shared<detail::WSState>();
             ws_state->fd    = req._conn_fd;
             ws_state->token = req.cancel_token;
             ws_state->loop  = req.loop;
 
             req._ws_on_readable = [ws_state]() { ws_state->on_readable(); };
-            res.mark_ws_started();   // tell finish_dispatch: don't send response
+            res.mark_ws_started();
 
-            // ── Run user handler ─────────────────────────────────────────────
             WSConnection ws_conn(ws_state);
             co_await fn(std::move(ws_conn));
         };
+        // HTTP/1.1 uses GET; HTTP/2 CONNECT is routed as GET by dispatch_stream
         router_.add("GET", std::move(path), std::move(wrapper));
         return *this;
     }
@@ -233,6 +269,10 @@ private:
     ServiceContainer                          container_;
 
     int                                       max_connections_ = 10'000;
+
+    // TLS — empty means plain HTTP
+    std::string                               ssl_cert_;
+    std::string                               ssl_key_;
 };
 
 } // namespace osodio
