@@ -23,3 +23,4 @@
 #include "websocket.hpp"
 #include "metrics.hpp"
 #include "jwt.hpp"
+#include "testing.hpp"

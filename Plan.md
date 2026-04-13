@@ -69,7 +69,7 @@
 ### Nivel ecosistema
 
 - [ ] **HTTP/3 / QUIC** — via quiche (Cloudflare) o ngtcp2
-- [ ] **Testing utilities** — mock server, request builder para tests de integración
+- [x] **TestClient** — `osodio::TestClient` in-process, no socket; builder API `.get/.post/.json/.query/.header/.send()`; sleep() no-op; sendfile reads into body
 - [ ] **CLI scaffolding** — `osodio new myapp` genera estructura de proyecto
 
 ---
@@ -98,6 +98,7 @@ include/osodio/
   openapi.hpp         — DocBuilder<F>, build_openapi_doc(), swagger_ui_html()
   metrics.hpp         — Metrics singleton; atomics para requests/conns/uptime; Prometheus + JSON
   group.hpp           — RouteGroup (prefix + middleware snapshot)
+  testing.hpp         — TestClient: in-process request builder, sin socket, sync execution
   core/event_loop.hpp — EventLoop interface
 
 src/

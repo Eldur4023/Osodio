@@ -176,10 +176,12 @@ static void signal_handler(int) {
 
 // ── App::run ──────────────────────────────────────────────────────────────────
 
-void App::run(const std::string& host, uint16_t port) {
-    std::signal(SIGPIPE, SIG_IGN);
+// ── App::prepare ─────────────────────────────────────────────────────────────
+// Registers docs routes once (idempotent). Safe to call multiple times.
 
-    // ── Optional: /openapi.json and /docs (only when enable_docs() was called) ──
+void App::prepare() {
+    if (prepared_) return;
+    prepared_ = true;
     if (openapi_enabled_) {
         std::string spec = build_openapi_doc(api_title_, api_version_, openapi_routes_).dump(2);
         std::string spec_path = openapi_spec_path_;
@@ -191,53 +193,67 @@ void App::run(const std::string& host, uint16_t port) {
             res.html(swagger_ui_html(spec_path));
         });
     }
+}
+
+// ── App::handle_request ───────────────────────────────────────────────────────
+// Full middleware + router pipeline as a coroutine.
+// Used by run() (via the DispatchFn) and by TestClient for in-process testing.
+
+Task<void> App::handle_request(Request& req, Response& res) {
+    res.set_templates_dir(templates_dir_);
+    req.container = &container_;
+
+    // Static file mounts bypass the middleware chain.
+    if (req.method == "GET" || req.method == "HEAD") {
+        if (try_serve_static(static_mounts_, req, res)) co_return;
+    }
+
+    // ── Async middleware chain ─────────────────────────────────────────────
+    // call_next is a local in THIS coroutine frame (heap-allocated).
+    // Inner lambdas capture &call_next (reference into the frame), which
+    // remains valid as long as this coroutine is suspended or running.
+    std::function<Task<void>(size_t)> call_next;
+    call_next = [this, &req, &res, &call_next](size_t i) -> Task<void> {
+        if (i < middlewares_.size()) {
+            co_await middlewares_[i](req, res,
+                [&call_next, i]() -> Task<void> {
+                    return call_next(i + 1);
+                });
+        } else {
+            auto match = router_.match(req.method, req.path);
+            if (match.found) {
+                req.params = std::move(match.params);
+                co_await match.handler(req, res);
+            } else {
+                res.status(404).json({{"error", "Not Found"}, {"path", req.path}});
+            }
+        }
+    };
+    co_await call_next(0);
+
+    // Error handlers run after the full chain, while we still own req/res.
+    if (res.status_code() >= 400) {
+        int code = res.status_code();
+        auto it = error_handlers_.find(code);
+        if (it != error_handlers_.end()) {
+            it->second(code, req, res);
+        } else if (catchall_error_handler_) {
+            catchall_error_handler_(code, req, res);
+        }
+    }
+}
+
+// ── App::run ──────────────────────────────────────────────────────────────────
+
+void App::run(const std::string& host, uint16_t port) {
+    std::signal(SIGPIPE, SIG_IGN);
+
+    prepare();  // register docs routes if enable_docs() was called
 
     // ── Build the async dispatch function ─────────────────────────────────────
-    // Captured by value into the DispatchFn so each thread gets its own copy.
-    // All captures are read-only after run() starts, so thread-safe.
-    DispatchFn dispatch = [this](Request& req, Response& res) -> Task<void> {
-        res.set_templates_dir(templates_dir_);
-        req.container = &container_;
-
-        // Static file mounts bypass the middleware chain.
-        if (req.method == "GET" || req.method == "HEAD") {
-            if (try_serve_static(static_mounts_, req, res)) co_return;
-        }
-
-        // ── Async middleware chain ─────────────────────────────────────────
-        // call_next is a local in THIS coroutine frame (heap-allocated).
-        // Inner lambdas capture &call_next (reference into the frame), which
-        // remains valid as long as this coroutine is suspended or running.
-        std::function<Task<void>(size_t)> call_next;
-        call_next = [this, &req, &res, &call_next](size_t i) -> Task<void> {
-            if (i < middlewares_.size()) {
-                // Pass next() as a NextFn that returns call_next(i+1)
-                co_await middlewares_[i](req, res,
-                    [&call_next, i]() -> Task<void> {
-                        return call_next(i + 1);
-                    });
-            } else {
-                auto match = router_.match(req.method, req.path);
-                if (match.found) {
-                    req.params = std::move(match.params);
-                    co_await match.handler(req, res);
-                } else {
-                    res.status(404).json({{"error", "Not Found"}, {"path", req.path}});
-                }
-            }
-        };
-        co_await call_next(0);
-
-        // Error handlers run after the full chain, while we still own req/res.
-        if (res.status_code() >= 400) {
-            int code = res.status_code();
-            auto it = error_handlers_.find(code);
-            if (it != error_handlers_.end()) {
-                it->second(code, req, res);
-            } else if (catchall_error_handler_) {
-                catchall_error_handler_(code, req, res);
-            }
-        }
+    // Returns handle_request() directly — no extra coroutine frame.
+    DispatchFn dispatch = [this](Request& req, Response& res) {
+        return handle_request(req, res);
     };
 
     // ── Multi-core: one event loop per hardware thread ────────────────────────

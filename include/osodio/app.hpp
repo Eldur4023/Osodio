@@ -241,6 +241,16 @@ public:
     void run(const std::string& host = "0.0.0.0", uint16_t port = 5000);
     void run(uint16_t port) { run("0.0.0.0", port); }
 
+    // ── Testing ──────────────────────────────────────────────────────────────
+    //
+    // Registers docs routes (idempotent). Called automatically by run() and
+    // by TestClient on construction — safe to call more than once.
+    void prepare();
+
+    // Execute one request through the full middleware + router pipeline without
+    // a network connection. Used by TestClient for in-process testing.
+    Task<void> handle_request(Request& req, Response& res);
+
     struct StaticMount { std::string prefix; std::string root; bool spa = false; };
 
 private:
@@ -273,6 +283,9 @@ private:
     // TLS — empty means plain HTTP
     std::string                               ssl_cert_;
     std::string                               ssl_key_;
+
+    // Set to true by prepare() so docs routes are only registered once.
+    bool                                      prepared_ = false;
 };
 
 } // namespace osodio

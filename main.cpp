@@ -49,7 +49,7 @@ int main() {
     }));
 
     //app.enable_health("/health");
-    //app.enable_metrics("/metrics")
+    //app.enable_metrics("/metrics");
     app.use([](Request&, Response& res, auto next) -> Task<void> {
         res.header("X-Powered-By", "Osodio");
         co_await next();
