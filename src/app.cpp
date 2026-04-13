@@ -1,7 +1,9 @@
 #include "../include/osodio/app.hpp"
 #include "../include/osodio/metrics.hpp"
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#ifdef OSODIO_HAS_TLS
+#  include <openssl/ssl.h>
+#  include <openssl/err.h>
+#endif
 #include "../include/osodio/request.hpp"
 #include "../include/osodio/response.hpp"
 #include "../include/osodio/task.hpp"
@@ -26,6 +28,7 @@ namespace osodio {
 
 namespace {
 
+#ifdef OSODIO_HAS_TLS
 // ── ALPN protocol selection ───────────────────────────────────────────────────
 // Prefer "h2" (HTTP/2); accept "http/1.1" as fallback.
 // Called during TLS handshake when the client presents its ALPN list.
@@ -47,6 +50,7 @@ static int alpn_select_cb(SSL*, const unsigned char** out, unsigned char* outlen
     if (h11) { *out = h11; *outlen = h11_len; return SSL_TLSEXT_ERR_OK; }
     return SSL_TLSEXT_ERR_NOACK;
 }
+#endif // OSODIO_HAS_TLS
 
 static const char* mime_for_ext(const std::string& ext) {
     if (ext == ".html" || ext == ".htm")  return "text/html; charset=utf-8";
@@ -264,6 +268,7 @@ void App::run(const std::string& host, uint16_t port) {
     // Passed to each TcpServer → HttpConnection as a raw pointer (lifetime is
     // the entire duration of run(), guarded by ssl_ctx_guard below).
     SSL_CTX* ssl_ctx = nullptr;
+#ifdef OSODIO_HAS_TLS
     std::shared_ptr<SSL_CTX> ssl_ctx_guard; // ensures SSL_CTX_free on exit
 
     if (!ssl_cert_.empty()) {
@@ -289,6 +294,7 @@ void App::run(const std::string& host, uint16_t port) {
 
         ssl_ctx_guard = std::shared_ptr<SSL_CTX>(ssl_ctx, SSL_CTX_free);
     }
+#endif // OSODIO_HAS_TLS
 
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);

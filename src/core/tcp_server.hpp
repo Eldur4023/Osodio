@@ -5,7 +5,11 @@
 #include <memory>
 #include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
-#include <openssl/ssl.h>
+#ifdef OSODIO_HAS_TLS
+#  include <openssl/ssl.h>
+#else
+   struct ssl_ctx_st; typedef struct ssl_ctx_st SSL_CTX;  // incomplete forward decl
+#endif
 
 namespace osodio::core {
 

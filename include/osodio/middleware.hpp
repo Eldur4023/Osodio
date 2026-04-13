@@ -6,7 +6,9 @@
 #include <unordered_map>
 #include <algorithm>
 #include <zlib.h>
-#include <brotli/encode.h>
+#ifdef OSODIO_HAS_BROTLI
+#  include <brotli/encode.h>
+#endif
 #include "types.hpp"
 #include "request.hpp"
 #include "response.hpp"
@@ -144,7 +146,11 @@ inline Middleware compress(CompressOptions opts = {}) {
         auto ae = req.header("accept-encoding");
         if (!ae) co_return;
 
-        bool want_br   = ae->find("br")   != std::string::npos;
+#ifdef OSODIO_HAS_BROTLI
+        bool want_br = ae->find("br") != std::string::npos;
+#else
+        bool want_br = false;
+#endif
         bool want_gzip = ae->find("gzip") != std::string::npos;
         if (!want_br && !want_gzip) co_return;
 
@@ -171,6 +177,7 @@ inline Middleware compress(CompressOptions opts = {}) {
         }
 
         // ── Brotli (preferred) ────────────────────────────────────────────────
+#ifdef OSODIO_HAS_BROTLI
         if (want_br) {
             std::size_t bound = BrotliEncoderMaxCompressedSize(body.size());
             std::string compressed(bound, '\0');
@@ -194,6 +201,7 @@ inline Middleware compress(CompressOptions opts = {}) {
             }
             // fall through to gzip on error
         }
+#endif // OSODIO_HAS_BROTLI
 
         // ── gzip (fallback) ───────────────────────────────────────────────────
         if (!want_gzip) co_return;

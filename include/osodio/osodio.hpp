@@ -22,5 +22,7 @@
 #include "multipart.hpp"
 #include "websocket.hpp"
 #include "metrics.hpp"
-#include "jwt.hpp"
+#ifdef OSODIO_HAS_TLS
+#  include "jwt.hpp"
+#endif
 #include "testing.hpp"

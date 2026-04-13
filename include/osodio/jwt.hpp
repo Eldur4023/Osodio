@@ -1,4 +1,10 @@
 #pragma once
+
+// JWT requires OpenSSL (HMAC-SHA256 / RSA-SHA256).
+// When OSODIO_HAS_TLS is not defined the entire header is a no-op so that
+// projects without OpenSSL can still include <osodio/osodio.hpp>.
+#ifdef OSODIO_HAS_TLS
+
 #include <string>
 #include <string_view>
 #include <stdexcept>
@@ -361,3 +367,5 @@ inline Middleware jwt_auth_rsa(std::string public_key_pem, JwtAuthOptions opts =
 }
 
 } // namespace osodio
+
+#endif // OSODIO_HAS_TLS

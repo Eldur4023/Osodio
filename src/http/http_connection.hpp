@@ -7,7 +7,12 @@
 #include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
 #include "../../include/osodio/cancel.hpp"
-#include <openssl/ssl.h>
+#ifdef OSODIO_HAS_TLS
+#  include <openssl/ssl.h>
+#else
+   struct ssl_ctx_st; typedef struct ssl_ctx_st SSL_CTX;  // incomplete forward decls
+   struct ssl_st;     typedef struct ssl_st     SSL;
+#endif
 
 namespace osodio::http {
 

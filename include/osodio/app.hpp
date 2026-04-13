@@ -67,6 +67,7 @@ public:
         return *this;
     }
 
+#ifdef OSODIO_HAS_TLS
     // ── TLS ──────────────────────────────────────────────────────────────────
     //
     // Enable HTTPS.  Must be called before run().
@@ -81,6 +82,7 @@ public:
         ssl_key_  = std::move(key_path);
         return *this;
     }
+#endif
 
     // ── OpenAPI / Swagger UI ─────────────────────────────────────────────────
     //
@@ -280,9 +282,11 @@ private:
 
     int                                       max_connections_ = 10'000;
 
+#ifdef OSODIO_HAS_TLS
     // TLS — empty means plain HTTP
     std::string                               ssl_cert_;
     std::string                               ssl_key_;
+#endif
 
     // Set to true by prepare() so docs routes are only registered once.
     bool                                      prepared_ = false;

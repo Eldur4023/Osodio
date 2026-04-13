@@ -1,5 +1,7 @@
 #include "http_connection.hpp"
-#include "http2_connection.hpp"
+#ifdef OSODIO_HAS_HTTP2
+#  include "http2_connection.hpp"
+#endif
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/response.hpp"
 #include "../../include/osodio/task.hpp"
@@ -67,12 +69,16 @@ HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
     , conn_count_(std::move(conn_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); })
 {
+#ifndef OSODIO_HAS_TLS
+    (void)ssl_ctx;
+#else
     if (ssl_ctx) {
         ssl_ = SSL_new(ssl_ctx);
         if (!ssl_) return; // close() will be called in start() → error path
         SSL_set_fd(ssl_, fd_);
         SSL_set_accept_state(ssl_);
     }
+#endif // OSODIO_HAS_TLS
 }
 
 void HttpConnection::start() {
@@ -89,7 +95,9 @@ void HttpConnection::start() {
 
     // TLS: wait for first EPOLLIN before starting the handshake.
     // (The fd is added to epoll by TcpServer immediately after start().)
+#ifdef OSODIO_HAS_TLS
     if (ssl_) tls_handshaking_ = true;
+#endif
 }
 
 HttpConnection::~HttpConnection() {
@@ -99,7 +107,9 @@ HttpConnection::~HttpConnection() {
         if (header_tfd_  >= 0) ::close(header_tfd_);
         if (timeout_tfd_ >= 0) ::close(timeout_tfd_);
         if (file_fd_     >= 0) ::close(file_fd_);
+#ifdef OSODIO_HAS_TLS
         if (ssl_) { SSL_shutdown(ssl_); SSL_free(ssl_); ssl_ = nullptr; }
+#endif
         ::close(fd_);
     }
 }
@@ -110,7 +120,9 @@ void HttpConnection::on_event(uint32_t events) {
     if (events & (EPOLLERR | EPOLLHUP)) { close(); return; }
 
     // TLS handshake: route ALL events until SSL_accept() completes.
+#ifdef OSODIO_HAS_TLS
     if (tls_handshaking_) { do_tls_handshake(); return; }
+#endif
 
     // While write_buf_ has data, only EPOLLOUT is armed.
     // Once the buffer is drained, EPOLLIN is re-armed (see on_write_complete).
@@ -124,6 +136,7 @@ void HttpConnection::on_event(uint32_t events) {
 // SSL_accept() is non-blocking: it may need multiple EPOLLIN/EPOLLOUT rounds
 // before the handshake finishes.
 
+#ifdef OSODIO_HAS_TLS
 void HttpConnection::do_tls_handshake() {
     int r = SSL_accept(ssl_);
     if (r == 1) {
@@ -132,6 +145,7 @@ void HttpConnection::do_tls_handshake() {
         unsigned int         proto_len = 0;
         SSL_get0_alpn_selected(ssl_, &proto, &proto_len);
 
+#ifdef OSODIO_HAS_HTTP2
         if (proto_len == 2 && memcmp(proto, "h2", 2) == 0) {
             // ── Upgrade to HTTP/2 ──────────────────────────────────────────
             // Transfer fd and ssl* ownership to Http2Connection.
@@ -156,6 +170,7 @@ void HttpConnection::do_tls_handshake() {
                       [h2](uint32_t ev) { h2->on_event(ev); });
             return;
         }
+#endif // OSODIO_HAS_HTTP2
 
         // HTTP/1.1 (or no ALPN) — proceed normally.
         tls_handshaking_ = false;
@@ -172,6 +187,7 @@ void HttpConnection::do_tls_handshake() {
         close();
     }
 }
+#endif // OSODIO_HAS_TLS
 
 // ── Read path ─────────────────────────────────────────────────────────────────
 
@@ -185,6 +201,7 @@ void HttpConnection::do_read() {
     char buf[16384];
     while (!closed_) {
         ssize_t n;
+#ifdef OSODIO_HAS_TLS
         if (ssl_) {
             n = SSL_read(ssl_, buf, sizeof(buf));
             if (n <= 0) {
@@ -194,7 +211,9 @@ void HttpConnection::do_read() {
                 if (err == SSL_ERROR_WANT_WRITE)  return; // rare renegotiation case
                 close(); return;
             }
-        } else {
+        } else
+#endif
+        {
             n = ::read(fd_, buf, sizeof(buf));
             if (n == 0) { close(); return; }
             if (n < 0) {
@@ -316,6 +335,7 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
 
     // sendfile path
     if (!response.sendfile_path().empty()) {
+#ifdef OSODIO_HAS_TLS
         if (ssl_) {
             // TLS: sendfile(2) bypasses OpenSSL — must read file into userspace.
             // response.build() emits headers with the correct Content-Length;
@@ -328,6 +348,7 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
             send_response(response.build() + file_body);
             return;
         }
+#endif
         // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
@@ -369,6 +390,7 @@ void HttpConnection::send_response(std::string data) {
 
     // Try immediate write
     ssize_t n;
+#ifdef OSODIO_HAS_TLS
     if (ssl_) {
         n = SSL_write(ssl_, data.data(), static_cast<int>(data.size()));
         if (n <= 0) {
@@ -381,7 +403,9 @@ void HttpConnection::send_response(std::string data) {
             loop_.modify(fd_, EPOLLOUT);
             return;
         }
-    } else {
+    } else
+#endif
+    {
         n = ::write(fd_, data.data(), data.size());
         if (n < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -412,6 +436,7 @@ void HttpConnection::send_response(std::string data) {
 void HttpConnection::do_write() {
     while (write_offset_ < write_buf_.size()) {
         ssize_t n;
+#ifdef OSODIO_HAS_TLS
         if (ssl_) {
             n = SSL_write(ssl_,
                           write_buf_.data()  + write_offset_,
@@ -421,7 +446,9 @@ void HttpConnection::do_write() {
                 if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) return;
                 close(); return;
             }
-        } else {
+        } else
+#endif
+        {
             n = ::write(fd_,
                         write_buf_.data()  + write_offset_,
                         write_buf_.size()  - write_offset_);
@@ -527,11 +554,13 @@ void HttpConnection::close() {
     loop_.remove(fd_);
 
     // TLS shutdown: best-effort (non-blocking); we close the fd regardless.
+#ifdef OSODIO_HAS_TLS
     if (ssl_) {
         SSL_shutdown(ssl_);
         SSL_free(ssl_);
         ssl_ = nullptr;
     }
+#endif
 
     ::close(fd_);
     if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
