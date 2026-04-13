@@ -32,6 +32,7 @@
 | **Header timeout per-keepalive** | Timer de 5s rearmado tras cada respuesta en conexiones keep-alive |
 | **Errores tipados** | HttpError, not_found(), bad_request(), unauthorized(), etc. |
 | **Middleware** | logger(), cors(), compress() (Brotli preferido, gzip fallback), helmet(), rate_limit() |
+| **JWT** | jwt_auth() HS256/RS256; jwt::sign/verify/decode; claims en req.jwt_claims; skip predicate; jwt_auth_rsa() |
 | **helmet()** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy; headers pre-built al registrar |
 | **rate_limit()** | Fixed-window por IP (o clave custom); headers X-RateLimit-Limit/Remaining; state por instancia |
 | **Static files** | MIME, path traversal block, ETag, Cache-Control, 304, sendfile(2) zero-copy |

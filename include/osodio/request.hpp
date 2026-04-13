@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <osodio/core/event_loop.hpp>
 #include "cancel.hpp"
+#include <nlohmann/json.hpp>
 
 namespace osodio {
 
@@ -70,6 +71,10 @@ public:
         std::function<void()>           end;    // send DATA+END_STREAM when handler exits
     };
     std::shared_ptr<H2SSEContext> _h2_sse_ctx;
+
+    // JWT claims — populated by jwt_auth() middleware after successful verification.
+    // Empty object if jwt_auth() was not used or the route was skipped.
+    nlohmann::json jwt_claims = nlohmann::json::object();
 
     // Convenience: true if the underlying connection has been closed.
     bool is_cancelled() const noexcept {

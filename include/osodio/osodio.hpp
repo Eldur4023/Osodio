@@ -22,3 +22,4 @@
 #include "multipart.hpp"
 #include "websocket.hpp"
 #include "metrics.hpp"
+#include "jwt.hpp"
