@@ -9,7 +9,7 @@
 #include "request.hpp"
 #include "response.hpp"
 #include "validation.hpp"
-#include "schema.hpp"   // SchemaFields<T>, OptionalFields<T>
+#include "schema.hpp"   // SCHEMA macro, is_optional_v, adl_serializer<optional>
 #include "errors.hpp"
 #include "di.hpp"
 
@@ -92,14 +92,19 @@ struct Query {
 };
 
 // ─── has_validate ─────────────────────────────────────────────────────────────
-// Detects types that have an OSODIO_VALIDATE block (i.e., expose _validate_impl).
+// Detects structs that define a validate() method returning vector<string>.
+// Replaces the old OSODIO_VALIDATE macro — just write validate() directly.
 
 template<typename T, typename = void>
 struct has_validate : std::false_type {};
 template<typename T>
 struct has_validate<T,
-    std::void_t<decltype(std::declval<const T&>()._validate_impl(
-        std::declval<std::vector<std::string>&>()))>
+    std::enable_if_t<
+        std::is_same_v<
+            decltype(std::declval<const T&>().validate()),
+            std::vector<std::string>
+        >
+    >
 > : std::true_type {};
 
 // ─── has_to_json ──────────────────────────────────────────────────────────────
@@ -133,11 +138,39 @@ struct is_known_param_type<Inject<T>>                  : std::true_type {};
 // ─── Body extraction — shared impl ───────────────────────────────────────────
 // Used by both extractor<T> (auto) and extractor<Body<T>> (explicit).
 // On error: sets res status and returns default-constructed T.
+//
+// Pipeline:
+//   1. Parse JSON (simdjson — fast malformed-input rejection)
+//   2. Convert to nlohmann and bind via from_json
+//      - std::optional<T> fields: absent/null → nullopt (handled by SCHEMA macro)
+//      - Required fields: absent → nlohmann throws → 422
+//   3. Call validate() if defined — business-rule errors
 
 namespace detail {
+
+// Clean up nlohmann exception messages into human-readable field errors.
+// "[json.exception.out_of_range.403] key 'name' not found" → "name: required"
+inline std::string format_json_error(const std::string& msg) {
+    if (auto k = msg.find("key '"); k != std::string::npos) {
+        auto start = k + 5;
+        auto end   = msg.find('\'', start);
+        if (end != std::string::npos) {
+            auto key = msg.substr(start, end - start);
+            if (msg.find("not found") != std::string::npos)
+                return key + ": required";
+            if (msg.find("null")      != std::string::npos)
+                return key + ": must not be null";
+        }
+    }
+    // Strip "[json.exception.xxx.NNN] " prefix for other errors
+    if (auto b = msg.find("] "); b != std::string::npos)
+        return msg.substr(b + 2);
+    return msg;
+}
+
 template<typename T>
 T extract_body(const Request& req, Response& res) {
-    // 1. Parse with simdjson
+    // 1. Fast JSON parse + object-type check via simdjson
     thread_local simdjson::dom::parser sjparser;
     simdjson::dom::element doc;
     auto perr = sjparser.parse(req.body).get(doc);
@@ -153,57 +186,30 @@ T extract_body(const Request& req, Response& res) {
         return T{};
     }
 
-    // 2. Field-level validation (presence + null) — skips OSODIO_OPTIONAL fields
-    {
-        std::vector<std::string> field_errors;
-        auto obj = doc.get_object().value();
-        for (const auto& field : SchemaFields<T>::names()) {
-            if (OptionalFields<T>::contains(field)) continue;
-            simdjson::dom::element val;
-            auto ferr = obj[field].get(val);
-            if (ferr == simdjson::NO_SUCH_FIELD)
-                field_errors.push_back(field + ": field required");
-            else if (!ferr && val.is_null())
-                field_errors.push_back(field + ": must not be null");
-        }
-        if (!field_errors.empty()) {
-            res.status(422).json({{"error", "Validation Failed"}, {"messages", field_errors}});
-            return T{};
-        }
-    }
-
-    // 3. simdjson DOM → nlohmann
+    // 2. Convert to nlohmann and bind.
+    //    SCHEMA's from_json handles std::optional<T> fields automatically:
+    //      - absent or null → std::nullopt
+    //    Required fields missing → nlohmann throws out_of_range → 422.
     nlohmann::json j = simdjson_to_nlohmann(doc);
-
-    // 3b. Inject null for absent OSODIO_OPTIONAL fields so that
-    //     nlohmann maps them to std::nullopt (null → nullopt is built-in).
-    for (const auto& field : OptionalFields<T>::names()) {
-        if (!j.contains(field)) j[field] = nullptr;
-    }
-
-    // 4. Bind to T
     T val;
     try {
         val = j.get<T>();
-    } catch (const nlohmann::json::type_error& e) {
-        res.status(422).json({{"error","Validation Failed"},
-            {"messages", nlohmann::json::array({std::string(e.what())})}});
-        return T{};
-    } catch (const nlohmann::json::out_of_range& e) {
-        res.status(422).json({{"error","Validation Failed"},
-            {"messages", nlohmann::json::array({std::string(e.what())})}});
+    } catch (const nlohmann::json::exception& e) {
+        res.status(422).json({{"error",    "Validation Failed"},
+                               {"messages", nlohmann::json::array(
+                                   {format_json_error(e.what())})}});
         return T{};
     } catch (...) {
         res.status(422).json({{"error", "Schema binding failed"}});
         return T{};
     }
 
-    // 5. OSODIO_VALIDATE business rules
+    // 3. Business-rule validation — define validate() in your struct.
+    //    Return std::vector<std::string> with one error per entry, or {}.
     if constexpr (has_validate<T>::value) {
-        std::vector<std::string> errs;
-        val._validate_impl(errs);
+        auto errs = val.validate();
         if (!errs.empty()) {
-            res.status(422).json({{"error","Validation Failed"}, {"messages", errs}});
+            res.status(422).json({{"error", "Validation Failed"}, {"messages", errs}});
             return T{};
         }
     }

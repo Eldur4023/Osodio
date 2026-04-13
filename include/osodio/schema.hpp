@@ -2,14 +2,11 @@
 #include <nlohmann/json.hpp>
 #include <vector>
 #include <string>
-#include <string_view>
 #include <optional>
-#include <algorithm>
-#include "validation.hpp"
+#include <type_traits>
 
-// ─── std::optional<T> support for nlohmann/json ──────────────────────────────
-// nlohmann v3.11 doesn't ship optional serialization by default.
-// null JSON → std::nullopt; any other value → T.
+// ─── std::optional<T> support for nlohmann ───────────────────────────────────
+
 namespace nlohmann {
 template<typename T>
 struct adl_serializer<std::optional<T>> {
@@ -24,129 +21,70 @@ struct adl_serializer<std::optional<T>> {
 };
 } // namespace nlohmann
 
-namespace osodio {
+namespace osodio::detail {
 
-namespace detail {
-    inline std::vector<std::string> split_field_names(std::string_view raw) {
-        std::vector<std::string> names;
-        size_t start = 0;
-        while (start < raw.size()) {
-            while (start < raw.size() &&
-                   (raw[start] == ' ' || raw[start] == '\t')) ++start;
-            size_t comma = raw.find(',', start);
-            size_t end   = (comma == std::string_view::npos) ? raw.size() : comma;
-            size_t field_end = end;
-            while (field_end > start &&
-                   (raw[field_end-1] == ' ' || raw[field_end-1] == '\t')) --field_end;
-            if (field_end > start)
-                names.emplace_back(raw.substr(start, field_end - start));
-            if (comma == std::string_view::npos) break;
-            start = comma + 1;
-        }
-        return names;
-    }
-} // namespace detail
-
-// ─── SchemaFields<T> ─────────────────────────────────────────────────────────
-// All field names registered by OSODIO_SCHEMA (required + optional).
-
-template<typename T, typename = void>
-struct SchemaFields {
-    static const std::vector<std::string>& names() {
-        static const std::vector<std::string> empty;
-        return empty;
-    }
-};
+template<typename T> struct is_optional                   : std::false_type {};
+template<typename T> struct is_optional<std::optional<T>> : std::true_type  {};
 template<typename T>
-struct SchemaFields<T, std::void_t<decltype(T::_schema_fields())>> {
-    static const std::vector<std::string>& names() {
-        return T::_schema_fields();
-    }
-};
+inline constexpr bool is_optional_v = is_optional<std::remove_cvref_t<T>>::value;
 
-// ─── OptionalFields<T> ───────────────────────────────────────────────────────
-// Fields listed in OSODIO_OPTIONAL — absent from request body is allowed.
-
-template<typename T, typename = void>
-struct OptionalFields {
-    static const std::vector<std::string>& names() {
-        static const std::vector<std::string> empty;
-        return empty;
+// bind_field<FieldType> — used by the SCHEMA macro's from_json.
+// Lives in a template so if constexpr properly discards the false branch.
+//   - std::optional<T> fields: absent or null JSON → std::nullopt
+//   - Required fields:         absent JSON          → nlohmann throws → 422
+template<typename FieldType>
+inline void bind_field(const nlohmann::json& j, const char* name, FieldType& field) {
+    if constexpr (is_optional_v<FieldType>) {
+        if (j.contains(name) && !j[name].is_null())
+            j.at(name).get_to(field);
+        else
+            field = std::nullopt;
+    } else {
+        j.at(name).get_to(field);
     }
-    static bool contains(const std::string&) { return false; }
-};
-template<typename T>
-struct OptionalFields<T, std::void_t<decltype(T::_optional_fields())>> {
-    static const std::vector<std::string>& names() {
-        return T::_optional_fields();
-    }
-    static bool contains(const std::string& field) {
-        const auto& n = names();
-        return std::find(n.begin(), n.end(), field) != n.end();
-    }
-};
+}
 
-} // namespace osodio
+} // namespace osodio::detail
 
-// ─── OSODIO_SCHEMA ────────────────────────────────────────────────────────────
-// Genera from_json / to_json y registra nombres de campos.
-// Uso: DENTRO del struct, después de declarar los campos.
+// ─── OSODIO_FROM_FIELD_ ───────────────────────────────────────────────────────
+// Delegates to bind_field so if constexpr works inside a non-template from_json.
+
+#define OSODIO_FROM_FIELD_(field) \
+    ::osodio::detail::bind_field(nlohmann_json_j, #field, nlohmann_json_t.field);
+
+// ─── SCHEMA ───────────────────────────────────────────────────────────────────
 //
-// Usa NLOHMANN_DEFINE_TYPE_INTRUSIVE (estricto). Los campos opcionales ausentes
-// en el body JSON se inyectan como null antes de la deserialización en
-// extract_body — nlohmann convierte null → nullopt para std::optional<T>.
+// Adds JSON serialization to a struct. Place it inside the struct body after
+// all field declarations.
 //
 //   struct User {
 //       std::string name;
+//       std::optional<std::string> bio;   // ← automatically optional, no extra macro
 //       int age;
-//       OSODIO_SCHEMA(User, name, age)
+//       SCHEMA(User, name, bio, age)
+//
+//       // Optional: define validate() for business-rule errors.
+//       std::vector<std::string> validate() const {
+//           if (name.empty()) return {"name: cannot be empty"};
+//           if (age < 18)     return {"age: must be at least 18"};
+//           return {};
+//       }
 //   };
 //
-#define OSODIO_SCHEMA(Type, ...)                                              \
-    NLOHMANN_DEFINE_TYPE_INTRUSIVE(Type, __VA_ARGS__)                         \
-    static const std::vector<std::string>& _schema_fields() {               \
-        static const auto _n =                                               \
-            osodio::detail::split_field_names(#__VA_ARGS__);                \
-        return _n;                                                           \
+// ── C++26 note ────────────────────────────────────────────────────────────────
+// Once GCC 15 / Clang 20 ship C++26 static reflection (P2996), SCHEMA will be
+// replaced by a universal to_json/from_json that works for any aggregate struct
+// with zero macros.  The migration will be: delete SCHEMA(...) from every struct.
+
+#define SCHEMA(Type, ...)                                                       \
+    friend void to_json(nlohmann::json& nlohmann_json_j,                       \
+                        const Type& nlohmann_json_t) {                         \
+        NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_TO, __VA_ARGS__)) \
+    }                                                                           \
+    friend void from_json(const nlohmann::json& nlohmann_json_j,               \
+                          Type& nlohmann_json_t) {                             \
+        NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(OSODIO_FROM_FIELD_, __VA_ARGS__)) \
     }
 
-// ─── OSODIO_OPTIONAL ──────────────────────────────────────────────────────────
-// Marca campos cuya ausencia en el body JSON está permitida.
-// Uso: DENTRO del struct, después de OSODIO_SCHEMA.
-// Los campos deben ser std::optional<T> en C++.
-//
-//   struct UpdateUser {
-//       std::optional<std::string> name;
-//       std::optional<int> age;
-//       OSODIO_SCHEMA(UpdateUser, name, age)
-//       OSODIO_OPTIONAL(name, age)
-//   };
-//
-#define OSODIO_OPTIONAL(...)                                                  \
-    static const std::vector<std::string>& _optional_fields() {             \
-        static const auto _n =                                               \
-            osodio::detail::split_field_names(#__VA_ARGS__);                \
-        return _n;                                                           \
-    }
-
-// ─── OSODIO_VALIDATE ─────────────────────────────────────────────────────────
-// Define reglas de validación de negocio.
-// Uso: DENTRO del struct. No repite el nombre del tipo.
-//
-//   struct User {
-//       std::string name; int age;
-//       OSODIO_SCHEMA(User, name, age)
-//       OSODIO_VALIDATE(
-//           check(name.size() > 0, "Name cannot be empty"),
-//           check(age >= 18,       "Must be at least 18")
-//       )
-//   };
-//
-#define OSODIO_VALIDATE(...)                                             \
-    void _validate_impl(std::vector<std::string>& _errors) const {     \
-        __VA_ARGS__;                                                    \
-    }
-
-// check(condition, message) — usado dentro de OSODIO_VALIDATE.
-#define check(cond, msg) \
-    ((cond) ? (void)0 : _errors.push_back(msg))
+// Backward-compat alias — migrate to SCHEMA when convenient.
+#define OSODIO_SCHEMA SCHEMA

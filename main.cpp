@@ -6,19 +6,20 @@ using namespace osodio;
 struct User {
     std::string name;
     int age;
-    OSODIO_SCHEMA(User, name, age)
-    OSODIO_VALIDATE(
-        check(name.size() > 0, "Name cannot be empty"),
-        check(age >= 18, "Must be at least 18 years old")
-    )
+    SCHEMA(User, name, age)
+
+    std::vector<std::string> validate() const {
+        if (name.empty()) return {"name: cannot be empty"};
+        if (age < 18)     return {"age: must be at least 18"};
+        return {};
+    }
 };
 
-// PATCH body: todos los campos son opcionales
+// PATCH body: std::optional<T> fields are automatically optional — no macro needed
 struct UserPatch {
     std::optional<std::string> name;
     std::optional<int> age;
-    OSODIO_SCHEMA(UserPatch, name, age)
-    OSODIO_OPTIONAL(name, age)
+    SCHEMA(UserPatch, name, age)
 };
 
 // ── Demo service injected via Inject<T> ─────────────────────────────────────

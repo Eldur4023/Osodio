@@ -17,9 +17,8 @@
 | **Router** | Radix tree, nodos STATIC/PARAM/WILDCARD, :param y {param} |
 | **Route groups** | app.group(prefix).use(mw) — herencia de middleware, grupos anidados |
 | **HandlerTraits** | Deducción de firma en compile-time: extrae y convierte todos los params |
-| **OSODIO_SCHEMA** | NLOHMANN_DEFINE_TYPE_INTRUSIVE, _schema_fields(), dentro del struct |
-| **OSODIO_OPTIONAL** | Campos ausentes → nullopt; adl_serializer\<optional\<T\>\> incluido |
-| **OSODIO_VALIDATE** | _validate_impl(), check() macro, 422 automático |
+| **SCHEMA** | `SCHEMA(Type, fields...)` dentro del struct; `std::optional<T>` auto-detectado sin macro extra; `OSODIO_SCHEMA` es alias para compat. |
+| **validate()** | Método `std::vector<std::string> validate() const` — reemplaza OSODIO_VALIDATE; 422 automático |
 | **PathParam\<T,"n"\>** | int, long, float, double, string |
 | **Query\<T,"n","default"\>** | Default value como tercer fixed_string; operator bool indica presencia |
 | **Body\<T\>** | Wrapper explícito con operator bool para comprobar validez |
