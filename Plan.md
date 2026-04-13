@@ -65,6 +65,10 @@
 - [x] **Brotli** — mejor ratio que gzip para texto; negociado vía Accept-Encoding; gzip fallback
 - [x] **Métricas** — /metrics Prometheus, /health endpoint
 
+### Prioridad inmediata
+
+- [ ] **C++26 static reflection (P2996)** — elimina `SCHEMA(Type, fields...)` por completo; cualquier struct se serializa automáticamente sin macros; requiere GCC 15+ o Clang con P2996; la estructura de `schema.hpp` ya está preparada para el switch (`bind_field` + `is_optional_v` permanecen, solo se elimina el macro y se añade `to_json`/`from_json` genérico vía `std::meta::nonstatic_data_members_of`)
+
 ### Nivel ecosistema
 
 - [ ] **HTTP/3 / QUIC** — via quiche (Cloudflare) o ngtcp2

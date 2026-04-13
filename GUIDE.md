@@ -1,1082 +1,1569 @@
-# Osodio — Developer Guide
+# Osodio — Complete Developer Guide
 
-This document covers the internal architecture and every public API in detail.  
-It is intended for contributors to the library and as a reference for LLMs generating code with Osodio.
+> **Purpose of this document:** comprehensive reference for developers and LLMs working with the Osodio C++20 web framework. Every public API is documented with working code examples. After reading this document an LLM should be able to write correct Osodio code without additional context.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#1-architecture-overview)
-2. [Request Lifecycle](#2-request-lifecycle)
-3. [File Structure](#3-file-structure)
-4. [App](#4-app)
-5. [Routing](#5-routing)
-6. [Handler Injection System](#6-handler-injection-system)
-7. [Request](#7-request)
-8. [Response](#8-response)
-9. [JSON Serialization — OSODIO_SCHEMA](#9-json-serialization--osodio_schema)
-10. [Validation — OSODIO_VALIDATE](#10-validation--osodio_validate)
-11. [Async — Task\<T\> and Coroutines](#11-async--taskt-and-coroutines)
+1. [What is Osodio](#1-what-is-osodio)
+2. [Quick Start](#2-quick-start)
+3. [Routing](#3-routing)
+4. [Handler Signatures](#4-handler-signatures)
+5. [Request API](#5-request-api)
+6. [Response API](#6-response-api)
+7. [Path Parameters](#7-path-parameters)
+8. [Query Parameters](#8-query-parameters)
+9. [Request Body — SCHEMA](#9-request-body--schema)
+10. [Validation — validate()](#10-validation--validate)
+11. [Async Handlers — Task\<T\>](#11-async-handlers--taskt)
 12. [Middleware](#12-middleware)
-13. [Static Files](#13-static-files)
-14. [Error Handlers](#14-error-handlers)
-15. [HTML Templates](#15-html-templates)
-16. [Event Loop](#16-event-loop)
-17. [HTTP Parser](#17-http-parser)
-18. [TCP Server](#18-tcp-server)
-19. [HTTP Connection](#19-http-connection)
-20. [How to Extend Osodio](#20-how-to-extend-osodio)
+13. [Built-in Middleware](#13-built-in-middleware)
+14. [Route Groups](#14-route-groups)
+15. [Error Handling](#15-error-handling)
+16. [Dependency Injection](#16-dependency-injection)
+17. [JWT Authentication](#17-jwt-authentication)
+18. [Server-Sent Events (SSE)](#18-server-sent-events-sse)
+19. [WebSockets](#19-websockets)
+20. [Static Files & SPA](#20-static-files--spa)
+21. [HTML Templates](#21-html-templates)
+22. [OpenAPI / Swagger UI](#22-openapi--swagger-ui)
+23. [Health & Metrics](#23-health--metrics)
+24. [TLS / HTTPS](#24-tls--https)
+25. [HTTP/2](#25-http2)
+26. [Multipart Uploads](#26-multipart-uploads)
+27. [TestClient — In-Process Testing](#27-testclient--in-process-testing)
+28. [Graceful Shutdown](#28-graceful-shutdown)
+29. [CancellationToken](#29-cancellationtoken)
+30. [Architecture Internals](#30-architecture-internals)
 
 ---
 
-## 1. Architecture Overview
+## 1. What is Osodio
 
-Osodio is a single-threaded, epoll-based HTTP/1.1 server. It runs on Linux.
+Osodio is a C++20 web framework for Linux. Design goals:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  App (user-facing API)                                       │
-│   - registers routes, middleware, error handlers             │
-│   - builds a DispatchFn closure                              │
-│   - starts the event loop                                    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ DispatchFn
-┌──────────────────────────────▼──────────────────────────────┐
-│  core::TcpServer                                             │
-│   - creates a listening socket (SO_REUSEADDR, TCP_NODELAY)   │
-│   - registers accept callback with the EventLoop             │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ accept(2) → new fd
-┌──────────────────────────────▼──────────────────────────────┐
-│  http::HttpConnection  (one per TCP connection)              │
-│   - registered in epoll for EPOLLIN                          │
-│   - feeds bytes into HttpParser                              │
-│   - calls DispatchFn when a full request is parsed           │
-│   - writes the response back to the socket                   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ ParsedRequest
-┌──────────────────────────────▼──────────────────────────────┐
-│  DispatchFn  (built by App::run)                             │
-│   1. Set req.loop and res.templates_dir                      │
-│   2. Check static file mounts (bypass middlewares)           │
-│   3. Run middleware chain                                     │
-│   4. Match route in Router → call Handler                    │
-│   5. Run error handlers if status >= 400                     │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Request& + Response&
-┌──────────────────────────────▼──────────────────────────────┐
-│  Router → HandlerTraits<F>::call                             │
-│   - extracts typed arguments from Request via extractors     │
-│   - calls the user's lambda                                  │
-│   - handles sync return, void return, or Task<T> (async)     │
-└─────────────────────────────────────────────────────────────┘
-```
+- **DX first**: handler signatures look like typed function signatures, not HTTP boilerplate
+- **Async-native**: built on C++20 coroutines (`co_await`, `co_return`), epoll event loop
+- **Zero overhead abstractions**: `PathParam<int,"id">`, `Query<T,"name">`, `Body<T>`, `Inject<T>` are all resolved at compile time
+- **Complete HTTP stack**: HTTP/1.1, HTTP/2 (nghttp2), TLS (OpenSSL), WebSocket (RFC 6455 + RFC 8441), SSE
 
-**Key design decisions:**
-
-- **Single-threaded**: The event loop runs on one thread. `SleepAwaitable` uses a detached thread internally to post a resume callback, but the handlers themselves always execute on the loop thread.
-- **`shared_ptr<State>` in Response**: Async handlers capture `Response` by value. All copies share state so the completion callback can write the body from any capture.
-- **`DispatchFn`**: A `std::function<void(Request&, Response&)>`. Decouples the connection layer from the application layer; the TCP/HTTP layer knows nothing about routing.
-- **Middleware chain as `shared_ptr<std::function<void(size_t)>>`**: Allows the chain to be safely captured by value in the `next` closures without dangling references.
-
----
-
-## 2. Request Lifecycle
-
-```
-1.  epoll_wait() wakes up → TcpServer::on_accept()
-2.  accept(2) returns new fd
-3.  HttpConnection created, registered in epoll (EPOLLIN | EPOLLET)
-4.  epoll_wait() wakes up → HttpConnection::on_event(EPOLLIN)
-5.  HttpConnection::do_read() → read(2) → HttpParser::feed()
-6.  HttpParser accumulates bytes; when complete → calls on_complete callback
-7.  HttpConnection::dispatch(ParsedRequest)
-      - builds Request and Response objects on the stack
-      - calls DispatchFn(req, res)
-8.  DispatchFn:
-      a. Sets req.loop, res.templates_dir
-      b. Checks static mounts → if match, writes response, returns
-      c. Builds middleware call_next chain
-      d. call_next(0) → runs middleware[0] → ... → Router::match()
-      e. Router returns handler + extracted params
-      f. HandlerTraits::call() → extracts arguments → calls lambda
-      g. After chain: if status >= 400, calls error handler
-9.  If sync: HttpConnection::finish_dispatch()
-      - determines keep-alive from HTTP version + Connection header
-      - calls Response::build() → writes HTTP/1.1 response string
-      - send_response() → write(2) in a loop
-      - if not keep-alive: close the connection
-10. If async (Task<T>):
-      - Response::mark_async() called before h.resume()
-      - Coroutine suspends at co_await
-      - Event loop continues serving other connections
-      - When coroutine resumes and co_returns:
-          * on_complete callback fires: res.json(val), res.complete_async()
-          * complete_async() calls on_complete_cb
-          * http_connection posts finish_dispatch to the event loop
-      - finish_dispatch() runs on the loop thread → same as sync path
-```
-
----
-
-## 3. File Structure
-
-```
-osodio/
-├── include/osodio/
-│   ├── osodio.hpp          Single public include
-│   ├── app.hpp             App class (routing, middleware, run)
-│   ├── request.hpp         Request struct
-│   ├── response.hpp        Response class (builder API)
-│   ├── router.hpp          Router class (radix tree, template add<F>)
-│   ├── handler_traits.hpp  HandlerTraits, extractors, PathParam, Body, Query
-│   ├── task.hpp            Task<T>, Task<void>, SleepAwaitable
-│   ├── schema.hpp          OSODIO_SCHEMA, OSODIO_VALIDATE macros
-│   ├── validation.hpp      ValidationError, validator builders
-│   ├── types.hpp           Handler, Middleware, DispatchFn, ErrorHandler typedefs
-│   └── core/
-│       └── event_loop.hpp  EventLoop (epoll + task queue)
-│
-├── src/
-│   ├── app.cpp             App::run, static file serving, dispatch closure
-│   ├── router.cpp          Radix tree implementation
-│   ├── core/
-│   │   ├── event_loop.cpp  epoll_wait loop, eventfd wakeup
-│   │   ├── tcp_server.hpp  TcpServer declaration
-│   │   └── tcp_server.cpp  listen socket, on_accept
-│   └── http/
-│       ├── http_parser.hpp  HttpParser declaration
-│       ├── http_parser.cpp  Line-based incremental HTTP/1.1 parser
-│       ├── http_connection.hpp
-│       └── http_connection.cpp  Per-connection read/write, dispatch bridge
-│
-├── third_party/
-│   └── nlohmann/
-│       └── json.hpp        nlohmann/json v3.11.3 (vendored)
-│
-├── templates/              Default template directory (shipped with example)
-├── main.cpp                Example application
-├── CMakeLists.txt
-├── README.md
-└── GUIDE.md                This file
-```
-
----
-
-## 4. App
-
-**Header**: `include/osodio/app.hpp`  
-**Implementation**: `src/app.cpp`
-
-`App` is the user-facing entry point. It owns the router, middleware list, static mounts, and error handlers.
-
+**Single include:**
 ```cpp
-class App {
-public:
-    // Route registration
-    template<typename F> App& get   (std::string path, F&& h);
-    template<typename F> App& post  (std::string path, F&& h);
-    template<typename F> App& put   (std::string path, F&& h);
-    template<typename F> App& patch (std::string path, F&& h);
-    template<typename F> App& del   (std::string path, F&& h);
-    template<typename F> App& any   (std::string path, F&& h);  // matches all methods
-
-    // Middleware
-    App& use(Middleware m);
-
-    // Static file serving
-    App& serve_static(std::string url_prefix, std::string fs_root);
-
-    // Error handlers
-    App& on_error(int code, ErrorHandler h);   // specific status code
-    App& on_error(ErrorHandler h);             // catch-all for any 4xx/5xx
-
-    // Templates base directory (default: "./templates")
-    App& set_templates(std::string dir);
-
-    // Start the server (blocks until SIGINT/SIGTERM)
-    void run(uint16_t port = 5000);
-    void run(const std::string& host, uint16_t port);
-};
+#include <osodio/osodio.hpp>
 ```
 
-All `App&` methods return `*this` for chaining:
-
+**Minimal working server:**
 ```cpp
-app.use(logger)
-   .serve_static("/static", "./public")
-   .on_error(404, not_found_handler)
-   .get("/ping", ping_handler)
-   .run(8080);
-```
+#include <osodio/osodio.hpp>
+using namespace osodio;
 
-`App::run` builds a `DispatchFn` closure that captures all registered state, then creates the `TcpServer` and starts `EventLoop::run()`. The process is blocked until a signal is received.
-
----
-
-## 5. Routing
-
-**Header**: `include/osodio/router.hpp`  
-**Implementation**: `src/router.cpp`
-
-The router uses a radix tree (trie) with three node types:
-
-| Node type | Pattern | Example match |
-|-----------|---------|---------------|
-| `STATIC`   | Literal segment | `/users` matches `/users` |
-| `PARAM`    | `:name` segment | `:id` matches `42`, captures `id=42` |
-| `WILDCARD` | `*` segment | `*` matches everything after the prefix |
-
-Route patterns are split on `/`. Each segment becomes a node. PARAM and WILDCARD nodes are stored as children of their parent and tried only when no STATIC child matches.
-
-**Priority**: STATIC > PARAM > WILDCARD.
-
-The `{id}` syntax is normalized to `:id` before insertion.
-
-```cpp
-router.add("GET", "/users/:id/posts/:pid", handler);
-// match("/users/42/posts/7") → params = {{"id","42"}, {"pid","7"}}
-```
-
-`Router::add<F>` wraps `F` in a type-erased `Handler` using `HandlerTraits`:
-
-```cpp
-template<typename F>
-void add(std::string method, std::string pattern, F&& handler) {
-    auto wrapped = [h = std::forward<F>(handler)](Request& req, Response& res) mutable {
-        HandlerTraits<F>::call(h, req, res);
-    };
-    add_internal(std::move(method), std::move(pattern), std::move(wrapped));
+int main() {
+    App app;
+    app.get("/", [](Response& res) { res.json({{"hello","world"}}); });
+    app.run(8080);
 }
 ```
 
 ---
 
-## 6. Handler Injection System
+## 2. Quick Start
 
-**Header**: `include/osodio/handler_traits.hpp`
+### CMakeLists.txt
 
-This is the core of the ergonomic API. `HandlerTraits<F>` deduces the parameter types of a callable at compile time and calls the appropriate extractor for each.
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(myapp CXX)
+set(CMAKE_CXX_STANDARD 20)
 
-### How it works
+add_subdirectory(osodio)           # or find_package(osodio)
+add_executable(myapp main.cpp)
+target_link_libraries(myapp PRIVATE osodio)
+```
+
+### Complete CRUD example
 
 ```cpp
-template<typename R, typename C, typename... Args>
-struct HandlerTraits<R (C::*)(Args...) const> {
-    template<typename F>
-    static void call(F&& f, const Request& req, Response& res) {
-        auto args = std::tuple<Args...>{extractor<Args>::extract(req, res)...};
-        if (res.status_code() >= 400) return;  // extractor set an error
-        // dispatch based on return type R...
-    }
-};
-```
+#include <osodio/osodio.hpp>
+using namespace osodio;
 
-The `Args...` pack is deduced from the lambda's `operator()`. Each `Args` is resolved by `extractor<T>::extract(req, res)`.
-
-If any extractor sets a 4xx status (e.g., `Body<T>` with bad JSON), the handler is not called and the error response is sent as-is.
-
-### Extractors
-
-```cpp
-// Default: handles Request&, Response&, or anything constructible from defaults
-template<typename T>
-struct extractor {
-    static T extract(const Request& req, Response& res);
-};
-
-// PathParam<T, Name>: reads req.params[Name], converts to T
-template<typename T, fixed_string Name>
-struct extractor<PathParam<T, Name>>;
-
-// Query<T, Name>: reads req.query[Name], converts to T
-template<typename T, fixed_string Name>
-struct extractor<Query<T, Name>>;
-
-// Body<T>: parses req.body as JSON, optionally validates
-template<typename T>
-struct extractor<Body<T>>;
-```
-
-The `Body<T>` extractor:
-1. Parses `req.body` with `nlohmann::json::parse`.
-2. Calls `j.get<T>()` (requires `OSODIO_SCHEMA` or manual `from_json`).
-3. If `has_validate<T>` is true (i.e., `OSODIO_VALIDATE` was used), calls `validate(val)`.
-4. On `ValidationError`: sets `res.status(422)`, writes error JSON, returns default `Body<T>{}`.
-5. On any other exception: sets `res.status(400)`.
-
-### Return type dispatch
-
-```
-void         → just call f(args...)
-Task<T>      → async path (see §11)
-anything else → res.json(f(args...))
-```
-
-The auto-serialization via `res.json()` requires that `T` has a `to_json` overload (provided by `OSODIO_SCHEMA`).
-
-### Special argument types
-
-```cpp
-template<typename T, fixed_string Name>
-struct PathParam {
-    T value;
-    operator T() const { return value; }  // implicit conversion
-};
-
-template<typename T>
-struct Body {
-    T value;
-    const T* operator->() const { return &value; }
-    const T& operator*()  const { return value; }
-};
-
-template<typename T, fixed_string Name>
-struct Query {
-    T value;
-    operator T() const { return value; }
-};
-```
-
-`fixed_string<N>` is a C++20 NTTP (non-type template parameter) helper that allows string literals as template arguments (`PathParam<int, "id">`).
-
----
-
-## 7. Request
-
-**Header**: `include/osodio/request.hpp`
-
-```cpp
-struct Request {
-    std::string method;    // "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"
-    std::string path;      // "/users/42" (without query string)
-    std::string version;   // "HTTP/1.1" or "HTTP/1.0"
-    std::string body;      // raw request body
-
-    std::unordered_map<std::string, std::string> headers;  // lowercase keys
-    std::unordered_map<std::string, std::string> params;   // path params
-    std::unordered_map<std::string, std::string> query;    // query params
-
-    core::EventLoop* loop;  // pointer to event loop; used for co_await sleep()
-
-    // Helpers
-    std::optional<std::string> header(std::string name) const;  // case-insensitive lookup
-    std::string query_param(const std::string& key, const std::string& def = "") const;
-};
-```
-
-Headers are stored with lowercase keys (e.g., `"content-type"`, not `"Content-Type"`). Use `req.header("content-type")` for case-insensitive lookup.
-
-`req.loop` is set by the `DispatchFn` before calling any handler. Pass it to `sleep()` when writing async handlers.
-
----
-
-## 8. Response
-
-**Header**: `include/osodio/response.hpp`
-
-`Response` holds a `shared_ptr<State>` internally so that copies in async captures all share the same underlying data.
-
-```cpp
-class Response {
-public:
-    // Status code (default: 200)
-    Response& status(int code);
-
-    // Body setters (set Content-Type automatically)
-    Response& json(const nlohmann::json& j);
-    Response& html(const std::string& content_or_filename);
-    Response& text(std::string body);
-    Response& send(std::string body);   // raw body, no Content-Type change
-
-    // Headers
-    Response& header(std::string key, std::string value);
-
-    // Introspection
-    int status_code() const;
-    const std::string& body() const;
-
-    // Async internal API (used by HandlerTraits and HttpConnection)
-    bool is_async() const;
-    void mark_async();
-    void unmark_async();
-    void on_complete(std::function<void()> cb);
-    void complete_async();
-
-    // Called by App::run to set the templates base directory
-    void set_templates_dir(const std::string& dir);
-
-    // Serialize to an HTTP/1.1 response string
-    std::string build() const;
-};
-```
-
-`html(content)` uses a heuristic to decide if `content` is a filename or inline HTML:
-- **Filename** if: no `\n`, no `<`, ends with `.html` or `.htm`.
-- **Inline HTML** otherwise.
-
-`build()` produces:
-```
-HTTP/1.1 200 OK\r\n
-Content-Length: <n>\r\n
-<headers>\r\n
-\r\n
-<body>
-```
-
----
-
-## 9. JSON Serialization — OSODIO_SCHEMA
-
-**Header**: `include/osodio/schema.hpp`
-
-```cpp
-#define OSODIO_SCHEMA(Type, ...) \
-    NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Type, __VA_ARGS__)
-```
-
-`OSODIO_SCHEMA` is a thin wrapper over nlohmann/json's `NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE`. It must be placed **outside** the struct, in the same namespace.
-
-```cpp
-struct Article {
-    int         id;
-    std::string title;
-    std::string body;
-    bool        published;
-};
-OSODIO_SCHEMA(Article, id, title, body, published)
-```
-
-This generates:
-```cpp
-void to_json(nlohmann::json& j, const Article& t) {
-    j = nlohmann::json{{"id", t.id}, {"title", t.title}, ...};
-}
-void from_json(const nlohmann::json& j, Article& t) {
-    j.at("id").get_to(t.id);
-    j.at("title").get_to(t.title);
-    ...
-}
-```
-
-`from_json` throws `nlohmann::json::out_of_range` if a required field is missing. The `Body<T>` extractor catches this and returns 400.
-
-**Note:** `OSODIO_SCHEMA` and `OSODIO_VALIDATE` are independent and can be combined:
-
-```cpp
 struct User {
+    int         id;
     std::string name;
-    int age;
-    OSODIO_VALIDATE(User,
-        check(age >= 18, "Must be 18+")
-    )
+    int         age;
+    SCHEMA(User, id, name, age)
+
+    std::vector<std::string> validate() const {
+        if (name.empty()) return {"name: required"};
+        if (age < 0)      return {"age: must be non-negative"};
+        return {};
+    }
 };
-OSODIO_SCHEMA(User, name, age)
+
+struct CreateUser {
+    std::string name;
+    int         age;
+    SCHEMA(CreateUser, name, age)
+
+    std::vector<std::string> validate() const {
+        if (name.empty()) return {"name: required"};
+        if (age < 0)      return {"age: must be non-negative"};
+        return {};
+    }
+};
+
+// In-memory store — in production, inject a real DB
+struct UserStore {
+    std::vector<User> users = {{1,"Alice",30},{2,"Bob",25}};
+    int next_id = 3;
+};
+
+int main() {
+    App app;
+    app.provide(std::make_shared<UserStore>());
+
+    app.get("/users", [](Inject<UserStore> s) {
+        return nlohmann::json(s->users);
+    });
+
+    app.get("/users/:id", [](PathParam<int,"id"> id, Inject<UserStore> s) -> User {
+        for (auto& u : s->users)
+            if (u.id == id.value) return u;
+        throw not_found("User not found");
+    });
+
+    app.post("/users", [](CreateUser body, Inject<UserStore> s) {
+        User u{s->next_id++, body.name, body.age};
+        s->users.push_back(u);
+        return nlohmann::json{{"id", u.id}};
+    });
+
+    app.del("/users/:id", [](PathParam<int,"id"> id, Inject<UserStore> s,
+                              Response& res) {
+        auto& v = s->users;
+        auto it = std::find_if(v.begin(), v.end(),
+                               [&](auto& u){ return u.id == id.value; });
+        if (it == v.end()) throw not_found();
+        v.erase(it);
+        res.status(204).send("");
+    });
+
+    app.run(8080);
+}
 ```
 
 ---
 
-## 10. Validation — OSODIO_VALIDATE
+## 3. Routing
 
-**Header**: `include/osodio/schema.hpp`, `include/osodio/validation.hpp`
-
-`OSODIO_VALIDATE` is placed **inside** the struct body. It needs access to `this->` member names.
+### HTTP methods
 
 ```cpp
-#define OSODIO_VALIDATE(Type, ...)                                    \
-    void _validate_impl(std::vector<std::string>& _errors) const {   \
-        __VA_ARGS__;                                                  \
-    }                                                                 \
-    friend void validate(const Type& _self) {                        \
-        std::vector<std::string> _errors;                            \
-        _self._validate_impl(_errors);                               \
-        if (!_errors.empty())                                        \
-            throw osodio::ValidationError(std::move(_errors));       \
-    }
-
-#define check(cond, msg) \
-    ((cond) ? (void)0 : _errors.push_back(msg))
+app.get   ("/path", handler);
+app.post  ("/path", handler);
+app.put   ("/path", handler);
+app.patch ("/path", handler);
+app.del   ("/path", handler);   // "delete" is reserved; use del
+app.any   ("/path", handler);   // matches all methods
 ```
 
-The `friend void validate(const Type&)` is found via ADL (Argument-Dependent Lookup) when calling `validate(user)`. The `has_validate<T>` trait in `handler_traits.hpp` detects this at compile time:
+### Path parameter syntax
+
+Both styles are equivalent:
 
 ```cpp
-template<typename T>
-struct has_validate<T,
-    std::void_t<decltype(validate(std::declval<const T&>()))>
-> : std::true_type {};
+app.get("/users/:id",   handler);   // Express-style
+app.get("/users/{id}",  handler);   // OpenAPI-style
 ```
 
-**ValidationError**:
-```cpp
-struct ValidationError : public std::runtime_error {
-    std::vector<std::string> messages;
-};
-```
-
-**Manual validation**:
-```cpp
-User u{"", 15};
-try {
-    validate(u);   // throws ValidationError
-} catch (const osodio::ValidationError& e) {
-    for (const auto& msg : e.messages) { ... }
-}
-```
-
-**Validator builders** (from `validation.hpp`):
-
-These are helper lambdas for use with `validate_field()`. They are **not** needed inside `OSODIO_VALIDATE` — use plain `check()` expressions there. They exist as utilities for manual validation code:
+### Wildcard routes
 
 ```cpp
-// min(m) — value must be >= m
-// max(m) — value must be <= m
-// len_min(m) — string length must be >= m
-// len_max(m) — string length must be <= m
-
-std::vector<std::string> errs;
-validate_field(user.age,  "age",  errs, min(18), max(99));
-validate_field(user.name, "name", errs, len_min(2), len_max(64));
-```
-
----
-
-## 11. Async — Task\<T\> and Coroutines
-
-**Header**: `include/osodio/task.hpp`
-
-### Task\<T\>
-
-```cpp
-template<typename T>
-struct Task {
-    struct promise_type {
-        T                      result;
-        std::exception_ptr     exception;
-        std::function<void(T)> on_complete;    // called at co_return
-        std::coroutine_handle<> continuation;  // outer Task waiting on us
-        core::EventLoop*        loop = nullptr; // for frame self-destruction
-    };
-
-    std::coroutine_handle<promise_type> handle;
-
-    // Transfer ownership to the promise (prevents ~Task from destroying the frame)
-    std::coroutine_handle<promise_type> detach();
-
-    bool done() const;
-    T    get_result();
-
-    // Awaiter interface — allows co_await Task<T> from another coroutine
-    bool await_ready() const noexcept;
-    void await_suspend(std::coroutine_handle<> outer) noexcept;
-    T    await_resume();
-};
-```
-
-`Task<void>` is a separate full specialization with the same structure minus `result` and `on_complete(T)`.
-
-### Coroutine Frame Lifetime
-
-The frame lifecycle in the async path (`HandlerTraits::call`):
-
-```
-1. f(args...) creates the coroutine frame and returns Task<T>
-2. task.detach() transfers ownership from Task wrapper to the promise
-   → ~Task() will not destroy the frame
-3. h.promise().loop is set so FinalAwaitable can post h.destroy()
-4. h.promise().on_complete is set to: res.json(val); res.complete_async();
-5. h.resume() starts the coroutine
-6. If the coroutine suspends (e.g. co_await sleep):
-   - epoll loop continues normally
-   - detached thread fires after `ms` ms, posts h.resume() to the loop
-   - loop resumes the coroutine
-7. co_return value → promise_type::return_value(val)
-   → on_complete(val) is called: res.json(val), res.complete_async()
-   → complete_async() calls on_complete_cb (set by http_connection)
-   → http_connection posts finish_dispatch to the loop
-8. FinalAwaitable::await_suspend runs:
-   - no continuation → posts h.destroy() to the loop
-9. Loop runs h.destroy() after finish_dispatch → frame freed
-```
-
-### SleepAwaitable
-
-```cpp
-struct SleepAwaitable {
-    int ms;
-    core::EventLoop* loop;
-
-    bool await_ready() const noexcept { return ms <= 0; }
-    void await_suspend(std::coroutine_handle<> h) noexcept {
-        std::thread([ms, loop, h]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-            loop->post([h]() mutable { if (!h.done()) h.resume(); });
-        }).detach();
-    }
-    void await_resume() const noexcept {}
-};
-
-inline SleepAwaitable sleep(int ms, core::EventLoop* loop) { return {ms, loop}; }
-```
-
-The detached thread approach is simple but not scalable for high-concurrency timers. For production use, a `timerfd`-based implementation would be more efficient.
-
-### Chaining Tasks
-
-```cpp
-Task<int> step_one(core::EventLoop* loop) {
-    co_await sleep(10, loop);
-    co_return 42;
-}
-
-app.get("/chain", [](Request& req) -> Task<nlohmann::json> {
-    int v = co_await step_one(req.loop);
-    // step_one's FinalAwaitable performs symmetric transfer → resumes this coroutine
-    co_return nlohmann::json{{"value", v}};
+app.get("/files/*", [](Request& req, Response& res) {
+    // req.params["*"] contains the wildcard portion
+    res.text("File: " + req.params["*"]);
 });
 ```
 
-Chaining works via `Task::await_suspend`:
-1. `await_suspend` stores the outer coroutine handle as `continuation` on the inner task's promise.
-2. `FinalAwaitable::await_suspend` checks for `continuation` before posting `h.destroy()`.
-3. If `continuation` exists, it performs symmetric transfer: `return continuation;`.
-4. The outer coroutine resumes with the inner result via `await_resume`.
+---
+
+## 4. Handler Signatures
+
+Osodio uses `HandlerTraits` to auto-extract typed arguments from `Request`. Any combination of the following parameter types works in any order:
+
+| Type | Resolved from |
+|------|--------------|
+| `Request&` | The raw request |
+| `Response&` | The response builder |
+| `PathParam<T, "name">` | URL path segment |
+| `Query<T, "name">` | Query string parameter |
+| `Query<T, "name", "default">` | Query with default value |
+| `Body<T>` | Parsed request body (explicit) |
+| `T` (any SCHEMA struct) | Parsed request body (implicit) |
+| `Inject<T>` | Service from the DI container |
+
+### Return value auto-serialization
+
+If the handler returns a value (not `void` or `Task<void>`), it is automatically JSON-serialized:
+
+```cpp
+// Returns User, automatically serialized as JSON
+app.get("/users/:id", [](PathParam<int,"id"> id) -> User {
+    return {id.value, "Alice", 30};
+});
+
+// Returns nlohmann::json directly
+app.get("/info", []() -> nlohmann::json {
+    return {{"version","1.0"},{"ok",true}};
+});
+
+// Returns nothing — must call res.xxx() explicitly
+app.get("/ping", [](Response& res) {
+    res.json({{"pong", true}});
+});
+```
+
+### Async handlers
+
+Add `-> Task<T>` and use `co_await` / `co_return`:
+
+```cpp
+app.get("/slow", []() -> Task<nlohmann::json> {
+    co_await sleep(500);   // non-blocking 500ms
+    co_return nlohmann::json{{"waited_ms", 500}};
+});
+```
+
+---
+
+## 5. Request API
+
+```cpp
+app.get("/echo", [](Request& req, Response& res) {
+    req.method;          // "GET", "POST", ...
+    req.path;            // "/echo"
+    req.version;         // "HTTP/1.1" or "HTTP/2.0"
+    req.body;            // raw request body as std::string
+    req.remote_ip;       // peer IP, e.g. "192.168.1.42"
+
+    // Headers — lowercase keys
+    req.headers["content-type"];
+    req.header("Authorization");         // returns std::optional<std::string>
+    req.header("X-Custom");              // case-insensitive lookup
+
+    // Path params — populated by the router
+    req.params["id"];
+
+    // Query params — e.g. /echo?page=2&q=hello
+    req.query["page"];
+    req.query_param("page", "1");        // with default value
+
+    // Cancellation
+    req.is_cancelled();                  // true if connection was closed
+    req.cancel_token;                    // shared_ptr<CancellationToken>
+
+    // Event loop (for manual async work)
+    req.loop;                            // core::EventLoop*
+
+    // DI container
+    req.container;                       // ServiceContainer*
+
+    // JWT claims (populated by jwt_auth() middleware)
+    req.jwt_claims["sub"].get<std::string>();
+
+    res.json({{"ok", true}});
+});
+```
+
+---
+
+## 6. Response API
+
+All methods return `Response&` for chaining.
+
+```cpp
+app.get("/demo", [](Response& res) {
+    // Status
+    res.status(201);
+
+    // Body types
+    res.json({{"key","value"}});         // application/json
+    res.text("plain text");              // text/plain
+    res.html("<h1>Hello</h1>");          // text/html
+    res.send("raw bytes");               // no Content-Type change
+
+    // Headers
+    res.header("X-Custom", "value");
+
+    // File download (zero-copy sendfile(2))
+    res.header("Content-Type", "application/pdf")
+       .send_file("/var/files/doc.pdf");
+
+    // Template rendering (Jinja2 via inja)
+    res.render("index.html", {{"user","Alice"},{"items",items}});
+
+    // Redirect (manual)
+    res.status(302).header("Location", "/new-path").send("");
+});
+```
+
+### Chaining example
+
+```cpp
+res.status(201)
+   .header("X-Request-Id", "abc123")
+   .json({{"id", 42}, {"created", true}});
+```
+
+---
+
+## 7. Path Parameters
+
+Declare the type and name as template arguments:
+
+```cpp
+// int, long, float, double, std::string
+app.get("/users/:id",   [](PathParam<int,   "id">   id)   { /* id.value */ });
+app.get("/items/:slug", [](PathParam<std::string,"slug"> s){ /* s.value  */ });
+app.get("/v/:ver",      [](PathParam<float, "ver">  v)    { /* v.value  */ });
+```
+
+**Implicit conversion**: `PathParam<T,N>` converts to `T` automatically:
+
+```cpp
+app.get("/users/:id", [](PathParam<int,"id"> id, Inject<DB> db) {
+    int user_id = id;   // implicit conversion
+    return db->find(user_id);
+});
+```
+
+---
+
+## 8. Query Parameters
+
+```cpp
+// Basic: ?page=2
+app.get("/list", [](Query<int,"page"> page) {
+    int p = page;          // implicit conversion to int
+    bool present = bool(page);  // false if param was absent
+});
+
+// With default value: ?page=1&limit=20 (defaults if absent)
+app.get("/list", [](Query<int,"page","1">   page,
+                    Query<int,"limit","20"> limit,
+                    Query<std::string,"q">  q) {
+    return nlohmann::json{
+        {"page",  (int)page},
+        {"limit", (int)limit},
+        {"q",     (std::string)q}
+    };
+});
+```
+
+**`operator bool` indicates presence:**
+```cpp
+app.get("/search", [](Query<std::string,"q"> q, Response& res) {
+    if (!q) { res.status(400).json({{"error","q is required"}}); return; }
+    // q was present
+});
+```
+
+---
+
+## 9. Request Body — SCHEMA
+
+### Defining a serializable struct
+
+```cpp
+struct CreateUser {
+    std::string              name;
+    int                      age;
+    std::optional<std::string> bio;    // optional: absent/null → std::nullopt
+
+    SCHEMA(CreateUser, name, age, bio)
+};
+```
+
+**Rules:**
+- `SCHEMA(TypeName, field1, field2, ...)` goes inside the struct body
+- `std::optional<T>` fields are **automatically optional** — no extra macro
+- Non-optional fields missing from the request body → `422 Unprocessable Entity` automatically
+- Supports nesting: a field can itself be a SCHEMA struct
+
+### Using the struct as a handler parameter
+
+```cpp
+// Implicit (bare struct) — ergonomic
+app.post("/users", [](CreateUser body) {
+    // body.name, body.age, body.bio
+    return nlohmann::json{{"created", body.name}};
+});
+
+// Explicit Body<T> — when you need the validity check
+app.post("/users", [](Body<CreateUser> body, Response& res) {
+    if (!body) return;   // body is invalid (parse/validation failed, res already has 422)
+    auto& u = *body;
+    return nlohmann::json{{"name", u.name}};
+});
+```
+
+### Nested structs
+
+```cpp
+struct Address {
+    std::string street;
+    std::string city;
+    SCHEMA(Address, street, city)
+};
+
+struct CreateProfile {
+    std::string name;
+    Address     address;
+    SCHEMA(CreateProfile, name, address)
+};
+
+app.post("/profile", [](CreateProfile p) {
+    // p.address.city
+});
+```
+
+### Returning a struct as JSON
+
+Any struct with `SCHEMA` can be returned directly from a handler — it is auto-serialized:
+
+```cpp
+app.get("/users/:id", [](PathParam<int,"id"> id) -> CreateUser {
+    return {"Alice", 30, std::nullopt};
+});
+```
+
+### SCHEMA internals
+
+`SCHEMA(Type, fields...)` generates two friend functions inside the struct:
+
+```cpp
+friend void to_json(nlohmann::json& j, const Type& t);
+friend void from_json(const nlohmann::json& j, Type& t);
+```
+
+The `from_json` uses `osodio::detail::bind_field<FieldType>()`, a template helper that:
+- For `std::optional<T>` fields: maps absent/null JSON to `std::nullopt`
+- For required fields: calls `j.at(name).get_to(field)`, throwing if absent
+
+**C++26 note**: Once GCC 15+ / Clang with P2996 is available, `SCHEMA` will be eliminated entirely. Any plain struct will serialize automatically via static reflection. Migration: delete the `SCHEMA(...)` line from every struct.
+
+---
+
+## 10. Validation — validate()
+
+Define a `validate()` method returning `std::vector<std::string>`. Return an empty vector for valid data.
+
+```cpp
+struct RegisterRequest {
+    std::string email;
+    std::string password;
+    int         age;
+    SCHEMA(RegisterRequest, email, age, password)
+
+    std::vector<std::string> validate() const {
+        std::vector<std::string> errs;
+        if (email.find('@') == std::string::npos)
+            errs.push_back("email: invalid format");
+        if (password.size() < 8)
+            errs.push_back("password: must be at least 8 characters");
+        if (age < 18)
+            errs.push_back("age: must be at least 18");
+        return errs;
+    }
+};
+```
+
+If `validate()` returns a non-empty vector, Osodio automatically responds with:
+```json
+HTTP 422
+{"error": "Validation Failed", "messages": ["email: invalid format", "age: must be at least 18"]}
+```
+
+The handler is **not called** if validation fails.
+
+---
+
+## 11. Async Handlers — Task\<T\>
+
+### Making a handler async
+
+Add `-> Task<T>` and use `co_await` / `co_return`:
+
+```cpp
+app.get("/async", []() -> Task<nlohmann::json> {
+    co_await sleep(100);   // non-blocking, releases the loop thread
+    co_return nlohmann::json{{"done", true}};
+});
+```
+
+### sleep(ms)
+
+Non-blocking sleep. Does not block the event loop thread — other connections continue to be handled during the sleep.
+
+```cpp
+app.get("/delayed", [](Request& req) -> Task<nlohmann::json> {
+    co_await sleep(2000);   // 2 seconds, non-blocking
+
+    if (req.is_cancelled()) co_return nlohmann::json{};  // client disconnected
+
+    co_return nlohmann::json{{"msg", "hello after 2s"}};
+});
+```
+
+`sleep(ms)` uses `req.loop` (thread-local) — no need to pass it explicitly.
+
+### Chaining coroutines
+
+```cpp
+Task<std::string> fetch_name(int id) {
+    co_await sleep(10);
+    co_return "Alice";
+}
+
+app.get("/users/:id", [](PathParam<int,"id"> id) -> Task<nlohmann::json> {
+    auto name = co_await fetch_name(id.value);
+    co_return nlohmann::json{{"name", name}};
+});
+```
+
+### Async middleware
+
+Middleware must use `co_await next()` to continue the chain:
+
+```cpp
+app.use([](Request& req, Response& res, NextFn next) -> Task<void> {
+    auto start = std::chrono::steady_clock::now();
+    co_await next();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - start).count();
+    res.header("X-Duration-Ms", std::to_string(ms));
+});
+```
 
 ---
 
 ## 12. Middleware
 
-**Type**: `std::function<void(Request&, Response&, NextFn)>`  
-where `NextFn = std::function<void()>`
-
-Middleware is registered with `app.use()` and runs in registration order before every route handler. It does **not** run for static file requests (those are handled before the middleware chain).
+### Global middleware
 
 ```cpp
-app.use([](Request& req, Response& res, auto next) {
-    // before
-    auto start = std::chrono::steady_clock::now();
-
-    next();  // runs the rest of the chain (other middlewares + the route)
-
-    // after (only for synchronous handlers)
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start).count();
-    std::cout << req.path << " " << res.status_code() << " " << ms << "ms\n";
-});
+app.use(middleware_fn);
 ```
 
-**Important**: Code after `next()` does **not** run for async handlers because the coroutine suspends during `next()`. Only code before `next()` is reliable in all cases.
+Middleware runs in registration order for **every** request.
 
-**Short-circuiting** (e.g., auth middleware):
+### Middleware signature
+
 ```cpp
-app.use([](Request& req, Response& res, auto next) {
-    if (!req.header("authorization")) {
-        res.status(401).json({{"error", "Unauthorized"}});
-        return;   // do not call next()
+Middleware = std::function<Task<void>(Request&, Response&, NextFn)>
+```
+
+Must `co_await next()` to pass control to the next middleware/handler. Omitting `co_await next()` short-circuits the chain (useful for auth guards).
+
+### Short-circuit example
+
+```cpp
+app.use([](Request& req, Response& res, NextFn next) -> Task<void> {
+    if (req.header("x-api-key") != "secret") {
+        res.status(401).json({{"error","Unauthorized"}});
+        co_return;   // do NOT call next()
     }
-    next();
+    co_await next();   // proceed normally
 });
 ```
 
-**Implementation**: The chain is built using a `shared_ptr<std::function<void(size_t)>>` to avoid dangling references in the `next` closures. The index `i` steps through `middlewares_` and calls the router at `i == middlewares_.size()`.
+### Pre/post middleware
+
+```cpp
+app.use([](Request& req, Response& res, NextFn next) -> Task<void> {
+    // PRE: runs before handler
+    req.headers["x-request-id"] = generate_id();
+
+    co_await next();
+
+    // POST: runs after handler completes
+    res.header("X-Served-By", "osodio");
+});
+```
 
 ---
 
-## 13. Static Files
+## 13. Built-in Middleware
 
-**Implementation**: `src/app.cpp` (`try_serve_static`, `mime_for_ext`)
+### logger()
 
-Static mounts bypass the middleware chain entirely. They are checked at the top of `DispatchFn`, before any middleware runs.
+Logs every request to stdout: method, path, status, duration.
 
 ```cpp
-app.serve_static("/static", "./public");
-// GET /static/style.css  → read ./public/style.css, send with Content-Type: text/css
-// GET /static/../../etc/passwd → 403 Forbidden
+app.use(osodio::logger());
 ```
 
-**Multiple mounts** (first match wins):
+Output format: `GET /users 200 1.2ms`
+
+### cors()
+
+Handles CORS preflight and response headers.
+
 ```cpp
-app.serve_static("/assets", "./dist/assets");
-app.serve_static("/uploads", "/var/uploads");
+app.use(osodio::cors());   // allow all origins
+
+app.use(osodio::cors({
+    .origins     = {"https://app.example.com", "http://localhost:3000"},
+    .methods     = {"GET","POST","PUT","DELETE"},
+    .headers     = {"Content-Type","Authorization"},
+    .credentials = true,
+    .max_age     = 86400,
+}));
 ```
 
-**Path traversal protection**: `fs::weakly_canonical` is used to resolve symlinks and `..` segments. If the resolved file path is not a child of the resolved root, a 403 is returned.
+### compress()
 
-**Supported MIME types**:
+Response compression. Prefers Brotli if the client supports it, falls back to gzip.
 
-| Extension | MIME type |
-|-----------|-----------|
-| `.html`, `.htm` | `text/html; charset=utf-8` |
-| `.css` | `text/css; charset=utf-8` |
-| `.js` | `application/javascript; charset=utf-8` |
-| `.json` | `application/json; charset=utf-8` |
-| `.svg` | `image/svg+xml` |
-| `.png` | `image/png` |
-| `.jpg`, `.jpeg` | `image/jpeg` |
-| `.gif` | `image/gif` |
-| `.webp` | `image/webp` |
-| `.ico` | `image/x-icon` |
-| `.woff` | `font/woff` |
-| `.woff2` | `font/woff2` |
-| `.ttf` | `font/ttf` |
-| `.pdf` | `application/pdf` |
-| `.xml` | `application/xml` |
-| `.txt` | `text/plain; charset=utf-8` |
-| *(anything else)* | `application/octet-stream` |
+```cpp
+app.use(osodio::compress());
+
+// Custom options
+app.use(osodio::compress({
+    .min_size  = 1024,        // bytes — don't compress smaller responses
+    .brotli    = true,        // enable Brotli (default: true)
+    .gzip      = true,        // enable gzip fallback (default: true)
+    .level     = 6,           // compression level 1–9
+}));
+```
+
+### helmet()
+
+Security headers: CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy.
+
+```cpp
+app.use(osodio::helmet());
+
+// Custom CSP
+app.use(osodio::helmet({
+    .csp        = "default-src 'self'; script-src 'self' cdn.example.com",
+    .hsts_max   = 31536000,
+    .frame      = "DENY",
+}));
+```
+
+### rate_limit()
+
+Fixed-window rate limiting by IP (or custom key).
+
+```cpp
+app.use(osodio::rate_limit({
+    .window_ms = 60'000,   // 1 minute
+    .max       = 100,      // 100 requests per window
+}));
+
+// Rate limit by API key instead of IP
+app.use(osodio::rate_limit({
+    .window_ms = 60'000,
+    .max       = 1000,
+    .key_fn    = [](const Request& req) -> std::string {
+        return req.header("x-api-key").value_or(req.remote_ip);
+    },
+}));
+```
+
+Responds with `429 Too Many Requests` when exceeded. Adds headers:
+- `X-RateLimit-Limit: 100`
+- `X-RateLimit-Remaining: 42`
+- `Retry-After: 30`
 
 ---
 
-## 14. Error Handlers
+## 14. Route Groups
 
-**Type**: `std::function<void(int code, Request&, Response&)>`
-
-Error handlers are called at the end of `DispatchFn`, after the full middleware + route chain, when `res.status_code() >= 400`.
+Groups add a URL prefix and optional per-group middleware.
 
 ```cpp
-app.on_error(404, [](int, Request& req, Response& res) {
-    res.status(404).html("404.html");  // must re-set status; handler may change it
+auto api = app.group("/api/v1");
+
+// Per-group middleware — runs only for routes in this group
+api.use([](Request&, Response& res, NextFn next) -> Task<void> {
+    res.header("X-API-Version", "1");
+    co_await next();
 });
 
+// Routes under /api/v1/...
+api.get("/users",      list_users_handler);
+api.post("/users",     create_user_handler);
+api.get("/users/:id",  get_user_handler);
+
+// Nested groups
+auto admin = api.group("/admin");
+admin.use(admin_auth_middleware);
+admin.get("/stats", stats_handler);   // → GET /api/v1/admin/stats
+```
+
+Groups support all the same methods as `App`: `get`, `post`, `put`, `patch`, `del`, `use`.
+
+---
+
+## 15. Error Handling
+
+### HttpError — throw from any handler
+
+```cpp
+#include <osodio/errors.hpp>
+
+app.get("/users/:id", [](PathParam<int,"id"> id, Inject<DB> db) -> User {
+    auto user = db->find(id.value);
+    if (!user) throw osodio::not_found("User not found");
+    return *user;
+});
+```
+
+**Factory functions:**
+
+```cpp
+throw osodio::bad_request("Invalid input");          // 400
+throw osodio::unauthorized("Login required");        // 401
+throw osodio::forbidden("Access denied");            // 403
+throw osodio::not_found("Resource not found");       // 404
+throw osodio::method_not_allowed();                  // 405
+throw osodio::conflict("Duplicate email");           // 409
+throw osodio::unprocessable("Bad data", messages);   // 422
+throw osodio::too_many_requests();                   // 429
+throw osodio::internal_error("DB failure");          // 500
+throw osodio::service_unavailable();                 // 503
+```
+
+All produce `{"error": "message"}` JSON bodies.
+
+### on_error() — custom error pages
+
+```cpp
+// Specific status code
+app.on_error(404, [](int code, Request& req, Response& res) {
+    res.json({{"error","Not Found"},{"path",req.path}});
+});
+
+// Catch-all for any error status
 app.on_error([](int code, Request&, Response& res) {
-    res.json({{"error", "An error occurred"}, {"code", code}});
+    res.json({{"error","Something went wrong"},{"code",code}});
 });
 ```
 
-**Notes**:
-- The error handler receives the response object after the route handler has written to it. It can overwrite the body but must call `res.status(code)` again if it wants to change the status.
-- Async handlers: error handlers are **not** called for async responses because the response may not be set yet when the check runs. This is a known limitation.
-- If no handler is registered for a code and no catch-all is set, the response is sent as-is.
+Error handlers run **after** the async handler chain completes. They can inspect and override the response.
 
 ---
 
-## 15. HTML Templates
+## 16. Dependency Injection
 
-Templates are loaded from a configurable directory (default: `./templates`).
+### Registering services
 
 ```cpp
-app.set_templates("./views");
+// Singleton: same shared_ptr for every request
+app.provide(std::make_shared<Database>("postgres://..."));
 
-app.get("/about", [](Request&, Response& res) {
-    res.html("about.html");   // reads ./views/about.html
+// Transient: factory called once per Inject<T> resolution
+app.provide<Logger>([]{ return std::make_shared<Logger>(); });
+```
+
+### Injecting into handlers
+
+```cpp
+app.get("/users", [](Inject<Database> db, Inject<Logger> log) {
+    log->info("listing users");
+    return db->query("SELECT * FROM users");
 });
 ```
 
-`res.html()` accepts either:
-- A **filename** (no `<`, no `\n`, ends with `.html` or `.htm`): reads from the templates directory.
-- An **inline HTML string**: sent directly.
-
-Currently templates are static files — no variables, no templating engine. Dynamic content must be constructed as a string in the handler.
-
----
-
-## 16. Event Loop
-
-**Header**: `include/osodio/core/event_loop.hpp`  
-**Implementation**: `src/core/event_loop.cpp`
+`Inject<T>` has `operator->` and `operator*`:
 
 ```cpp
-class EventLoop {
-public:
-    using Callback = std::function<void(uint32_t events)>;
-
-    void add   (int fd, uint32_t events, Callback cb);  // register fd
-    void modify(int fd, uint32_t events);               // change events
-    void remove(int fd);                                 // deregister and remove callback
-
-    void post(std::function<void()> cb);  // thread-safe: schedule on next iteration
-    void run();                           // blocks; processes events
-    void stop();                          // signals run() to return
-};
+auto rows = db->query("...");   // std::shared_ptr-like
+auto& ref = *db;
 ```
 
-**Internals**:
-- Uses `epoll` with `EPOLLET` (edge-triggered) on Linux.
-- `eventfd` is used as a wakeup mechanism: `post()` writes to the fd to wake `epoll_wait`.
-- `task_queue_` is protected by a mutex; tasks are drained (under lock) then executed (without lock) at the start of each `epoll_wait` iteration.
-
-The event loop runs `process_tasks()` before each `epoll_wait` call, ensuring that tasks posted from coroutines or threads are executed on the loop thread.
-
----
-
-## 17. HTTP Parser
-
-**Header**: `src/http/http_parser.hpp`  
-**Implementation**: `src/http/http_parser.cpp`
-
-An incremental, line-based HTTP/1.1 request parser.
-
-```
-States: REQUEST_LINE → HEADERS → BODY (if Content-Length > 0)
-```
-
-- Accumulates bytes in a string buffer.
-- Scans for `\r\n` lines.
-- Parses: method, path (split from query string), HTTP version.
-- Headers stored with lowercase keys.
-- `Content-Length` header determines body size.
-- Automatically resets after emitting a complete request (supports keep-alive pipelining).
-- Returns `false` from `feed()` on a parse error; caller closes the connection.
-
-`ParsedRequest` fields:
-```cpp
-struct ParsedRequest {
-    std::string method;
-    std::string path;    // without query string
-    std::string query;   // raw query string (e.g. "page=1&limit=20")
-    std::string version;
-    std::unordered_map<std::string, std::string> headers;
-    std::string body;
-};
-```
-
----
-
-## 18. TCP Server
-
-**Header**: `src/core/tcp_server.hpp`  
-**Implementation**: `src/core/tcp_server.cpp`
-
-Creates a listening TCP socket and accepts connections.
-
-Socket options set: `SO_REUSEADDR`, `SO_REUSEPORT`, `TCP_NODELAY`, non-blocking (`O_NONBLOCK`).
-
-Address family selection: `AF_INET` for `0.0.0.0` or any IPv4 address, `AF_INET6` for `::` or explicit IPv6 addresses.
-
-On `accept(2)`: creates an `HttpConnection`, registers it with the event loop, stores it in a `shared_ptr` map.
-
----
-
-## 19. HTTP Connection
-
-**Header**: `src/http/http_connection.hpp`  
-**Implementation**: `src/http/http_connection.cpp`
-
-One instance per TCP connection. Inherits `enable_shared_from_this`.
-
-```
-on_event(EPOLLIN)  → do_read()  → parser_.feed() → dispatch()
-on_event(EPOLLERR) → close()
-```
-
-`dispatch()`:
-- Builds `Request` and `Response` from `ParsedRequest`.
-- Calls `dispatch_fn_(req, res)`.
-- If `res.is_async()`: sets `on_complete` callback to post `finish_dispatch` to the loop.
-- Otherwise: calls `finish_dispatch` immediately.
-
-`finish_dispatch()`:
-- Determines keep-alive from HTTP version and `Connection` header.
-- Adds `Connection: keep-alive` or `Connection: close` header.
-- Calls `Response::build()` then `send_response()`.
-- Closes connection if not keep-alive.
-
-`send_response()` writes in a loop until all bytes are sent (blocking write for simplicity).
-
----
-
-## 20. How to Extend Osodio
-
-### Add a new argument type
-
-1. Define a new wrapper struct:
-   ```cpp
-   template<fixed_string Name>
-   struct Cookie {
-       std::string value;
-   };
-   ```
-
-2. Add a specialization of `extractor<>` in `handler_traits.hpp`:
-   ```cpp
-   template<fixed_string Name>
-   struct extractor<Cookie<Name>> {
-       static Cookie<Name> extract(const Request& req, Response&) {
-           // parse req.header("cookie") and extract Name
-           return {/* value */};
-       }
-   };
-   ```
-
-3. It works automatically in any handler lambda:
-   ```cpp
-   app.get("/me", [](Cookie<"session"> session) {
-       // session.value
-   });
-   ```
-
-### Add a new response method
-
-Add a method to `Response` in `include/osodio/response.hpp`:
+### Multiple services
 
 ```cpp
-Response& redirect(const std::string& url, int code = 302) {
-    state_->status_code = code;
-    state_->headers["Location"] = url;
-    return *this;
-}
-```
+struct Config { std::string base_url; };
+struct Cache  { /* ... */ };
 
-### Add a new validator
+app.provide(std::make_shared<Config>(Config{"https://api.example.com"}));
+app.provide(std::make_shared<Cache>());
 
-Add a function in `include/osodio/validation.hpp`:
-
-```cpp
-inline auto email() {
-    return [](const std::string& val, const std::string& field,
-              std::vector<std::string>& errs) {
-        if (val.find('@') == std::string::npos)
-            errs.push_back(field + " must be a valid email");
-    };
-}
-```
-
-Use with `validate_field` in manual validation or directly in `check()`:
-
-```cpp
-OSODIO_VALIDATE(User,
-    check(name.find('@') == std::string::npos, "Name cannot contain @"),
-    check(age >= 18, "Must be 18+")
-)
-```
-
-### Add a new HTTP method
-
-In `app.hpp`, add a new template method mirroring `get`, `post`, etc.:
-
-```cpp
-template<typename F> App& options(std::string path, F&& h) {
-    router_.add("OPTIONS", std::move(path), std::forward<F>(h));
-    return *this;
-}
-```
-
-### Add a MIME type for static files
-
-In `src/app.cpp`, `mime_for_ext()` is a simple chain of `if` comparisons. Add a new line:
-
-```cpp
-if (ext == ".webmanifest") return "application/manifest+json";
-```
-
-### Add a new route parameter type
-
-To support `PathParam<MyType, "name">` where `MyType` is not a built-in:
-
-In the `extractor<PathParam<T, Name>>` specialization in `handler_traits.hpp`, add a branch:
-
-```cpp
-else if constexpr (std::is_same_v<T, MyType>)
-    return {MyType::from_string(it->second)};
-```
-
----
-
-## Common Patterns
-
-### JSON API with validation
-
-```cpp
-struct CreatePostBody {
-    std::string title;
-    std::string content;
-    int         author_id;
-
-    OSODIO_VALIDATE(CreatePostBody,
-        check(title.size() >= 5,   "Title must be at least 5 characters"),
-        check(title.size() <= 200, "Title too long"),
-        check(!content.empty(),    "Content cannot be empty"),
-        check(author_id > 0,       "Invalid author_id")
-    )
-};
-OSODIO_SCHEMA(CreatePostBody, title, content, author_id)
-
-app.post("/posts", [](Body<CreatePostBody> body) {
-    // body.value is guaranteed valid here
-    return nlohmann::json{{"id", 42}, {"title", body->title}};
+app.get("/data", [](Inject<Config> cfg, Inject<Cache> cache) {
+    // ...
 });
 ```
 
-### Returning custom structs
+---
+
+## 17. JWT Authentication
+
+### Signing a token
 
 ```cpp
-struct UserResponse {
-    int         id;
+#include <osodio/jwt.hpp>
+
+// HS256 (shared secret)
+auto token = osodio::jwt::sign(
+    {{"sub", "user-42"}, {"exp", osodio::jwt::expires_in(3600)}},
+    "my-secret"
+);
+
+// RS256 (RSA private key PEM)
+auto token = osodio::jwt::sign(
+    {{"sub", "user-42"}},
+    private_key_pem,
+    "RS256"
+);
+```
+
+### jwt_auth() middleware
+
+```cpp
+// HS256 — all routes
+app.use(osodio::jwt_auth("my-secret"));
+
+// With options
+app.use(osodio::jwt_auth("my-secret", {
+    .issuer   = "my-app",
+    .audience = "api",
+    .skip = [](const Request& req) {
+        return req.path == "/login" || req.path == "/health";
+    }
+}));
+
+// RS256 — convenience overload
+app.use(osodio::jwt_auth_rsa(public_key_pem));
+```
+
+After successful validation, claims are in `req.jwt_claims`:
+
+```cpp
+app.get("/me", [](Request& req, Response& res) {
+    auto sub = req.jwt_claims["sub"].get<std::string>();
+    res.json({{"user_id", sub}});
+});
+```
+
+### Manual verify
+
+```cpp
+try {
+    auto claims = osodio::jwt::verify(token, "my-secret");
+    auto sub = claims["sub"].get<std::string>();
+} catch (const osodio::JwtError& e) {
+    // "token expired", "invalid signature", etc.
+}
+```
+
+### jwt::decode (no verification)
+
+```cpp
+// Inspect without verifying — useful for debugging
+auto claims = osodio::jwt::decode(token);
+```
+
+### JwtOptions fields
+
+```cpp
+struct JwtOptions {
+    std::string algorithm  = "HS256";        // "HS256" or "RS256"
+    std::string header     = "authorization"; // which header to read
+    bool        bearer     = true;           // expect "Bearer <token>"
+    std::optional<std::string> issuer;       // validate "iss" claim
+    std::optional<std::string> audience;     // validate "aud" claim
+    bool check_exp = true;                   // reject expired tokens
+    bool check_nbf = true;                   // reject not-yet-valid tokens
+};
+```
+
+---
+
+## 18. Server-Sent Events (SSE)
+
+### HTTP/1.1
+
+```cpp
+#include <osodio/sse.hpp>
+
+app.get("/events", [](Request& req, Response& res) -> Task<void> {
+    auto sse = osodio::make_sse(res, req);
+
+    int n = 0;
+    while (sse.is_open()) {
+        sse.send("tick", std::to_string(n++));   // named event
+        co_await sleep(1000);
+    }
+});
+```
+
+### SSEWriter API
+
+```cpp
+auto sse = osodio::make_sse(res, req);
+
+sse.send("data only");                         // data: data only\n\n
+sse.send("update", R"({"count":42})");         // event: update\ndata: ...\n\n
+sse.send("update", data, "event-id-123");      // with id
+sse.ping();                                    // : ping\n\n (keepalive)
+sse.is_open();                                 // false when client disconnects
+```
+
+### HTTP/2 SSE
+
+Works automatically. When the request comes over HTTP/2, `make_sse` uses nghttp2 DATA frames instead of raw socket writes. The handler code is **identical**:
+
+```cpp
+app.get("/events", [](Request& req, Response& res) -> Task<void> {
+    auto sse = osodio::make_sse(res, req);  // same for HTTP/1.1 and HTTP/2
+    while (sse.is_open()) {
+        sse.send("message", "hello");
+        co_await sleep(500);
+    }
+});
+```
+
+---
+
+## 19. WebSockets
+
+### HTTP/1.1 (RFC 6455)
+
+```cpp
+#include <osodio/websocket.hpp>
+
+app.ws("/chat", [](WSConnection ws) -> Task<void> {
+    while (ws.is_open()) {
+        auto msg = co_await ws.recv();
+        if (!msg) break;                              // connection closed
+
+        if (msg->type == WSMessageType::Text) {
+            ws.send("echo: " + msg->data);
+        } else if (msg->type == WSMessageType::Binary) {
+            ws.send_binary(msg->data);
+        }
+    }
+});
+```
+
+### WSConnection API
+
+```cpp
+// Receiving
+auto msg = co_await ws.recv();       // returns std::optional<WSMessage>
+if (!msg) break;                     // nullopt = connection closed
+msg->type;                           // WSMessageType::Text | Binary | Ping | Pong | Close
+msg->data;                           // std::string payload
+
+// Sending
+ws.send("text message");             // UTF-8 text frame
+ws.send_binary(bytes);               // binary frame
+ws.close(1000, "bye");               // send close frame
+ws.is_open();                        // false after close handshake
+```
+
+### HTTP/2 WebSocket (RFC 8441)
+
+The framework handles the protocol difference transparently. Register the handler with `app.ws()` — it works for both HTTP/1.1 (101 Upgrade) and HTTP/2 (CONNECT + `:protocol: websocket`):
+
+```cpp
+app.ws("/ws", [](WSConnection ws) -> Task<void> {
+    // Identical code for both HTTP/1.1 and HTTP/2
+    while (ws.is_open()) {
+        auto msg = co_await ws.recv();
+        if (!msg) break;
+        ws.send("got: " + msg->data);
+    }
+});
+```
+
+### Broadcast pattern
+
+```cpp
+struct ChatRoom {
+    std::mutex mtx;
+    std::vector<std::function<void(std::string)>> subscribers;
+    // ...
+};
+
+app.ws("/room", [](WSConnection ws, Inject<ChatRoom> room) -> Task<void> {
+    auto id = room->subscribe([&ws](std::string msg){ ws.send(msg); });
+    while (ws.is_open()) {
+        auto msg = co_await ws.recv();
+        if (!msg) break;
+        room->broadcast(msg->data);
+    }
+    room->unsubscribe(id);
+});
+```
+
+---
+
+## 20. Static Files & SPA
+
+### Static file serving
+
+```cpp
+// Serve ./public under /static
+// GET /static/app.js → ./public/app.js
+app.serve_static("/static", "./public");
+```
+
+Features: MIME types, ETag, Cache-Control, 304 Not Modified, sendfile(2) zero-copy, path traversal protection.
+
+### SPA fallback
+
+Any path not matching a real file is served as `index.html`:
+
+```cpp
+// Enable SPA mode (React/Vue/Svelte)
+app.serve_static("/", "./dist", true);
+```
+
+This allows client-side routing: `/app/dashboard`, `/app/settings`, etc. all return `index.html` with `200 OK`.
+
+---
+
+## 21. HTML Templates
+
+Osodio uses [inja](https://github.com/pantor/inja), a Jinja2-compatible template engine.
+
+### Setup
+
+```cpp
+app.set_templates("./templates");
+```
+
+### Rendering
+
+```cpp
+app.get("/hello", [](Response& res) {
+    res.render("hello.html", {
+        {"name", "Alice"},
+        {"items", nlohmann::json::array({"one","two","three"})}
+    });
+});
+```
+
+### Template syntax (Jinja2)
+
+```html
+<!-- templates/hello.html -->
+<h1>Hello, {{ name }}!</h1>
+<ul>
+{% for item in items %}
+  <li>{{ item }}</li>
+{% endfor %}
+</ul>
+```
+
+Templates are parsed once and cached per thread.
+
+---
+
+## 22. OpenAPI / Swagger UI
+
+### Enable
+
+```cpp
+app.api_info("My API", "1.0.0");   // title and version
+app.enable_docs();                  // /openapi.json + /docs
+
+// Custom paths
+app.enable_docs("/api/spec.json", "/api/ui");
+```
+
+Route documentation is captured **at compile time** via `HandlerTraits` — no annotations needed. The spec is generated when `run()` or `prepare()` is called.
+
+### What gets captured
+
+- HTTP method and path
+- Path parameter names and types
+- Query parameter names, types, and defaults
+- Request body schema (from SCHEMA structs)
+- Response type (from return type)
+
+### Example
+
+```cpp
+app.enable_docs();
+
+app.get("/users/:id", [](PathParam<int,"id"> id) -> User {
+    // ...
+});
+// → Swagger UI at /docs shows GET /users/{id} with int path param
+```
+
+---
+
+## 23. Health & Metrics
+
+```cpp
+app.enable_health();    // GET /health  → JSON status
+app.enable_metrics();   // GET /metrics → Prometheus text
+
+// Custom paths
+app.enable_health("/healthz");
+app.enable_metrics("/prometheus");
+```
+
+### /health response
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 3600,
+  "active_connections": 42,
+  "total_requests": 15000
+}
+```
+
+### /metrics response (Prometheus)
+
+```
+# HELP osodio_requests_total Total requests handled
+# TYPE osodio_requests_total counter
+osodio_requests_total 15000
+
+# HELP osodio_active_connections Currently active connections
+# TYPE osodio_active_connections gauge
+osodio_active_connections 42
+
+# HELP osodio_uptime_seconds Server uptime in seconds
+# TYPE osodio_uptime_seconds gauge
+osodio_uptime_seconds 3600
+```
+
+---
+
+## 24. TLS / HTTPS
+
+```cpp
+app.tls("server.crt", "server.key").run(443);
+```
+
+Both files must be PEM format. Osodio:
+- Requires TLS 1.2+ (TLS 1.3 preferred)
+- Enables ALPN (`h2`/`http/1.1`) automatically — HTTP/2 is negotiated when available
+- Handles the TLS handshake asynchronously (non-blocking)
+- Uses `sendfile(2)` fallback via `read()` for TLS (kernel zero-copy unavailable over TLS)
+
+### Self-signed cert for development
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
+  -days 365 -nodes -subj "/CN=localhost"
+```
+
+```cpp
+app.tls("cert.pem", "key.pem").run(8443);
+```
+
+---
+
+## 25. HTTP/2
+
+HTTP/2 is enabled automatically when TLS is active and the client supports it (ALPN negotiation). No code changes required.
+
+### What works over HTTP/2
+
+| Feature | HTTP/1.1 | HTTP/2 |
+|---------|----------|--------|
+| Regular requests | ✓ | ✓ |
+| SSE | ✓ | ✓ (DATA frames) |
+| WebSocket | ✓ (101) | ✓ (RFC 8441 CONNECT) |
+| TLS required | No | Yes (via ALPN) |
+
+### HTTP/2 push is not implemented
+
+Server push was removed from the roadmap — browser support was dropped.
+
+---
+
+## 26. Multipart Uploads
+
+```cpp
+#include <osodio/multipart.hpp>
+
+app.post("/upload", [](Request& req, Response& res) {
+    auto parts = osodio::parse_multipart(req);
+
+    for (const auto& part : parts) {
+        part.name;            // form field name
+        part.filename;        // original filename (if file upload)
+        part.content_type;    // e.g. "image/jpeg"
+        part.body;            // raw file/field content as std::string
+        part.headers;         // all part headers
+
+        if (!part.filename.empty()) {
+            // Save the file
+            std::ofstream f("uploads/" + part.filename, std::ios::binary);
+            f.write(part.body.data(), part.body.size());
+        }
+    }
+
+    res.json({{"uploaded", parts.size()}});
+});
+```
+
+`parse_multipart` returns an empty vector if the Content-Type is not `multipart/form-data` or the boundary is malformed.
+
+---
+
+## 27. TestClient — In-Process Testing
+
+`TestClient` executes requests directly against the App without a network socket. The full middleware + router pipeline runs synchronously in the calling thread.
+
+```cpp
+#include <osodio/testing.hpp>
+
+App app;
+app.get("/hello", [](Response& res) { res.json({{"msg","hi"}}); });
+
+osodio::TestClient client(app);
+auto r = client.get("/hello").send();
+
+assert(r.status == 200);
+assert(r.ok());                          // true for 2xx
+assert(r.json()["msg"] == "hi");
+assert(r.header("Content-Type").find("json") != std::string::npos);
+```
+
+### Request builder API
+
+```cpp
+// Headers
+client.get("/protected")
+      .header("Authorization", "Bearer " + token)
+      .send();
+
+// JSON body
+client.post("/users")
+      .json({{"name","Alice"},{"age",30}})
+      .send();
+
+// Raw body
+client.post("/data")
+      .body("raw bytes", "application/octet-stream")
+      .send();
+
+// Query params
+client.get("/search")
+      .query("q", "hello")
+      .query("page", "2")
+      .send();
+
+// Inline query string
+client.get("/search?q=hello&page=2").send();
+```
+
+### TestClient::Response fields
+
+```cpp
+r.status;            // int, e.g. 200
+r.ok();              // true for 2xx
+r.body;              // std::string raw body
+r.json();            // parse body as nlohmann::json (throws on invalid JSON)
+r.header("X-Key");   // std::string, "" if absent
+r.headers;           // std::unordered_map<std::string,std::string>
+```
+
+### Testing with middleware
+
+```cpp
+App app;
+app.use(osodio::jwt_auth("secret", {.skip = [](auto& r){ return r.path=="/login"; }}));
+app.get("/me", [](Request& req, Response& res) {
+    res.json({{"sub", req.jwt_claims["sub"]}});
+});
+
+TestClient client(app);
+
+// Without token → 401
+auto r1 = client.get("/me").send();
+assert(r1.status == 401);
+
+// With valid token → 200
+auto token = jwt::sign({{"sub","42"}}, "secret");
+auto r2 = client.get("/me")
+               .header("Authorization", "Bearer " + token)
+               .send();
+assert(r2.status == 200);
+assert(r2.json()["sub"] == "42");
+```
+
+### Testing body validation
+
+```cpp
+struct CreateUser {
     std::string name;
-    std::string email;
+    int age;
+    SCHEMA(CreateUser, name, age)
+    std::vector<std::string> validate() const {
+        if (age < 18) return {"age: must be at least 18"};
+        return {};
+    }
 };
-OSODIO_SCHEMA(UserResponse, id, name, email)
 
-app.get("/users/:id", [](PathParam<int, "id"> id) -> UserResponse {
-    return {id.value, "Alice", "alice@example.com"};
+app.post("/users", [](CreateUser u, Response& res) {
+    res.status(201).json({{"name", u.name}});
+});
+
+TestClient client(app);
+
+// Missing field → 422
+auto r1 = client.post("/users").json({{"name","Bob"}}).send();
+assert(r1.status == 422);
+
+// Business rule violation → 422
+auto r2 = client.post("/users").json({{"name","Bob"},{"age",15}}).send();
+assert(r2.status == 422);
+assert(r2.json()["messages"][0] == "age: must be at least 18");
+
+// Valid → 201
+auto r3 = client.post("/users").json({{"name","Bob"},{"age",25}}).send();
+assert(r3.status == 201);
+```
+
+### Notes
+
+- `sleep()` calls return immediately in TestClient (no event loop — intentional)
+- SSE and WebSocket handlers cannot be tested via TestClient (throws `std::logic_error`)
+- `send_file()` responses: the file is read into `body` so tests can inspect content
+- Call `TestClient client(app)` **after** all routes are registered
+
+---
+
+## 28. Graceful Shutdown
+
+Osodio handles `SIGINT` and `SIGTERM`:
+
+1. Stops accepting new connections
+2. Waits up to 30 seconds for active connections to finish
+3. Prints status and exits cleanly
+
+A second `SIGINT` forces immediate exit.
+
+```
+CTRL+C
+Shutting down gracefully... (CTRL+C again to force)
+All connections drained.
+```
+
+No configuration needed — works automatically.
+
+---
+
+## 29. CancellationToken
+
+Each request has a `CancellationToken` shared between the connection and the handler. It is cancelled when:
+- The client disconnects
+- A timeout fires (5s header timeout, 30s handler timeout)
+- A write error occurs
+
+### Checking cancellation
+
+```cpp
+app.get("/stream", [](Request& req) -> Task<nlohmann::json> {
+    for (int i = 0; i < 100; ++i) {
+        if (req.is_cancelled()) co_return nlohmann::json{};
+
+        co_await sleep(100);
+        // do work...
+    }
+    co_return nlohmann::json{{"done", true}};
 });
 ```
 
-### Async database simulation
+`sleep()` automatically respects the token — if the connection closes during a sleep, the coroutine is resumed immediately rather than waiting for the full duration.
+
+---
+
+## 30. Architecture Internals
+
+### Event loop
+
+```
+EventLoop (epoll + timerfd + eventfd)
+  ├── add/modify/remove fd → callback map
+  ├── post(fn) → queued task (thread-safe via eventfd wakeup)
+  └── schedule_timer(ms, fn) → timerfd one-shot
+```
+
+Multi-threaded: `hardware_concurrency()` threads, each with its own `EventLoop` + `TcpServer`. `SO_REUSEPORT` distributes connections.
+
+### Request lifetime
+
+```
+accept() → HttpConnection created
+  → epoll EPOLLIN fires → HttpParser feeds bytes → ParsedRequest ready
+  → DispatchFn(req, res) coroutine started
+  → middleware chain runs
+  → router.match() → HandlerTraits::call()
+  → co_await extracts typed args, calls user lambda
+  → result auto-serialized if non-void
+  → response bytes written to socket (EPOLLOUT backpressure if needed)
+  → connection closed or keep-alive loop restarts
+```
+
+### io_uring backend (optional)
+
+Build with `-DUSE_IO_URING=ON` to use the io_uring backend instead of epoll. Same interface, lower syscall overhead:
+
+```cmake
+cmake -B build -DUSE_IO_URING=ON
+```
+
+Requires Linux 5.1+. The backend uses `IORING_POLL_ADD_MULTI` (persistent multishot poll) so a single `io_uring_enter` serves all file descriptors.
+
+### File structure
+
+```
+include/osodio/
+  osodio.hpp        — single include
+  app.hpp           — App, routing, run(), prepare(), handle_request()
+  request.hpp       — Request struct
+  response.hpp      — Response builder
+  router.hpp        — Radix tree (STATIC/PARAM/WILDCARD nodes)
+  types.hpp         — Middleware, Handler, DispatchFn, NextFn, ErrorHandler
+  task.hpp          — Task<T>, SleepAwaitable, current_loop/current_token
+  cancel.hpp        — CancellationToken with early-wake set_wake()
+  handler_traits.hpp — HandlerTraits, extractor<T>, extract_body
+  schema.hpp        — SCHEMA macro, bind_field, is_optional_v
+  validation.hpp    — has_validate trait, ValidationError
+  errors.hpp        — HttpError, not_found(), bad_request(), etc.
+  di.hpp            — ServiceContainer, Inject<T>
+  middleware.hpp    — logger(), cors(), compress(), helmet(), rate_limit()
+  jwt.hpp           — jwt::sign/verify/decode, jwt_auth(), jwt_auth_rsa()
+  sse.hpp           — SSEWriter, make_sse()
+  websocket.hpp     — WSConnection, WSMessage, WSState, frame builder
+  multipart.hpp     — MultipartPart, parse_multipart()
+  openapi.hpp       — DocBuilder<F>, build_openapi_doc(), swagger_ui_html()
+  metrics.hpp       — Metrics singleton, Prometheus + JSON
+  group.hpp         — RouteGroup
+  testing.hpp       — TestClient, RequestBuilder, TestClient::Response
+  core/
+    event_loop.hpp  — EpollLoop (alias: EventLoop), IoUringLoop
+
+src/
+  app.cpp               — App::run(), prepare(), handle_request(), static files
+  router.cpp            — Radix tree implementation
+  core/
+    event_loop.cpp      — epoll, timerfd, eventfd
+    tcp_server.cpp      — accept loop, connection limit
+    io_uring_loop.cpp   — io_uring backend (compiled if USE_IO_URING=ON)
+  http/
+    http_parser.hpp/cpp    — llhttp wrapper
+    http_connection.hpp/cpp — per-connection state, timeouts, write buffer
+    http2_connection.hpp/cpp — HTTP/2 via nghttp2, streams, SSE, WS
+
+third_party/          — vendored, zero network in cmake
+  nlohmann/json.hpp   — v3.11.3
+  simdjson.h/.cpp     — v3.10.0
+  inja.hpp            — v3.4.0
+  llhttp/             — v9.2.1
+```
+
+### Key design choices
+
+**Why epoll, not io_uring by default?** epoll works on all Linux kernels ≥ 2.6. io_uring requires 5.1+ and its API is more complex. io_uring is available as an opt-in backend with `-DUSE_IO_URING=ON`.
+
+**Why not Boost.Asio?** 200+ MB of headers, complex cancellation model. Osodio's event loop is ~300 lines of readable C++.
+
+**Why `fixed_string` as NTTP?** C++20 allows string literals as template parameters. `PathParam<int,"id">` is more readable than a tag-type pattern and requires no boilerplate.
+
+**Why SCHEMA inside the struct?** `NLOHMANN_DEFINE_TYPE_INTRUSIVE` generates `friend` functions that access private members. Keeping it inside the struct makes the type self-contained.
+
+**Why symmetric transfer in Task<T>?** Direct coroutine-to-coroutine resumption via `std::coroutine_handle<>` avoids stack growth when chaining middleware (each `co_await next()` is a tail-call at the coroutine level).
+
+**Write buffer backpressure:** each connection has a 16MB write buffer cap. When the socket buffer is full, EPOLLOUT is registered and writing resumes when the kernel has space. If the cap is exceeded, the connection is closed cleanly.
+
+---
+
+## Appendix: Common Patterns
+
+### JSON API with auth and validation
 
 ```cpp
-Task<nlohmann::json> query_user(int id, core::EventLoop* loop) {
-    co_await sleep(10, loop);   // simulate I/O
-    co_return nlohmann::json{{"id", id}, {"name", "Alice"}};
+struct LoginRequest {
+    std::string email;
+    std::string password;
+    SCHEMA(LoginRequest, email, password)
+};
+
+struct UserProfile {
+    int         id;
+    std::string email;
+    std::string name;
+    SCHEMA(UserProfile, id, email, name)
+};
+
+int main() {
+    App app;
+
+    app.use(osodio::logger());
+    app.use(osodio::cors());
+
+    // Public routes
+    app.post("/login", [](LoginRequest body, Inject<AuthService> auth) -> nlohmann::json {
+        auto user = auth->check(body.email, body.password);
+        if (!user) throw osodio::unauthorized("Invalid credentials");
+        auto token = osodio::jwt::sign(
+            {{"sub", user->id}, {"exp", osodio::jwt::expires_in(86400)}},
+            auth->secret()
+        );
+        return {{"token", token}};
+    });
+
+    // Protected routes
+    auto api = app.group("/api");
+    api.use(osodio::jwt_auth("my-secret", {
+        .issuer = "my-app"
+    }));
+
+    api.get("/me", [](Request& req, Inject<UserService> users) -> UserProfile {
+        auto sub = req.jwt_claims["sub"].get<int>();
+        auto user = users->find(sub);
+        if (!user) throw osodio::not_found();
+        return *user;
+    });
+
+    app.run(8080);
 }
-
-app.get("/users/:id", [](PathParam<int, "id"> id, Request& req) -> Task<nlohmann::json> {
-    auto user = co_await query_user(id.value, req.loop);
-    co_return user;
-});
 ```
 
-### CORS middleware
+### Real-time with SSE
 
 ```cpp
-app.use([](Request& req, Response& res, auto next) {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method == "OPTIONS") {
-        res.status(204);
-        return;  // don't call next() for preflight
+struct EventBus {
+    std::mutex mtx;
+    std::vector<std::function<void(std::string)>> listeners;
+
+    void subscribe(std::function<void(std::string)> fn) {
+        std::lock_guard g(mtx);
+        listeners.push_back(std::move(fn));
     }
-    next();
-});
-```
-
-### Auth middleware
-
-```cpp
-app.use([](Request& req, Response& res, auto next) {
-    auto auth = req.header("authorization");
-    if (!auth || auth->rfind("Bearer ", 0) != 0) {
-        res.status(401).json({{"error", "Unauthorized"}});
-        return;
+    void emit(const std::string& event) {
+        std::lock_guard g(mtx);
+        for (auto& fn : listeners) fn(event);
     }
-    // optionally attach parsed user to req.params for downstream handlers
-    req.params["_token"] = auth->substr(7);
-    next();
+};
+
+app.provide(std::make_shared<EventBus>());
+
+app.get("/events", [](Request& req, Response& res,
+                       Inject<EventBus> bus) -> Task<void> {
+    auto sse = osodio::make_sse(res, req);
+    bus->subscribe([&sse](std::string ev){ sse.send("update", ev); });
+    while (sse.is_open()) co_await sleep(5000);   // keepalive
 });
-```
 
-### Query parameters
-
-```cpp
-app.get("/search", [](Query<std::string, "q"> q, Query<int, "page"> page) {
-    return nlohmann::json{
-        {"query", q.value},
-        {"page",  page.value}
-    };
-});
-// GET /search?q=hello&page=2 → {"query":"hello","page":2}
-```
-
-### SPA fallback (send index.html for unknown routes)
-
-```cpp
-app.on_error(404, [](int, Request& req, Response& res) {
-    // API routes return JSON 404; everything else gets the SPA
-    if (req.path.rfind("/api/", 0) == 0) {
-        res.status(404).json({{"error", "Not found"}});
-    } else {
-        res.status(200).html("index.html");
-    }
+app.post("/trigger", [](Inject<EventBus> bus, Response& res) {
+    bus->emit(R"({"event":"something happened"})");
+    res.status(204).send("");
 });
 ```
