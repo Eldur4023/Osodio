@@ -82,6 +82,21 @@ static std::string make_etag(const std::filesystem::file_time_type& mtime,
     return ss.str();
 }
 
+static std::string url_decode_path(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            char buf[3] = {s[i+1], s[i+2], '\0'};
+            char* end;
+            unsigned long v = std::strtoul(buf, &end, 16);
+            if (end == buf + 2) { out += static_cast<char>(v); i += 2; continue; }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
 // Returns true and fills res if a static mount covers this path.
 // Sets ETag, Cache-Control, and honours If-None-Match for 304 responses.
 static bool try_serve_static(
@@ -93,7 +108,7 @@ static bool try_serve_static(
     for (const auto& m : mounts) {
         if (req.path.rfind(m.prefix, 0) != 0) continue;
 
-        std::string rel = req.path.substr(m.prefix.size());
+        std::string rel = url_decode_path(req.path.substr(m.prefix.size()));
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
         fs::path file = fs::path(m.root) / rel.substr(1);
