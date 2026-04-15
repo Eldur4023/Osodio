@@ -421,6 +421,8 @@ void HttpConnection::send_response(std::string data) {
     {
         size_t written = static_cast<size_t>(n);
         if (written == data.size()) {
+            // Headers sent in one shot — still need to stream the file body if pending.
+            if (file_fd_ >= 0) { do_sendfile(); return; }
             on_write_complete();
             return;
         }

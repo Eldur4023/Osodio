@@ -70,6 +70,12 @@ int main() {
 
 ## Quick Start
 
+(Optional)
+```bash
+sudo apt install libssl-dev libnghttp2-dev libbrotli-dev
+```
+
+
 ```cpp
 #include <osodio/osodio.hpp>
 using namespace osodio;
@@ -449,7 +455,7 @@ third_party/
 | Vendored deps — 8 files, no cmake network | ✅ |
 | Multi-thread — one epoll loop per core, SO_REUSEPORT, shared connection limit | ✅ |
 | Graceful shutdown — SIGTERM drains connections (30s), second SIGINT forces exit | ✅ |
-| WebSockets | ⬜ |
-| HTTPS / TLS | ⬜ |
-| HTTP/2 | ⬜ |
-| Brotli compression | ⬜ |
+| WebSockets | ✅ |
+| HTTPS / TLS | ✅ |
+| HTTP/2 | ✅ |
+| Brotli compression | ✅ |
