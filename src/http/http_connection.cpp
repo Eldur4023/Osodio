@@ -455,7 +455,10 @@ void HttpConnection::do_write() {
                         write_buf_.data()  + write_offset_,
                         write_buf_.size()  - write_offset_);
             if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    loop_.modify(fd_, EPOLLOUT);
+                    return;
+                }
                 if (errno == EINTR) continue;
                 close(); return;
             }
@@ -479,7 +482,10 @@ void HttpConnection::do_sendfile() {
         ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
                                std::min(file_remaining_, size_t{256 * 1024}));
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                loop_.modify(fd_, EPOLLOUT); // socket buffer full — resume when drains
+                return;
+            }
             if (errno == EINTR) continue;
             close(); return;
         }
