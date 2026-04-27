@@ -42,9 +42,23 @@ inline auto len_max(size_t m) {
 
 // --- Validation infrastructure ---
 
+// Classic overload: explicit field name string.
+//   validate_field(age, "age", errs, osodio::min(18));
 template<typename T, typename... Fs>
 void validate_field(const T& val, const std::string& field, std::vector<std::string>& errs, Fs&&... vs) {
     (vs(val, field, errs), ...);
 }
+
+#if __cpp_reflection
+// Reflection overload: field name derived from the member reflection.
+// Usage inside a struct member function:
+//   osodio::validate_field<^^age>(*this, errs, osodio::min(18), osodio::max(120));
+// The field name comes from the reflection — no string literal to maintain.
+template<auto Member, typename T, typename... Fs>
+void validate_field(const T& obj, std::vector<std::string>& errs, Fs&&... vs) {
+    const std::string name(std::meta::identifier_of(Member));
+    (vs(obj.[:Member:], name, errs), ...);
+}
+#endif // __cpp_reflection
 
 } // namespace osodio

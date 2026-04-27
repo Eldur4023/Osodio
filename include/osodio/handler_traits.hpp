@@ -12,6 +12,9 @@
 #include "schema.hpp"   // SCHEMA macro, is_optional_v, adl_serializer<optional>
 #include "errors.hpp"
 #include "di.hpp"
+#if __cpp_reflection
+#include <ranges>
+#endif
 
 namespace osodio {
 
@@ -334,9 +337,27 @@ struct extractor<Inject<T>> {
     }
 };
 
-// Auto-body for OSODIO_SCHEMA types — the ergonomic path.
-// [](User body) { ... }  works without Body<> wrapper.
-// Matches any class with OSODIO_SCHEMA that isn't already a known param type.
+#if __cpp_reflection
+// With C++26 reflection, any aggregate struct with at least one data member is
+// eligible as an implicit body parameter — no SCHEMA macro required.
+template<typename T>
+concept ReflectableBody =
+    std::is_aggregate_v<T>          &&
+    !std::is_array_v<T>             &&
+    !std::ranges::range<T>          &&
+    !is_known_param_type<T>::value  &&
+    (std::meta::members_of(^^T).size() > 0);
+
+template<typename T>
+struct extractor<T, std::enable_if_t<ReflectableBody<T>>> {
+    static T extract(const Request& req, Response& res) {
+        return detail::extract_body<T>(req, res);
+    }
+};
+#else
+// Without reflection, detect eligible body types via the presence of to_json
+// (injected by the SCHEMA macro). Any class with SCHEMA that isn't already a
+// known param type is auto-extracted as the request body.
 template<typename T>
 struct extractor<T, std::enable_if_t<
     std::is_class_v<T>                          &&
@@ -347,6 +368,7 @@ struct extractor<T, std::enable_if_t<
         return detail::extract_body<T>(req, res);
     }
 };
+#endif // __cpp_reflection
 
 // ─── is_task<T> ───────────────────────────────────────────────────────────────
 

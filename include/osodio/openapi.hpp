@@ -6,6 +6,9 @@
 #include <type_traits>
 #include <nlohmann/json.hpp>
 #include "handler_traits.hpp"  // PathParam, Body, Query, fixed_string, is_task
+#if __cpp_reflection
+#include <ranges>
+#endif
 
 namespace osodio {
 
@@ -38,6 +41,33 @@ nlohmann::json schema_from_type() {
     } else if constexpr (std::is_same_v<T, std::string>) {
         return {{"type", "string"}};
 
+    } else if constexpr (detail::is_optional_v<T>) {
+        // optional<T> → inner type schema + nullable:true.
+        // This must be checked before the aggregate/class branches so the inner
+        // type is preserved instead of being erased to just {"nullable": true}.
+        using Inner = typename T::value_type;
+        auto inner = schema_from_type<Inner>();
+        inner["nullable"] = true;
+        return inner;
+
+#if __cpp_reflection
+    } else if constexpr (std::is_aggregate_v<T>
+                         && !std::is_array_v<T>
+                         && !std::ranges::range<T>) {
+        nlohmann::json props    = nlohmann::json::object();
+        nlohmann::json required = nlohmann::json::array();
+        template for (constexpr auto m : std::meta::members_of(^^T)) {
+            using FieldType = [: std::meta::type_of(m) :];
+            constexpr auto field_name = std::meta::identifier_of(m);
+            props[std::string(field_name)] = schema_from_type<FieldType>();
+            if constexpr (!detail::is_optional_v<FieldType>)
+                required.push_back(std::string(field_name));
+        }
+        nlohmann::json schema = {{"type", "object"}, {"properties", props}};
+        if (!required.empty()) schema["required"] = required;
+        return schema;
+
+#else
     } else if constexpr (std::is_class_v<T> && has_to_json<T>::value) {
         try {
             T defaults{};
@@ -67,6 +97,8 @@ nlohmann::json schema_from_type() {
         } catch (...) {
             return nlohmann::json::object();
         }
+
+#endif // __cpp_reflection
 
     } else {
         return nlohmann::json::object();
