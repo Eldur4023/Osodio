@@ -121,6 +121,13 @@ public:
         return *this;
     }
 
+    // Overload for callers that already have the file size — skips the extra stat(2).
+    Response& send_file(const std::filesystem::path& path, std::uintmax_t known_size) {
+        state_->sendfile_path = path.string();
+        state_->sendfile_size = known_size;
+        return *this;
+    }
+
 
 
 

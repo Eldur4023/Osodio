@@ -69,6 +69,14 @@ static const char* mime_for_ext(const std::string& ext) {
     if (ext == ".pdf")   return "application/pdf";
     if (ext == ".xml")   return "application/xml";
     if (ext == ".txt")   return "text/plain; charset=utf-8";
+    if (ext == ".wasm")  return "application/wasm";
+    if (ext == ".mjs")   return "application/javascript; charset=utf-8";
+    if (ext == ".map")   return "application/json; charset=utf-8";
+    if (ext == ".mp4")   return "video/mp4";
+    if (ext == ".webm")  return "video/webm";
+    if (ext == ".mp3")   return "audio/mpeg";
+    if (ext == ".ogg")   return "audio/ogg";
+    if (ext == ".avif")  return "image/avif";
     return "application/octet-stream";
 }
 
@@ -107,8 +115,10 @@ static bool try_serve_static(
     namespace fs = std::filesystem;
     for (const auto& m : mounts) {
         if (req.path.rfind(m.prefix, 0) != 0) continue;
+        const size_t plen = m.prefix.size();
+        if (req.path.size() > plen && req.path[plen] != '/') continue;
 
-        std::string rel = url_decode_path(req.path.substr(m.prefix.size()));
+        std::string rel = url_decode_path(req.path.substr(plen));
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
         fs::path file = fs::path(m.root) / rel.substr(1);
@@ -142,23 +152,37 @@ static bool try_serve_static(
         }
 
         // ── ETag ──────────────────────────────────────────────────────────────
-        auto mtime    = fs::last_write_time(canonical_file, ec);
-        auto filesize = fs::file_size(canonical_file, ec);
+        std::error_code mtime_ec, size_ec;
+        auto mtime    = fs::last_write_time(canonical_file, mtime_ec);
+        auto filesize = fs::file_size(canonical_file, size_ec);
+        if (mtime_ec || size_ec) {
+            res.status(500).json({{"error", "Cannot stat file"}});
+            return true;
+        }
         std::string etag = make_etag(mtime, filesize);
 
         // ── Cache-Control ─────────────────────────────────────────────────────
-        // Hashed filenames (e.g. app.abc123.js) → immutable for 1 year.
+        // Hashed filenames (e.g. app.abc123ef.js) → immutable for 1 year.
+        // Detects a hash segment: last component after '.' or '-' is ≥8 hex chars.
         // Everything else → must-revalidate with short max-age.
-        const std::string& ext = canonical_file.extension().string();
+        const std::string& ext  = canonical_file.extension().string();
         const std::string  stem = canonical_file.stem().string();
-        bool looks_hashed = stem.size() > 8 &&
-                            stem.find('.') != std::string::npos; // app.abc123
-        const char* cache_ctrl = looks_hashed
+        auto is_hex_hash = [](const std::string& s) -> bool {
+            auto pos = s.find_last_of(".-");
+            if (pos == std::string::npos) return false;
+            const auto seg = s.substr(pos + 1);
+            if (seg.size() < 8) return false;
+            return std::all_of(seg.begin(), seg.end(),
+                               [](unsigned char c){ return std::isxdigit(c); });
+        };
+        const char* cache_ctrl = is_hex_hash(stem)
             ? "public, max-age=31536000, immutable"
             : "public, max-age=3600, must-revalidate";
 
+        const char* mime = mime_for_ext(ext);
         res.header("ETag",          etag);
         res.header("Cache-Control", cache_ctrl);
+        res.header("Content-Type",  mime);
 
         // ── 304 Not Modified ──────────────────────────────────────────────────
         auto inm = req.header("if-none-match");
@@ -168,8 +192,7 @@ static bool try_serve_static(
         }
 
         // ── Serve via sendfile(2) — zero-copy ─────────────────────────────────
-        const char* mime = mime_for_ext(ext);
-        res.header("Content-Type", mime).send_file(canonical_file);
+        res.send_file(canonical_file, filesize);
         return true;
     }
     return false;
@@ -201,6 +224,10 @@ static void signal_handler(int) {
 void App::prepare() {
     if (prepared_) return;
     prepared_ = true;
+    std::sort(static_mounts_.begin(), static_mounts_.end(),
+              [](const StaticMount& a, const StaticMount& b) {
+                  return a.prefix.size() > b.prefix.size();
+              });
     if (openapi_enabled_) {
         std::string spec = build_openapi_doc(api_title_, api_version_, openapi_routes_).dump(2);
         std::string spec_path = openapi_spec_path_;

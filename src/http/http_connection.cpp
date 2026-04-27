@@ -32,8 +32,14 @@ static std::string url_decode(const std::string& s) {
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '%' && i + 2 < s.size()) {
             char buf[3] = {s[i+1], s[i+2], '\0'};
-            out += static_cast<char>(std::strtoul(buf, nullptr, 16));
-            i += 2;
+            char* endptr;
+            unsigned long v = std::strtoul(buf, &endptr, 16);
+            if (endptr == buf + 2) {
+                out += static_cast<char>(v);
+                i += 2;
+            } else {
+                out += s[i];  // keep literal '%' for invalid hex sequences
+            }
         } else if (s[i] == '+') {
             out += ' ';
         } else {
@@ -333,7 +339,11 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
         return;
     }
 
-    // sendfile path
+    // sendfile path — send headers with correct Content-Length, but no body for HEAD
+    if (!response.sendfile_path().empty() && request.method == "HEAD") {
+        send_response(response.build());
+        return;
+    }
     if (!response.sendfile_path().empty()) {
 #ifdef OSODIO_HAS_TLS
         if (ssl_) {

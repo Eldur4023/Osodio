@@ -251,16 +251,22 @@ struct extractor<Response&> {
 // PathParam<T, Name>
 template<typename T, fixed_string Name>
 struct extractor<PathParam<T, Name>> {
-    static PathParam<T, Name> extract(const Request& req, Response&) {
+    static PathParam<T, Name> extract(const Request& req, Response& res) {
         std::string_view name = Name;
         auto it = req.params.find(std::string(name));
         if (it == req.params.end()) return {T{}};
-        if constexpr (std::is_same_v<T, int>)              return {std::stoi(it->second)};
-        else if constexpr (std::is_same_v<T, long>)        return {std::stol(it->second)};
-        else if constexpr (std::is_same_v<T, float>)       return {std::stof(it->second)};
-        else if constexpr (std::is_same_v<T, double>)      return {std::stod(it->second)};
-        else if constexpr (std::is_same_v<T, std::string>) return {it->second};
-        else return {T{}};
+        try {
+            if constexpr (std::is_same_v<T, int>)              return {std::stoi(it->second)};
+            else if constexpr (std::is_same_v<T, long>)        return {std::stol(it->second)};
+            else if constexpr (std::is_same_v<T, float>)       return {std::stof(it->second)};
+            else if constexpr (std::is_same_v<T, double>)      return {std::stod(it->second)};
+            else if constexpr (std::is_same_v<T, std::string>) return {it->second};
+            else return {T{}};
+        } catch (const std::exception&) {
+            res.status(400).json({{"error", "Invalid path parameter"},
+                                  {"param", std::string(name)}});
+            return {T{}};
+        }
     }
 };
 
@@ -268,7 +274,7 @@ struct extractor<PathParam<T, Name>> {
 // If param is present → parse it; if absent → use Default string (converted to T).
 template<typename T, fixed_string Name, fixed_string Default>
 struct extractor<Query<T, Name, Default>> {
-    static Query<T, Name, Default> extract(const Request& req, Response&) {
+    static Query<T, Name, Default> extract(const Request& req, Response& res) {
         std::string_view name = Name;
         auto it = req.query.find(std::string(name));
 
@@ -283,13 +289,19 @@ struct extractor<Query<T, Name, Default>> {
             else return T{};
         };
 
-        if (it != req.query.end())
-            return {parse(it->second), true};
+        try {
+            if (it != req.query.end())
+                return {parse(it->second), true};
 
-        // Absent: use Default if non-empty, otherwise T{}
-        std::string_view def = Default;
-        if (!def.empty())
-            return {parse(std::string(def)), false};
+            // Absent: use Default if non-empty, otherwise T{}
+            std::string_view def = Default;
+            if (!def.empty())
+                return {parse(std::string(def)), false};
+        } catch (const std::exception&) {
+            res.status(400).json({{"error", "Invalid query parameter"},
+                                  {"param", std::string(name)}});
+            return {T{}, false};
+        }
         return {T{}, false};
     }
 };
