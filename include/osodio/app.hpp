@@ -57,6 +57,16 @@ public:
         return *this;
     }
 
+    // Async variants — use when error handling needs to co_await (e.g. DB logging).
+    App& on_async_error(int code, AsyncErrorHandler h) {
+        async_error_handlers_[code] = std::move(h);
+        return *this;
+    }
+    App& on_async_error(AsyncErrorHandler h) {
+        catchall_async_error_handler_ = std::move(h);
+        return *this;
+    }
+
     // Directorio donde se buscan los templates (default: "./templates")
     App& set_templates(std::string dir) { templates_dir_ = std::move(dir); return *this; }
 
@@ -267,6 +277,8 @@ private:
     std::vector<StaticMount>                  static_mounts_;
     std::unordered_map<int, ErrorHandler>     error_handlers_;
     ErrorHandler                              catchall_error_handler_;
+    std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;
+    AsyncErrorHandler                          catchall_async_error_handler_;
     std::string                               templates_dir_ = "./templates";
 
     // OpenAPI state

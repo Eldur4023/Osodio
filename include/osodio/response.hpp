@@ -26,8 +26,11 @@ class Response {
 
         // SSE / WebSocket mode: headers already written directly to the socket;
         // finish_dispatch must not send a second response.
-        bool sse_started = false;
-        bool ws_started  = false;
+        bool sse_started    = false;
+        bool ws_started     = false;
+        // Set when any body-writing method is first called.
+        // Lets handlers and middlewares check res.is_committed() before writing.
+        bool body_committed = false;
     };
     std::shared_ptr<State> state_;
 
@@ -49,11 +52,13 @@ public:
     Response& text(std::string body) {
         header("Content-Type", "text/plain; charset=utf-8");
         state_->body = std::move(body);
+        state_->body_committed = true;
         return *this;
     }
 
     Response& html(const std::string& content) {
         header("Content-Type", "text/html; charset=utf-8");
+        state_->body_committed = true;
         if (is_template_name(content)) {
             namespace fs = std::filesystem;
             fs::path path = fs::path(state_->templates_dir) / content;
@@ -74,11 +79,13 @@ public:
     Response& json(const nlohmann::json& j) {
         header("Content-Type", "application/json; charset=utf-8");
         state_->body = j.dump();
+        state_->body_committed = true;
         return *this;
     }
 
     Response& send(std::string body) {
         state_->body = std::move(body);
+        state_->body_committed = true;
         return *this;
     }
 
@@ -101,6 +108,7 @@ public:
                     inja::Environment{state_->templates_dir + "/"}
                 ).first;
             }
+            state_->body_committed = true;
             state_->body = it->second.render_file(template_name, data);
         } catch (const std::exception& e) {
             state_->status_code = 500;
@@ -118,6 +126,7 @@ public:
         if (ec) { state_->status_code = 500; state_->body = "Cannot stat file"; return *this; }
         state_->sendfile_path = path.string();
         state_->sendfile_size = sz;
+        state_->body_committed = true;
         return *this;
     }
 
@@ -125,7 +134,30 @@ public:
     Response& send_file(const std::filesystem::path& path, std::uintmax_t known_size) {
         state_->sendfile_path = path.string();
         state_->sendfile_size = known_size;
+        state_->body_committed = true;
         return *this;
+    }
+
+    // Safe file serving with path-traversal protection.
+    // Resolves root/user_path canonically and rejects anything that escapes root.
+    // Use this instead of send_file() when user_path comes from request input.
+    //
+    //   res.serve_file_from("./uploads", req.param("name").value_or(""));
+    //
+    Response& serve_file_from(const std::filesystem::path& root,
+                               const std::filesystem::path& user_path) {
+        namespace fs = std::filesystem;
+        auto canonical_root = fs::weakly_canonical(root);
+        auto canonical_file = fs::weakly_canonical(canonical_root / user_path);
+        auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
+                                       canonical_file.begin());
+        if (ri != canonical_root.end()) {
+            state_->status_code = 403;
+            state_->body = R"({"error":"Forbidden"})";
+            state_->headers["Content-Type"] = "application/json; charset=utf-8";
+            return *this;
+        }
+        return send_file(canonical_file);
     }
 
 
@@ -141,6 +173,7 @@ public:
                            headers_map()    const { return state_->headers; }
     const std::string&     sendfile_path()  const { return state_->sendfile_path; }
     std::uintmax_t         sendfile_size()  const { return state_->sendfile_size; }
+    bool                   is_committed()   const { return state_->body_committed; }
     bool                   sse_started()    const { return state_->sse_started; }
     void                   mark_sse_started()    { state_->sse_started = true; }
     bool                   ws_started()     const { return state_->ws_started; }

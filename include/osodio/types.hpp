@@ -23,4 +23,7 @@ using Handler    = std::function<Task<void>(Request&, Response&)>;
 // Error handler (sync; called after the async chain completes).
 using ErrorHandler = std::function<void(int code, Request&, Response&)>;
 
+// Async error handler — use when error handling needs to co_await (e.g. DB logging).
+using AsyncErrorHandler = std::function<Task<void>(int code, Request&, Response&)>;
+
 } // namespace osodio

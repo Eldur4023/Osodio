@@ -93,6 +93,7 @@ void HttpConnection::start() {
     header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
         if (auto self = self_weak.lock()) {
             if (!self->closed_) {
+                self->header_tfd_ = -1;  // event loop already closed this tfd
                 self->send_error(408, "Request Header Timeout");
                 self->close();
             }
@@ -288,6 +289,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     timeout_tfd_ = loop_.schedule_timer(kRequestTimeoutMs, [self_weak]() {
         if (auto self = self_weak.lock()) {
             if (!self->closed_) {
+                self->timeout_tfd_ = -1;  // event loop already closed this tfd
                 self->send_error(408, "Request Timeout");
                 self->close();
             }
@@ -348,8 +350,11 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
 #ifdef OSODIO_HAS_TLS
         if (ssl_) {
             // TLS: sendfile(2) bypasses OpenSSL — must read file into userspace.
-            // response.build() emits headers with the correct Content-Length;
-            // we append the raw file bytes to form a complete HTTP response.
+            // Reject before allocating if the file would exceed the response cap.
+            if (response.sendfile_size() > kMaxResponseBytes) {
+                send_error(500, "File too large for encrypted transport");
+                return;
+            }
             std::ifstream f(response.sendfile_path(), std::ios::binary);
             if (!f) { send_error(500, "Cannot open file"); return; }
             std::string file_body(
@@ -527,6 +532,7 @@ void HttpConnection::on_write_complete() {
     header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
         if (auto self = self_weak.lock()) {
             if (!self->closed_) {
+                self->header_tfd_ = -1;  // event loop already closed this tfd
                 self->send_error(408, "Request Header Timeout");
                 self->close();
             }

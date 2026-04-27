@@ -4,6 +4,7 @@
 #include <optional>
 #include <memory>
 #include <algorithm>
+#include <cstdlib>
 #include <osodio/core/event_loop.hpp>
 #include "cancel.hpp"
 #include <nlohmann/json.hpp>
@@ -93,6 +94,54 @@ public:
     std::string query_param(const std::string& key, const std::string& def = "") const {
         auto it = query.find(key);
         return (it != query.end()) ? it->second : def;
+    }
+
+    // Parse an application/x-www-form-urlencoded body.
+    // Returns an empty map if Content-Type doesn't match or body is empty.
+    std::unordered_map<std::string, std::string> form() const {
+        auto ct = header("content-type");
+        if (!ct || ct->find("application/x-www-form-urlencoded") == std::string::npos)
+            return {};
+        return parse_form_encoded(body);
+    }
+
+private:
+    static std::string form_url_decode(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '+') {
+                out += ' ';
+            } else if (s[i] == '%' && i + 2 < s.size()) {
+                char buf[3] = {s[i+1], s[i+2], '\0'};
+                char* end;
+                unsigned long v = std::strtoul(buf, &end, 16);
+                if (end == buf + 2) { out += static_cast<char>(v); i += 2; }
+                else                { out += '%'; }
+            } else {
+                out += s[i];
+            }
+        }
+        return out;
+    }
+
+    static std::unordered_map<std::string, std::string>
+    parse_form_encoded(const std::string& src) {
+        std::unordered_map<std::string, std::string> result;
+        size_t pos = 0;
+        while (pos <= src.size()) {
+            size_t amp = src.find('&', pos);
+            if (amp == std::string::npos) amp = src.size();
+            size_t eq = src.find('=', pos);
+            if (eq != std::string::npos && eq < amp) {
+                result[form_url_decode(src.substr(pos, eq - pos))] =
+                    form_url_decode(src.substr(eq + 1, amp - eq - 1));
+            } else if (amp > pos) {
+                result[form_url_decode(src.substr(pos, amp - pos))] = "";
+            }
+            pos = amp + 1;
+        }
+        return result;
     }
 };
 

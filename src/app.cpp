@@ -255,15 +255,19 @@ Task<void> App::handle_request(Request& req, Response& res) {
     }
 
     // ── Async middleware chain ─────────────────────────────────────────────
-    // call_next is a local in THIS coroutine frame (heap-allocated).
-    // Inner lambdas capture &call_next (reference into the frame), which
-    // remains valid as long as this coroutine is suspended or running.
-    std::function<Task<void>(size_t)> call_next;
-    call_next = [this, &req, &res, &call_next](size_t i) -> Task<void> {
+    // call_next lives in a shared_ptr so NextFn closures that outlive this
+    // coroutine frame (e.g. during shutdown) don't dangle on the function
+    // object. advanced is also heap-allocated for the same reason.
+    using CallNext = std::function<Task<void>(size_t)>;
+    auto call_next = std::make_shared<CallNext>();
+    *call_next = [this, &req, &res, call_next](size_t i) -> Task<void> {
         if (i < middlewares_.size()) {
+            auto advanced = std::make_shared<bool>(false);
             co_await middlewares_[i](req, res,
-                [&call_next, i]() -> Task<void> {
-                    return call_next(i + 1);
+                [call_next, advanced, i]() -> Task<void> {
+                    if (*advanced) co_return;
+                    *advanced = true;
+                    return (*call_next)(i + 1);
                 });
         } else {
             auto match = router_.match(req.method, req.path);
@@ -275,16 +279,24 @@ Task<void> App::handle_request(Request& req, Response& res) {
             }
         }
     };
-    co_await call_next(0);
+    co_await (*call_next)(0);
 
     // Error handlers run after the full chain, while we still own req/res.
+    // Async handlers take precedence over sync handlers for the same code.
     if (res.status_code() >= 400) {
         int code = res.status_code();
-        auto it = error_handlers_.find(code);
-        if (it != error_handlers_.end()) {
-            it->second(code, req, res);
-        } else if (catchall_error_handler_) {
-            catchall_error_handler_(code, req, res);
+        auto ait = async_error_handlers_.find(code);
+        if (ait != async_error_handlers_.end()) {
+            co_await ait->second(code, req, res);
+        } else if (catchall_async_error_handler_) {
+            co_await catchall_async_error_handler_(code, req, res);
+        } else {
+            auto it = error_handlers_.find(code);
+            if (it != error_handlers_.end()) {
+                it->second(code, req, res);
+            } else if (catchall_error_handler_) {
+                catchall_error_handler_(code, req, res);
+            }
         }
     }
 }

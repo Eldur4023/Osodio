@@ -16,6 +16,7 @@
 #include "middleware.hpp"
 #include "openapi.hpp"
 #include "errors.hpp"
+#include "defer.hpp"
 #include "di.hpp"
 #include "group.hpp"
 #include "sse.hpp"

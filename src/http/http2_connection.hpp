@@ -73,10 +73,11 @@ private:
         // ── SSE streaming fields ──────────────────────────────────────────────
         // Populated after the handler calls make_sse(); data provider reads
         // from this queue and returns NGHTTP2_ERR_DEFERRED when it is empty.
-        bool                     sse_mode     = false;
-        std::vector<std::string> sse_pending;          // chunks awaiting send
-        bool                     sse_deferred = false; // provider returned DEFERRED
-        bool                     sse_ended    = false; // SSEWriter dtor was called
+        bool                     sse_mode          = false;
+        std::vector<std::string> sse_pending;              // chunks awaiting send
+        size_t                   sse_pending_bytes  = 0;   // total bytes in sse_pending
+        bool                     sse_deferred       = false; // provider returned DEFERRED
+        bool                     sse_ended          = false; // SSEWriter dtor was called
 
         // ── WebSocket streaming fields (RFC 8441) ─────────────────────────────
         // Set when the stream is a CONNECT+websocket upgrade.
@@ -90,6 +91,8 @@ private:
     };
 
     std::unordered_map<int32_t, Stream> streams_;
+
+    static constexpr size_t kMaxSsePendingBytes = 1 * 1024 * 1024; // 1 MiB per stream
 
     // ── Internal helpers ──────────────────────────────────────────────────────
     void do_read();

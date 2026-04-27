@@ -24,8 +24,10 @@ static std::string url_decode(const std::string& s) {
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '%' && i + 2 < s.size()) {
             char buf[3] = {s[i+1], s[i+2], '\0'};
-            out += static_cast<char>(std::strtoul(buf, nullptr, 16));
-            i += 2;
+            char* end;
+            unsigned long v = std::strtoul(buf, &end, 16);
+            if (end == buf + 2) { out += static_cast<char>(v); i += 2; }
+            else                { out += '%'; }
         } else if (s[i] == '+') {
             out += ' ';
         } else {
@@ -428,6 +430,7 @@ void Http2Connection::h2_begin_sse(int32_t stream_id, const osodio::Response& re
             size_t n = std::min(chunk.size(), len - written);
             std::memcpy(buf + written, chunk.data(), n);
             written += n;
+            s.sse_pending_bytes -= n;
             if (n == chunk.size()) {
                 s.sse_pending.erase(s.sse_pending.begin());
             } else {
@@ -446,11 +449,26 @@ void Http2Connection::h2_begin_sse(int32_t stream_id, const osodio::Response& re
 }
 
 // h2_push_sse — enqueue a formatted SSE event string and resume the provider.
+// Drops the chunk and cancels the stream if the queue exceeds kMaxSsePendingBytes.
 void Http2Connection::h2_push_sse(int32_t stream_id, std::string chunk) {
     if (closed_) return;
     auto it = streams_.find(stream_id);
     if (it == streams_.end() || !it->second.sse_mode) return;
 
+    auto& s = it->second;
+    if (s.sse_pending_bytes + chunk.size() > kMaxSsePendingBytes) {
+        // Slow consumer: cancel the stream so the handler exits cleanly.
+        if (s.cancel_token) s.cancel_token->cancel();
+        s.sse_ended = true;
+        if (s.sse_deferred) {
+            s.sse_deferred = false;
+            nghttp2_session_resume_data(session_, stream_id);
+        }
+        flush();
+        return;
+    }
+
+    s.sse_pending_bytes += chunk.size();
     it->second.sse_pending.push_back(std::move(chunk));
 
     if (it->second.sse_deferred) {
