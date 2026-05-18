@@ -23,6 +23,8 @@
 #include <functional>
 #include <sstream>
 #include <iomanip>
+#include <unistd.h>
+#include <fcntl.h>
 
 namespace osodio {
 
@@ -198,20 +200,30 @@ static bool try_serve_static(
     return false;
 }
 
-// Graceful shutdown state — written once before spawning threads, called from
-// the signal handler.  The signal handler itself must remain async-signal-safe;
-// the heavy work is dispatched onto the event loop thread via post().
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+// Signal handler writes one byte to a pipe; the event loop thread reads it
+// and runs the actual drain logic.  This keeps the handler async-signal-safe:
+// only write(2) and _Exit(2) are used — both appear in the POSIX safe list.
+//
+// g_signal_pipe[0] = read end (monitored by epoll on the main loop)
+// g_signal_pipe[1] = write end (written by the signal handler)
+static int                   g_signal_pipe[2] = {-1, -1};
 static std::function<void()> g_initiate_drain;
-static std::atomic<bool>     g_shutting_down{false};
+static volatile sig_atomic_t g_signal_count   = 0;
 
 static void signal_handler(int) {
-    if (g_shutting_down.exchange(true)) {
-        // Second signal: user is impatient — force exit immediately.
-        std::cout << "\nForced exit.\n";
+    if (++g_signal_count >= 2) {
+        static const char msg[] = "\nForced exit.\n";
+        (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
         std::_Exit(1);
     }
-    std::cout << "\nShutting down gracefully... (CTRL+C again to force)\n";
-    if (g_initiate_drain) g_initiate_drain();
+    static const char msg[] = "\nShutting down gracefully... (CTRL+C again to force)\n";
+    (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    // Wake the event loop — write is async-signal-safe.
+    if (g_signal_pipe[1] >= 0) {
+        char byte = 1;
+        (void)write(g_signal_pipe[1], &byte, 1);
+    }
 }
 
 } // anonymous namespace
@@ -267,7 +279,7 @@ Task<void> App::handle_request(Request& req, Response& res) {
                 [call_next, advanced, i]() -> Task<void> {
                     if (*advanced) co_return;
                     *advanced = true;
-                    return (*call_next)(i + 1);
+                    co_await (*call_next)(i + 1);
                 });
         } else {
             auto match = router_.match(req.method, req.path);
@@ -275,7 +287,7 @@ Task<void> App::handle_request(Request& req, Response& res) {
                 req.params = std::move(match.params);
                 co_await match.handler(req, res);
             } else {
-                res.status(404).json({{"error", "Not Found"}, {"path", req.path}});
+                res.status(404).json({{"error", "Not Found"}});
             }
         }
     };
@@ -360,27 +372,26 @@ void App::run(const std::string& host, uint16_t port) {
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
     // On first SIGINT/SIGTERM:
-    //   1. Stop accepting new connections on all workers.
-    //   2. Post a drain-checker task to the main event loop that polls every
-    //      100 ms.  When conn_count reaches 0 (or 30 s elapse), all loops are
-    //      stopped cleanly.
+    //   1. Signal handler writes one byte to g_signal_pipe[1] (async-signal-safe).
+    //   2. The main epoll loop detects it and runs g_initiate_drain on its thread:
+    //      stop accepting + poll every 100 ms until connections drain or 30 s elapse.
     // On second signal: std::_Exit(1) — see signal_handler above.
-    g_shutting_down = false;
-    core::EventLoop main_loop;   // declared before g_initiate_drain so it can be captured
+    g_signal_count = 0;
+    if (::pipe2(g_signal_pipe, O_CLOEXEC | O_NONBLOCK) < 0)
+        throw std::runtime_error(std::string("pipe2: ") + strerror(errno));
+
+    core::EventLoop main_loop;
     {
         std::lock_guard<std::mutex> lk(all_mutex);
         all_loops.push_back(&main_loop);
     }
 
     g_initiate_drain = [&main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
-        // Stop all acceptors (runs on signal-handler thread; post() is used
-        // for the heavy work so it executes on the event loop thread).
         {
             std::lock_guard<std::mutex> lk(all_mutex);
             for (auto* s : all_servers) s->stop_accepting();
         }
 
-        // Dispatch the drain poll to the main loop thread.
         main_loop.post([&main_loop, shared_conn_count, &all_loops, &all_mutex]() {
             using Clock = std::chrono::steady_clock;
             auto deadline = Clock::now() + std::chrono::seconds(30);
@@ -403,9 +414,19 @@ void App::run(const std::string& host, uint16_t port) {
                 }
                 main_loop.schedule_timer(100, *fn);
             };
-            (*fn)();  // first check immediately
+            (*fn)();
         });
     };
+
+    // Register the signal pipe with the main event loop.
+    // When the signal handler fires it writes a byte here; the loop thread
+    // calls g_initiate_drain safely without any async-signal-safe concerns.
+    main_loop.add(g_signal_pipe[0], EPOLLIN,
+                  [](uint32_t) {
+                      char buf[16];
+                      while (::read(g_signal_pipe[0], buf, sizeof(buf)) > 0) {}
+                      if (g_initiate_drain) g_initiate_drain();
+                  });
 
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
@@ -454,7 +475,9 @@ void App::run(const std::string& host, uint16_t port) {
 
     Metrics::instance().active_connections_ = nullptr;
     g_initiate_drain = nullptr;
-    g_shutting_down  = false;
+    g_signal_count   = 0;
+    if (g_signal_pipe[0] >= 0) { ::close(g_signal_pipe[0]); g_signal_pipe[0] = -1; }
+    if (g_signal_pipe[1] >= 0) { ::close(g_signal_pipe[1]); g_signal_pipe[1] = -1; }
 }
 
 } // namespace osodio

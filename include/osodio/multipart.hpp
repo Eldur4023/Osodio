@@ -43,6 +43,8 @@ struct MultipartPart {
 //   if (!parts) { ... handle error ... }
 //   for (auto& p : *parts) { ... }
 
+static constexpr size_t kMaxMultipartParts = 256;
+
 inline std::optional<std::vector<MultipartPart>>
 parse_multipart(const Request& req) {
     // ── 1. Extract boundary from Content-Type ─────────────────────────────────
@@ -66,7 +68,7 @@ parse_multipart(const Request& req) {
         if (!quoted && (c == ';' || c == ' ' || c == '\r')) break;
         boundary_val += c;
     }
-    if (boundary_val.empty()) return std::nullopt;
+    if (boundary_val.empty() || boundary_val.size() > 70) return std::nullopt;  // RFC 2046 §5.1.1: max 70 chars
 
     // RFC 2046 §5.1.1: delimiter = "--" + boundary
     const std::string delim     = "--" + boundary_val;
@@ -140,6 +142,7 @@ parse_multipart(const Request& req) {
         }
 
         parts.push_back(std::move(part));
+        if (parts.size() >= kMaxMultipartParts) break;
 
         // Advance past the delimiter
         pos = end + next_delim.size();

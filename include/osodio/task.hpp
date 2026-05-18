@@ -4,6 +4,7 @@
 #include <utility>
 #include <functional>
 #include <memory>
+#include <iostream>
 #include <osodio/core/event_loop.hpp>
 #include "cancel.hpp"
 
@@ -61,7 +62,17 @@ struct Task {
             result = std::move(value);
             if (on_complete) on_complete(result);
         }
-        void unhandled_exception() { exception = std::current_exception(); }
+        void unhandled_exception() {
+            exception = std::current_exception();
+            if (!continuation) {
+                try { std::rethrow_exception(exception); }
+                catch (const std::exception& e) {
+                    std::cerr << "[osodio] unhandled exception in detached task: " << e.what() << '\n';
+                } catch (...) {
+                    std::cerr << "[osodio] unknown exception in detached task\n";
+                }
+            }
+        }
     };
 
     std::coroutine_handle<promise_type> handle;
@@ -135,7 +146,17 @@ struct Task<void> {
         void return_void() {
             if (on_complete) on_complete();
         }
-        void unhandled_exception() { exception = std::current_exception(); }
+        void unhandled_exception() {
+            exception = std::current_exception();
+            if (!continuation) {
+                try { std::rethrow_exception(exception); }
+                catch (const std::exception& e) {
+                    std::cerr << "[osodio] unhandled exception in detached task: " << e.what() << '\n';
+                } catch (...) {
+                    std::cerr << "[osodio] unknown exception in detached task\n";
+                }
+            }
+        }
     };
 
     std::coroutine_handle<promise_type> handle;

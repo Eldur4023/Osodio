@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <memory>
 #include <functional>
+#include <algorithm>
 #include <unistd.h>
 #include <cerrno>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <inja.hpp>
 
@@ -45,6 +47,13 @@ public:
     }
 
     Response& header(std::string key, std::string value) {
+        // Strip CR/LF from both key and value to prevent HTTP response splitting.
+        auto strip_crlf = [](std::string& s) {
+            s.erase(std::remove_if(s.begin(), s.end(),
+                [](char c){ return c == '\r' || c == '\n'; }), s.end());
+        };
+        strip_crlf(key);
+        strip_crlf(value);
         state_->headers[std::move(key)] = std::move(value);
         return *this;
     }
@@ -64,8 +73,10 @@ public:
             fs::path path = fs::path(state_->templates_dir) / content;
             std::ifstream f(path, std::ios::binary);
             if (!f) {
+                std::cerr << "[osodio] template not found: " << path.string() << '\n';
                 state_->status_code = 500;
-                state_->body = "Template not found: " + path.string();
+                state_->body = R"({"error":"Internal Server Error"})";
+                state_->headers["Content-Type"] = "application/json; charset=utf-8";
                 return *this;
             }
             state_->body = std::string(std::istreambuf_iterator<char>(f),
@@ -111,8 +122,10 @@ public:
             state_->body_committed = true;
             state_->body = it->second.render_file(template_name, data);
         } catch (const std::exception& e) {
+            std::cerr << "[osodio] template render error: " << e.what() << '\n';
             state_->status_code = 500;
-            state_->body = std::string("Template error: ") + e.what();
+            state_->body = R"({"error":"Internal Server Error"})";
+            state_->headers["Content-Type"] = "application/json; charset=utf-8";
         }
         return *this;
     }
@@ -223,21 +236,31 @@ private:
         switch (code) {
             case 200: return "OK";
             case 201: return "Created";
+            case 202: return "Accepted";
             case 204: return "No Content";
+            case 206: return "Partial Content";
             case 301: return "Moved Permanently";
             case 302: return "Found";
             case 304: return "Not Modified";
+            case 307: return "Temporary Redirect";
+            case 308: return "Permanent Redirect";
             case 400: return "Bad Request";
             case 401: return "Unauthorized";
             case 403: return "Forbidden";
             case 404: return "Not Found";
             case 405: return "Method Not Allowed";
+            case 408: return "Request Timeout";
             case 409: return "Conflict";
+            case 410: return "Gone";
+            case 413: return "Content Too Large";
+            case 415: return "Unsupported Media Type";
             case 422: return "Unprocessable Entity";
             case 429: return "Too Many Requests";
             case 500: return "Internal Server Error";
+            case 501: return "Not Implemented";
             case 502: return "Bad Gateway";
             case 503: return "Service Unavailable";
+            case 504: return "Gateway Timeout";
             default:  return "Unknown";
         }
     }

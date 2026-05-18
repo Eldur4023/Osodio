@@ -90,12 +90,20 @@ private:
     std::shared_ptr<Request::H2SSEContext> h2_ctx_;
     bool ended_ = false;
 
+    // Strip CR/LF from a string_view to prevent SSE field injection.
+    static std::string sanitize_field(std::string_view s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) if (c != '\r' && c != '\n') out += c;
+        return out;
+    }
+
     bool write_frame(std::string_view event, std::string_view data, std::string_view id) {
         if (!is_open()) return false;
         std::string frame;
         frame.reserve(data.size() + 48);
-        if (!id.empty())    { frame += "id: ";    frame += id;    frame += "\n"; }
-        if (!event.empty()) { frame += "event: "; frame += event; frame += "\n"; }
+        if (!id.empty())    { frame += "id: ";    frame += sanitize_field(id);    frame += "\n"; }
+        if (!event.empty()) { frame += "event: "; frame += sanitize_field(event); frame += "\n"; }
         // RFC 8895 §3.2: each line of multiline data needs its own "data:" prefix.
         std::string_view rem = data;
         while (true) {
@@ -124,13 +132,16 @@ private:
         }
 
         // HTTP/1.1 path: write directly to the socket fd.
+        // EAGAIN on the first byte → drop this event (no bytes sent yet, stream intact).
+        // EAGAIN after a partial write → stream is corrupted; treat as fatal.
         size_t written = 0;
         while (written < frame.size()) {
             ssize_t n = ::write(fd_, frame.data() + written, frame.size() - written);
             if (n < 0) {
-                if (errno == EINTR)                          continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return true;  // drop
-                return false;   // EPIPE / ECONNRESET — connection dead
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return written == 0;  // true=clean drop; false=partial write, close
+                return false;
             }
             written += static_cast<size_t>(n);
         }

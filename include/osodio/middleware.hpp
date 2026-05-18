@@ -25,20 +25,24 @@ namespace osodio {
 //   app.use(osodio::logger());
 //
 // Optional: supply a custom output stream.
-inline Middleware logger(std::ostream& out = std::cout) {
-    return [&out](Request& req, Response& res, NextFn next) -> Task<void> {
+inline Middleware logger(std::ostream* out = &std::cout) {
+    return [out](Request& req, Response& res, NextFn next) -> Task<void> {
         using Clock = std::chrono::steady_clock;
         auto t0 = Clock::now();
 
         co_await next();
 
+        if (!out) co_return;
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       Clock::now() - t0).count();
-        out << req.method << ' ' << req.path
-            << " → " << res.status_code()
-            << " (" << ms << " ms)\n";
+        *out << req.method << ' ' << req.path
+             << " -> " << res.status_code()
+             << " (" << ms << " ms)\n";
     };
 }
+
+// Reference overload for backward compatibility — still captures by pointer.
+inline Middleware logger(std::ostream& out) { return logger(&out); }
 
 // ─── CorsOptions ──────────────────────────────────────────────────────────────
 
@@ -73,27 +77,45 @@ struct CorsOptions {
 //   app.use(osodio::cors({ .origins = {"https://app.example.com"} }));
 //
 inline Middleware cors(CorsOptions opts = {}) {
+    // credentials=true with wildcard origin is invalid per the Fetch spec:
+    // browsers will block the request. Force an explicit allowlist instead.
+    bool wildcard = opts.origins.size() == 1 && opts.origins[0] == "*";
+    if (opts.credentials && wildcard) {
+        std::cerr << "[osodio] cors: credentials=true requires an explicit origin "
+                     "allowlist — wildcard '*' is incompatible. "
+                     "Disabling credentials to avoid broken CORS responses.\n";
+        opts.credentials = false;
+    }
+
     return [opts = std::move(opts)](Request& req, Response& res, NextFn next) -> Task<void> {
         // Determine the effective Allow-Origin value
+        bool   is_wildcard = opts.origins.size() == 1 && opts.origins[0] == "*";
         std::string allow_origin;
-        if (opts.origins.size() == 1 && opts.origins[0] == "*") {
+        if (is_wildcard) {
             allow_origin = "*";
         } else {
-            // Match the incoming Origin header against the allowlist
+            // Match the incoming Origin header against the allowlist.
+            // If there's no match, don't set ACAO at all — sending a mismatched
+            // origin would break shared caches and confuse debugging.
             auto origin_hdr = req.header("origin");
             if (origin_hdr) {
                 for (const auto& o : opts.origins) {
                     if (o == *origin_hdr) { allow_origin = o; break; }
                 }
             }
-            // If no match, still add the header (browser will reject, that's correct)
-            if (allow_origin.empty() && !opts.origins.empty())
-                allow_origin = opts.origins[0];
+        }
+
+        // Always send Vary: Origin when using an explicit allowlist so caches
+        // don't serve the wrong ACAO value to a different origin.
+        if (!is_wildcard) res.header("Vary", "Origin");
+
+        if (allow_origin.empty()) {
+            // No match and no wildcard — skip ACAO entirely; browser blocks request.
+            if (req.method != "OPTIONS") { co_await next(); }
+            co_return;
         }
 
         res.header("Access-Control-Allow-Origin", allow_origin);
-        if (allow_origin != "*")
-            res.header("Vary", "Origin");
         if (opts.credentials)
             res.header("Access-Control-Allow-Credentials", "true");
 
@@ -322,13 +344,28 @@ inline Middleware rate_limit(RateLimitOptions opts = {}) {
     // State is thread_local: each worker thread has independent counters.
     // With N threads, effective per-IP rate ≈ opts.requests × N.
     // This avoids cross-thread locking and is idiomatic for SO_REUSEPORT servers.
+    static constexpr size_t kMaxBuckets = 10'000;
+
     return [opts, key_fn](Request& req, Response& res, NextFn next) -> Task<void> {
         using Seconds = std::chrono::seconds;
         thread_local std::unordered_map<std::string, Bucket> state;
 
         auto now = Clock::now();
-        const std::string key = key_fn(req);
 
+        // Evict expired buckets when the map grows large.
+        // Without this, a botnet cycling through many source IPs causes
+        // unbounded memory growth — one bucket per unique IP, never freed.
+        if (state.size() > kMaxBuckets) {
+            auto window = std::chrono::seconds(opts.window_seconds);
+            for (auto it = state.begin(); it != state.end(); ) {
+                if (now - it->second.window_start >= window)
+                    it = state.erase(it);
+                else
+                    ++it;
+            }
+        }
+
+        const std::string key = key_fn(req);
         auto& bucket = state[key];
         if (bucket.count == 0 ||
             std::chrono::duration_cast<Seconds>(now - bucket.window_start).count()

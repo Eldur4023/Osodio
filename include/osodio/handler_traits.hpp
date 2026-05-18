@@ -178,10 +178,9 @@ T extract_body(const Request& req, Response& res) {
     simdjson::dom::element doc;
     auto perr = sjparser.parse(req.body).get(doc);
     if (perr) {
-        res.status(400).json({
-            {"error",  "Invalid JSON"},
-            {"detail", std::string(simdjson::error_message(perr))}
-        });
+        // Expose a generic "Invalid JSON" without simdjson internals (byte offsets,
+        // internal error codes) that could fingerprint implementation details.
+        res.status(400).json({{"error", "Invalid JSON"}});
         return T{};
     }
     if (doc.type() != simdjson::dom::element_type::OBJECT) {
@@ -251,6 +250,26 @@ struct extractor<Response&> {
     static Response& extract(const Request&, Response& res) { return res; }
 };
 
+namespace detail {
+// Parse a string fully into T.  Throws std::invalid_argument if the string is
+// empty, not a valid number, or has trailing non-numeric characters ("123abc").
+template<typename T>
+T parse_scalar(const std::string& s) {
+    if (s.empty()) throw std::invalid_argument("empty");
+    size_t pos = 0;
+    T result;
+    if constexpr (std::is_same_v<T, int>)    { result = std::stoi(s, &pos); }
+    else if constexpr (std::is_same_v<T, long>)   { result = std::stol(s, &pos); }
+    else if constexpr (std::is_same_v<T, float>)  { result = std::stof(s, &pos); }
+    else if constexpr (std::is_same_v<T, double>) { result = std::stod(s, &pos); }
+    else if constexpr (std::is_same_v<T, bool>)   { return s == "true" || s == "1"; }
+    else if constexpr (std::is_same_v<T, std::string>) { return s; }
+    else return T{};
+    if (pos != s.size()) throw std::invalid_argument("trailing characters");
+    return result;
+}
+} // namespace detail
+
 // PathParam<T, Name>
 template<typename T, fixed_string Name>
 struct extractor<PathParam<T, Name>> {
@@ -259,12 +278,7 @@ struct extractor<PathParam<T, Name>> {
         auto it = req.params.find(std::string(name));
         if (it == req.params.end()) return {T{}};
         try {
-            if constexpr (std::is_same_v<T, int>)              return {std::stoi(it->second)};
-            else if constexpr (std::is_same_v<T, long>)        return {std::stol(it->second)};
-            else if constexpr (std::is_same_v<T, float>)       return {std::stof(it->second)};
-            else if constexpr (std::is_same_v<T, double>)      return {std::stod(it->second)};
-            else if constexpr (std::is_same_v<T, std::string>) return {it->second};
-            else return {T{}};
+            return {detail::parse_scalar<T>(it->second)};
         } catch (const std::exception&) {
             res.status(400).json({{"error", "Invalid path parameter"},
                                   {"param", std::string(name)}});
@@ -281,25 +295,14 @@ struct extractor<Query<T, Name, Default>> {
         std::string_view name = Name;
         auto it = req.query.find(std::string(name));
 
-        // Helper: parse a string value to T
-        auto parse = [](const std::string& s) -> T {
-            if constexpr (std::is_same_v<T, int>)              return s.empty() ? T{} : std::stoi(s);
-            else if constexpr (std::is_same_v<T, long>)        return s.empty() ? T{} : std::stol(s);
-            else if constexpr (std::is_same_v<T, float>)       return s.empty() ? T{} : std::stof(s);
-            else if constexpr (std::is_same_v<T, double>)      return s.empty() ? T{} : std::stod(s);
-            else if constexpr (std::is_same_v<T, bool>)        return s == "true" || s == "1";
-            else if constexpr (std::is_same_v<T, std::string>) return s;
-            else return T{};
-        };
-
         try {
             if (it != req.query.end())
-                return {parse(it->second), true};
+                return {detail::parse_scalar<T>(it->second), true};
 
             // Absent: use Default if non-empty, otherwise T{}
             std::string_view def = Default;
             if (!def.empty())
-                return {parse(std::string(def)), false};
+                return {detail::parse_scalar<T>(std::string(def)), false};
         } catch (const std::exception&) {
             res.status(400).json({{"error", "Invalid query parameter"},
                                   {"param", std::string(name)}});
@@ -329,8 +332,10 @@ struct extractor<Inject<T>> {
         }
         auto ptr = req.container->template resolve<T>();
         if (!ptr) {
-            res.status(500).json({{"error", "Service not registered"},
-                                  {"type",  typeid(T).name()}});
+            // Do not expose typeid(T).name() — it reveals internal class names.
+            std::cerr << "[osodio] Inject<T>: service not registered: "
+                      << typeid(T).name() << '\n';
+            res.status(500).json({{"error", "Service not registered"}});
             return {};
         }
         return Inject<T>{std::move(ptr)};

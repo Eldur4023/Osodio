@@ -186,6 +186,8 @@ namespace jwt {
 inline std::string sign(const nlohmann::json& payload,
                          const std::string& key,
                          const std::string& alg = "HS256") {
+    if (alg == "HS256" && key.size() < 32)
+        throw JwtError("HS256 key must be at least 32 bytes (256 bits)");
     nlohmann::json hdr = {{"alg", alg}, {"typ", "JWT"}};
     std::string h = detail::base64url_encode(hdr.dump());
     std::string p = detail::base64url_encode(payload.dump());
@@ -206,6 +208,8 @@ inline std::string sign(const nlohmann::json& payload,
 inline nlohmann::json verify(const std::string& token,
                                const std::string& key,
                                const JwtOptions& opts = {}) {
+    if (opts.algorithm == "HS256" && key.size() < 32)
+        throw JwtError("HS256 key must be at least 32 bytes (256 bits)");
     // Split into 3 parts
     auto d1 = token.find('.');
     if (d1 == std::string::npos) throw JwtError("malformed token");

@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <deque>
 #include <memory>
 #include <atomic>
 #include <unordered_map>
@@ -74,7 +75,7 @@ private:
         // Populated after the handler calls make_sse(); data provider reads
         // from this queue and returns NGHTTP2_ERR_DEFERRED when it is empty.
         bool                     sse_mode          = false;
-        std::vector<std::string> sse_pending;              // chunks awaiting send
+        std::deque<std::string>  sse_pending;              // chunks awaiting send
         size_t                   sse_pending_bytes  = 0;   // total bytes in sse_pending
         bool                     sse_deferred       = false; // provider returned DEFERRED
         bool                     sse_ended          = false; // SSEWriter dtor was called
@@ -83,7 +84,7 @@ private:
         // Set when the stream is a CONNECT+websocket upgrade.
         bool                     ws_protocol  = false; // :protocol: websocket seen
         bool                     ws_mode      = false; // begin() called
-        std::vector<std::string> ws_pending;           // outgoing WS frame bytes
+        std::deque<std::string>  ws_pending;           // outgoing WS frame bytes
         bool                     ws_deferred  = false;
         bool                     ws_ended     = false;
         // Feed callback — routes incoming DATA to WSState::feed()

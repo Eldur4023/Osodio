@@ -302,7 +302,10 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
         try {
             co_await disp(*req_ptr, *res_ptr);
         } catch (const std::exception& e) {
-            res_ptr->status(500).json({{"error", e.what()}});
+            // Log internally but do not expose e.what() to clients — it may
+            // contain connection strings, file paths, or other internal detail.
+            std::cerr << "[osodio] unhandled exception: " << e.what() << '\n';
+            res_ptr->status(500).json({{"error", "Internal Server Error"}});
         } catch (...) {
             res_ptr->status(500).json({{"error", "Internal Server Error"}});
         }

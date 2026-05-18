@@ -41,11 +41,22 @@ static int cb_on_url(llhttp_t* p, const char* at, size_t len) {
 
 static void commit_header(HttpParser::ParseContext* c) {
     if (!c->value_pending) return;
-    // Lowercase the field name for case-insensitive lookup
     std::string key = c->last_field;
     std::transform(key.begin(), key.end(), key.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
-    c->current.headers[std::move(key)] = std::move(c->last_value);
+
+    auto it = c->current.headers.find(key);
+    if (it != c->current.headers.end()) {
+        // RFC 7230 §3.2.2: duplicate headers may be combined with ", ".
+        // set-cookie is the sole exception — each value must stay on its own line.
+        // In practice set-cookie appears in responses, not requests, but guard anyway.
+        const char* sep = (key == "set-cookie") ? "\n" : ", ";
+        it->second += sep;
+        it->second += c->last_value;
+    } else {
+        c->current.headers[key] = std::move(c->last_value);
+    }
+
     c->last_field.clear();
     c->last_value.clear();
     c->value_pending = false;

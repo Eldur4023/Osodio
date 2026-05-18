@@ -3,6 +3,7 @@
 #include <string_view>
 #include <optional>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <array>
 #include <cstring>
@@ -140,8 +141,13 @@ struct WSState {
     // callback (set by app.ws() when _h2_ws_ctx is present).
     std::function<void(std::string)> send_fn;
 
-    std::string          read_buf;
-    std::vector<WSMessage> pending;
+    // Per-message size limits (DoS protection).
+    static constexpr size_t kMaxFramePayload  = 16 * 1024 * 1024;  // 16 MB per frame
+    static constexpr size_t kMaxMessageSize   = 16 * 1024 * 1024;  // 16 MB assembled
+    static constexpr size_t kMaxPendingFrames = 256;
+
+    std::string            read_buf;
+    std::deque<WSMessage>  pending;
 
     // For reassembling fragmented messages
     std::string  frag_buf;
@@ -172,35 +178,43 @@ struct WSState {
             bool    masked  = (p[1] & 0x80) != 0;
             uint8_t len7    = p[1] & 0x7F;
 
-            size_t  hdr = 2;
+            size_t   hdr = 2;
             uint64_t payload_len;
-            if      (len7 == 126) { if (read_buf.size()<4) break; payload_len=(uint8_t(p[2])<<8)|uint8_t(p[3]); hdr+=2; }
+            if      (len7 == 126) { if (read_buf.size()<4)  break; payload_len=(uint8_t(p[2])<<8)|uint8_t(p[3]); hdr+=2; }
             else if (len7 == 127) { if (read_buf.size()<10) break; payload_len=0; for(int i=0;i<8;++i) payload_len=(payload_len<<8)|p[2+i]; hdr+=8; }
             else                  { payload_len = len7; }
 
+            // Reject oversized frames before any arithmetic that could overflow.
+            if (payload_len > kMaxFramePayload) { closed = true; return; }
+
             if (masked) hdr += 4;
-            if (read_buf.size() < hdr + payload_len) break;  // wait for more data
+
+            // Guard: hdr + payload_len fits in size_t without overflow because
+            // payload_len <= kMaxFramePayload (16 MB) and hdr <= 14.
+            if (read_buf.size() < hdr + static_cast<size_t>(payload_len)) break;
+
+            // Reject if the receiver queue is already full.
+            if (pending.size() >= kMaxPendingFrames) { closed = true; return; }
 
             uint8_t mask_key[4] = {};
             if (masked) memcpy(mask_key, p + hdr - 4, 4);
 
-            std::string payload(read_buf.data() + hdr, payload_len);
+            std::string payload(read_buf.data() + hdr, static_cast<size_t>(payload_len));
             if (masked)
                 for (size_t i = 0; i < payload.size(); ++i)
                     payload[i] ^= mask_key[i % 4];
 
-            read_buf.erase(0, hdr + payload_len);
+            read_buf.erase(0, hdr + static_cast<size_t>(payload_len));
 
-            // Control frames (RFC 6455 §5.5): never fragmented
+            // Control frames (RFC 6455 §5.5): never fragmented, max payload 125 bytes
             if (opcode == 0x8) {  // Close
                 closed = true;
-                raw_send(std::string("\x88\x00", 2));  // echo close frame
+                raw_send(std::string("\x88\x00", 2));
                 pending.push_back({WSMessage::Opcode::Close, std::move(payload)});
                 return;
             }
             if (opcode == 0x9) {  // Ping → auto-pong
-                auto pong = build_frame(payload, 0xA);
-                raw_send(pong);
+                raw_send(build_frame(payload, 0xA));
                 continue;
             }
             if (opcode == 0xA) {  // Pong
@@ -210,6 +224,12 @@ struct WSState {
 
             // Data frames — handle fragmentation
             if (opcode == 0x0) {  // Continuation
+                // Guard assembled message size to prevent OOM via fragmentation.
+                if (frag_buf.size() + payload.size() > kMaxMessageSize) {
+                    closed = true;
+                    raw_send(std::string("\x88\x03\x03\xF1", 4));  // 1009 Message Too Big
+                    return;
+                }
                 frag_buf += payload;
                 if (fin) {
                     pending.push_back({WSMessage::Opcode(frag_opcode), std::move(frag_buf)});
@@ -312,7 +332,7 @@ public:
         std::optional<WSMessage> await_resume() noexcept {
             if (!s->pending.empty()) {
                 auto msg = std::move(s->pending.front());
-                s->pending.erase(s->pending.begin());
+                s->pending.pop_front();
                 return msg;
             }
             return std::nullopt;  // connection closed
@@ -349,9 +369,9 @@ public:
     }
 
     bool is_open() const {
-        return s_ && !s_->closed
-               && !(s_->token.expired()
-                    || (s_->token.lock() && s_->token.lock()->is_cancelled()));
+        if (!s_ || s_->closed) return false;
+        auto t = s_->token.lock();
+        return t && !t->is_cancelled();
     }
 
 private:

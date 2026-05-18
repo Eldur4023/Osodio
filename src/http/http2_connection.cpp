@@ -1,4 +1,5 @@
 #include "http2_connection.hpp"
+#include "http_parser.hpp"
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/task.hpp"
 #include "../../include/osodio/metrics.hpp"
@@ -254,8 +255,11 @@ void Http2Connection::dispatch_stream(int32_t stream_id, Stream& s) {
                       std::shared_ptr<osodio::Response> res,
                       osodio::DispatchFn                disp) -> osodio::Task<void> {
         try { co_await disp(*req, *res); }
-        catch (const std::exception& e) { res->status(500).json({{"error", e.what()}}); }
-        catch (...)                     { res->status(500).json({{"error", "Internal Server Error"}}); }
+        catch (const std::exception& e) {
+            std::cerr << "[osodio] unhandled exception: " << e.what() << '\n';
+            res->status(500).json({{"error", "Internal Server Error"}});
+        }
+        catch (...) { res->status(500).json({{"error", "Internal Server Error"}}); }
     }(req_ptr, res_ptr, dispatch_);
 
     auto h = wrapper.detach();
@@ -432,7 +436,7 @@ void Http2Connection::h2_begin_sse(int32_t stream_id, const osodio::Response& re
             written += n;
             s.sse_pending_bytes -= n;
             if (n == chunk.size()) {
-                s.sse_pending.erase(s.sse_pending.begin());
+                s.sse_pending.pop_front();
             } else {
                 chunk.erase(0, n);
                 break;
@@ -545,7 +549,7 @@ void Http2Connection::h2_begin_ws(int32_t stream_id,
             std::memcpy(buf + written, chunk.data(), n);
             written += n;
             if (n == chunk.size()) {
-                s.ws_pending.erase(s.ws_pending.begin());
+                s.ws_pending.pop_front();
             } else {
                 chunk.erase(0, n);
                 break;
@@ -611,9 +615,13 @@ void Http2Connection::close() {
 
 // ── nghttp2 callbacks ─────────────────────────────────────────────────────────
 
+static constexpr size_t kMaxWriteBufSize = 4 * 1024 * 1024; // 4 MiB per connection
+
 ssize_t Http2Connection::send_cb(nghttp2_session*, const uint8_t* data,
                                   size_t length, int, void* user_data) {
     auto* self = static_cast<Http2Connection*>(user_data);
+    if (self->write_buf_.size() - self->write_offset_ >= kMaxWriteBufSize)
+        return NGHTTP2_ERR_WOULDBLOCK;
     self->write_buf_.append(reinterpret_cast<const char*>(data), length);
     return static_cast<ssize_t>(length);
 }
@@ -638,6 +646,9 @@ int Http2Connection::on_header_cb(nghttp2_session*,
     auto it = self->streams_.find(frame->hd.stream_id);
     if (it == self->streams_.end()) return 0;
 
+    if (namelen > kMaxHeaderSize || valuelen > kMaxHeaderSize)
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+
     std::string n(reinterpret_cast<const char*>(name),  namelen);
     std::string v(reinterpret_cast<const char*>(value), valuelen);
 
@@ -647,7 +658,11 @@ int Http2Connection::on_header_cb(nghttp2_session*,
     else if (n == ":authority") s.authority = std::move(v);
     else if (n == ":scheme")    {} // ignore
     else if (n == ":protocol" && v == "websocket") s.ws_protocol = true;
-    else                        s.req_headers[std::move(n)] = std::move(v);
+    else {
+        if (s.req_headers.size() >= kMaxHeaderCount)
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        s.req_headers[std::move(n)] = std::move(v);
+    }
     return 0;
 }
 
@@ -664,6 +679,8 @@ int Http2Connection::on_data_chunk_recv_cb(nghttp2_session*, uint8_t,
         it->second.ws_data_feed(data, len);
     } else {
         // Normal mode: accumulate request body
+        if (it->second.body.size() + len > kMaxBodySize)
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
         it->second.body.append(reinterpret_cast<const char*>(data), len);
     }
     return 0;
