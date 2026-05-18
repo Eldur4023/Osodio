@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <osodio/core/event_loop.hpp>
 #include "cancel.hpp"
+#include "cookies.hpp"
 #include <nlohmann/json.hpp>
 
 namespace osodio {
@@ -96,6 +97,19 @@ public:
         return (it != query.end()) ? it->second : def;
     }
 
+    // Convenience: get a cookie value by name. Parses the Cookie header lazily;
+    // the result is cached on the first call so repeated lookups are O(1).
+    std::optional<std::string> cookie(const std::string& name) const {
+        if (!cookies_parsed_) {
+            cookies_parsed_ = true;
+            auto h = header("cookie");
+            if (h) cookies_cache_ = parse_cookie_header(*h);
+        }
+        auto it = cookies_cache_.find(name);
+        if (it == cookies_cache_.end()) return std::nullopt;
+        return it->second;
+    }
+
     // Parse an application/x-www-form-urlencoded body.
     // Returns an empty map if Content-Type doesn't match or body is empty.
     std::unordered_map<std::string, std::string> form() const {
@@ -104,6 +118,10 @@ public:
             return {};
         return parse_form_encoded(body);
     }
+
+    // Mutable cache for parsed Cookie header — only populated on first cookie().
+    mutable std::unordered_map<std::string, std::string> cookies_cache_;
+    mutable bool                                          cookies_parsed_ = false;
 
 private:
     static std::string form_url_decode(const std::string& s) {

@@ -156,9 +156,43 @@ public:
     //       }
     //   });
     //
+    // ── Cross-Site WebSocket Hijacking (CSWH) protection ─────────────────────
+    // Browsers do NOT enforce same-origin policy on WebSocket handshakes.
+    // Any site can open a WS connection that inherits the user's cookies, so
+    // an authenticated WS endpoint without an Origin check is hijackable.
+    //
+    //   app.ws("/chat", handler, {.allowed_origins = {"https://app.example.com"}});
+    //
+    // If allowed_origins is empty (default) the check is skipped — only safe
+    // for unauthenticated public endpoints.
+    struct WSOptions {
+        std::vector<std::string> allowed_origins;
+    };
+
     template<typename F>
     App& ws(std::string path, F&& fn) {
-        auto wrapper = [fn = std::forward<F>(fn)](Request& req, Response& res) mutable -> Task<void> {
+        return ws(std::move(path), std::forward<F>(fn), WSOptions{});
+    }
+
+    template<typename F>
+    App& ws(std::string path, F&& fn, WSOptions opts) {
+        auto wrapper = [fn = std::forward<F>(fn), opts = std::move(opts)]
+                       (Request& req, Response& res) mutable -> Task<void> {
+
+            // Origin check — applied to both HTTP/1.1 and RFC 8441 (HTTP/2) paths.
+            if (!opts.allowed_origins.empty()) {
+                auto origin = req.header("origin");
+                bool ok = false;
+                if (origin) {
+                    for (const auto& o : opts.allowed_origins) {
+                        if (o == *origin) { ok = true; break; }
+                    }
+                }
+                if (!ok) {
+                    res.status(403).json({{"error", "Origin not allowed"}});
+                    co_return;
+                }
+            }
 
             // ── HTTP/2 path (RFC 8441 — CONNECT + :protocol: websocket) ──────
             if (req._h2_ws_ctx) {

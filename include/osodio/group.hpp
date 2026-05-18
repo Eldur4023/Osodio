@@ -81,17 +81,25 @@ private:
         return [base = std::move(base), mws = std::move(mws)]
                (Request& req, Response& res) mutable -> Task<void>
         {
-            // Local call_next that chains through group middlewares → base handler
-            std::function<Task<void>(size_t)> call_next;
-            call_next = [&base, &mws, &req, &res, &call_next](size_t i) -> Task<void> {
+            // Use shared_ptr so the NextFn closures own a stable reference even
+            // if a middleware stores and calls next() outside its co_await scope.
+            // Mirrors the pattern used in App::handle_request.
+            using CallNext = std::function<Task<void>(size_t)>;
+            auto call_next = std::make_shared<CallNext>();
+            *call_next = [&base, &mws, &req, &res, call_next](size_t i) -> Task<void> {
                 if (i < mws.size()) {
+                    auto advanced = std::make_shared<bool>(false);
                     co_await mws[i](req, res,
-                        [&call_next, i]() -> Task<void> { return call_next(i + 1); });
+                        [call_next, advanced, i]() -> Task<void> {
+                            if (*advanced) co_return;
+                            *advanced = true;
+                            co_await (*call_next)(i + 1);
+                        });
                 } else {
                     co_await base(req, res);
                 }
             };
-            co_await call_next(0);
+            co_await (*call_next)(0);
         };
     }
 

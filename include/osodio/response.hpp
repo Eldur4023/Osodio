@@ -10,8 +10,10 @@
 #include <unistd.h>
 #include <cerrno>
 #include <iostream>
+#include <vector>
 #include <nlohmann/json.hpp>
 #include <inja.hpp>
+#include "cookies.hpp"
 
 namespace osodio {
 
@@ -21,6 +23,10 @@ class Response {
         std::string body;
         std::string templates_dir = "./templates";
         std::unordered_map<std::string, std::string> headers;
+        // Set-Cookie is the one HTTP response header that legally appears
+        // multiple times — keep them in a separate list so they survive the
+        // map serialisation.
+        std::vector<std::string> cookies;
         // sendfile path: when set, build() emits only headers; the connection
         // uses sendfile(2) to stream the file body directly to the socket.
         std::string     sendfile_path;
@@ -55,6 +61,25 @@ public:
         strip_crlf(key);
         strip_crlf(value);
         state_->headers[std::move(key)] = std::move(value);
+        return *this;
+    }
+
+    // Set a cookie.  Multiple cookies can be set on one response — each emits
+    // its own Set-Cookie header (the map storage in headers_ only allows one).
+    //
+    //   res.cookie("session", token, {.secure = true, .same_site = SameSite::Strict});
+    //
+    Response& cookie(std::string name, std::string value, CookieOptions opts = {}) {
+        state_->cookies.push_back(
+            build_set_cookie(std::move(name), std::move(value), std::move(opts)));
+        return *this;
+    }
+
+    // Convenience: delete a cookie by name (sets Max-Age=0).
+    Response& clear_cookie(std::string name, CookieOptions opts = {}) {
+        opts.max_age = 0;
+        state_->cookies.push_back(
+            build_set_cookie(std::move(name), "", std::move(opts)));
         return *this;
     }
 
@@ -184,6 +209,8 @@ public:
     const std::string&     body()           const { return state_->body; }
     const std::unordered_map<std::string, std::string>&
                            headers_map()    const { return state_->headers; }
+    const std::vector<std::string>&
+                           cookies()        const { return state_->cookies; }
     const std::string&     sendfile_path()  const { return state_->sendfile_path; }
     std::uintmax_t         sendfile_size()  const { return state_->sendfile_size; }
     bool                   is_committed()   const { return state_->body_committed; }
@@ -203,6 +230,8 @@ public:
            << ' ' << reason_phrase(state_->status_code) << "\r\n";
         for (const auto& [k, v] : state_->headers)
             os << k << ": " << v << "\r\n";
+        for (const auto& c : state_->cookies)
+            os << "Set-Cookie: " << c << "\r\n";
         os << "\r\n";
         return os.str();
     }
@@ -218,6 +247,8 @@ public:
         os << "Content-Length: " << clen << "\r\n";
         for (const auto& [k, v] : state_->headers)
             os << k << ": " << v << "\r\n";
+        for (const auto& c : state_->cookies)
+            os << "Set-Cookie: " << c << "\r\n";
         os << "\r\n";
         // Body only for normal (non-sendfile) responses
         if (state_->sendfile_path.empty())

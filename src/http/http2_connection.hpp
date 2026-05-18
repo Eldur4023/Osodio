@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <deque>
+#include <chrono>
 #include <memory>
 #include <atomic>
 #include <unordered_map>
@@ -94,6 +95,15 @@ private:
     std::unordered_map<int32_t, Stream> streams_;
 
     static constexpr size_t kMaxSsePendingBytes = 1 * 1024 * 1024; // 1 MiB per stream
+
+    // ── CVE-2023-44487 (HTTP/2 Rapid Reset) defense ─────────────────────────
+    // Track streams cancelled by the client before completion within a rolling
+    // 1-second window.  Above kMaxRstPerSecond we send GOAWAY/ENHANCE_YOUR_CALM
+    // and close.  This caps the per-connection rate of stream-open-then-cancel
+    // abuse that bypasses MAX_CONCURRENT_STREAMS.
+    static constexpr int kMaxRstPerSecond = 100;
+    int                                    rst_count_       = 0;
+    std::chrono::steady_clock::time_point  rst_window_start_{};
 
     // ── Internal helpers ──────────────────────────────────────────────────────
     void do_read();

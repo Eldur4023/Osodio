@@ -6,6 +6,7 @@
 #include "cancel.hpp"
 #include "types.hpp"
 #include "task.hpp"
+#include "cookies.hpp"
 #include "request.hpp"
 #include "response.hpp"
 #include "router.hpp"
@@ -25,5 +26,6 @@
 #include "metrics.hpp"
 #ifdef OSODIO_HAS_TLS
 #  include "jwt.hpp"
+#  include "csrf.hpp"
 #endif
 #include "testing.hpp"

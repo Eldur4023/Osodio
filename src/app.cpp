@@ -123,6 +123,16 @@ static bool try_serve_static(
         std::string rel = url_decode_path(req.path.substr(plen));
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
+        // Block dotfiles: any path component starting with '.' (e.g. .env,
+        // .git/config, .htaccess) — common misconfiguration in deployments.
+        // We check the URL-decoded relative path so %2E bypasses are caught.
+        for (size_t i = 0; i < rel.size(); ++i) {
+            if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') {
+                res.status(404).json({{"error", "Not Found"}});
+                return true;
+            }
+        }
+
         fs::path file = fs::path(m.root) / rel.substr(1);
 
         auto canonical_root = fs::weakly_canonical(m.root);

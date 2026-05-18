@@ -1,6 +1,6 @@
 # Osodio
 
-C++20 async HTTP framework. epoll event loop, coroutines, zero-boilerplate body parsing, JWT, SSE, WebSockets — all in a single header include.
+C++20 async HTTP framework. Born from frustration with Node.js and the wall that Flask/FastAPI hit at scale.
 
 ```cpp
 #include <osodio/osodio.hpp>
@@ -9,7 +9,7 @@ using namespace osodio;
 struct CreatePost {
     std::string title;
     std::string content;
-    std::optional<std::string> tags;   // absent or null in JSON → std::nullopt
+    std::optional<std::string> tags;
     SCHEMA(CreatePost, title, content, tags)
 
     std::vector<std::string> validate() const {
@@ -27,20 +27,136 @@ int main() {
     auto api = app.group("/api/v1");
     api.use(osodio::jwt_auth("my-secret"));
 
-    // Body auto-parsed + validated. 422 on failure, no wrapper needed.
     api.post("/posts", [](CreatePost post, Request& req) -> nlohmann::json {
         std::string author = req.jwt_claims.value("sub", "");
         return {{"id", 1}, {"title", post.title}, {"author", author}};
     });
 
     api.get("/posts/:id", [](PathParam<int,"id"> id) -> Task<nlohmann::json> {
-        co_await sleep(0);   // async, non-blocking
+        co_await sleep(0);
         co_return nlohmann::json{{"id", (int)id}, {"title", "Hello world"}};
     });
 
     app.run(8080);
 }
 ```
+
+---
+
+## Why does this exist?
+
+### JavaScript is a bad language and its ecosystem is insufferable
+
+Before getting to Node.js specifically: JavaScript is a genuinely bad language. Not "imperfect" or "quirky" — bad. The type coercion rules are a horror show (`[] + {} === "[object Object]"`, `{} + [] === 0`, `0.1 + 0.2 !== 0.3`). `this` changes meaning depending on how a function is called, not where it's defined. There are two different null values (`null` and `undefined`) with subtly different behaviors across every API. `var` has function scope instead of block scope, a mistake so bad they had to add `let` and `const` to paper over it. `==` has a 30-entry comparison table of implicit coercions; the only correct advice is to never use it.
+
+The ecosystem built around this has metastasized into something genuinely painful to work in. A fresh `create-react-app` pulls 1500+ packages and 300MB of `node_modules` for a Hello World. Projects routinely depend on packages with a single exported function (left-pad, is-odd, is-even, is-number — these are real packages with millions of weekly downloads). The supply chain attack surface is enormous: any of those 1500 packages can run arbitrary code on install via `postinstall` scripts. NPM's security record speaks for itself.
+
+TypeScript patches the type system but adds a compilation step, a separate config file (`tsconfig.json`) that interacts badly with bundler configs (`webpack.config.js`, `vite.config.ts`, `babel.config.json`, `.babelrc`), and a toolchain that can spend more time type-checking than your program spends running. The types themselves are structural and unsound — you can write TypeScript that passes `tsc` and still crashes at runtime because `any` propagates silently and `JSON.parse` returns `any`.
+
+Prettier, ESLint, Husky, lint-staged, commitlint — hours lost configuring tools that exist purely because the language doesn't enforce anything on its own.
+
+### The Node.js performance problem
+
+Node.js is single-threaded. One CPU core. That's not an architectural choice you can tune away — it's fundamental to how V8 and libuv work. The event loop processes one callback at a time, and any CPU-bound work (JSON serialization at scale, image processing, crypto, request validation) blocks every other request behind it.
+
+The workarounds are well-known and all painful: `cluster` forks N processes and now you need IPC for shared state; `worker_threads` gets you parallelism but with a deliberately restricted API that can't touch the DOM or most native modules; `pm2` is just `cluster` with a process manager on top.
+
+Then there's V8 GC. At high request rates the garbage collector pauses become visible in latency percentiles — not every request, but the p99 and p999 are ugly. You can tune heap sizes and generation ratios but you're fighting a runtime that wasn't designed for this workload. And TypeScript adds a compile step that turns every hot reload into a multi-second wait in large codebases.
+
+Osodio runs one native OS thread per CPU core with no GIL, no GC, no IPC for shared state, and no compile step between your code change and a running binary.
+
+### The Python problem
+
+Flask is synchronous. Every request occupies a thread for its entire lifetime. With uvicorn + FastAPI you get async I/O, which helps when handlers are I/O-bound, but the Python GIL still means only one thread executes Python bytecode at any given moment. `multiprocessing` gets you real parallelism but at the cost of forking the entire interpreter — memory doubles, shared state becomes a coordination problem, and startup time grows.
+
+The numbers matter here. A vanilla FastAPI endpoint doing nothing but JSON serialization tops out around 30–50k req/s on an 8-core machine. Not because the networking is slow — uvicorn and httptools are fast — but because Python's object model, attribute lookup, and GC have a fixed cost per request that compounds. Add a database call, some Pydantic validation, and real business logic and that number drops further.
+
+Osodio handles the same workload with no interpreter overhead: request parsing is llhttp (the same parser Node uses), JSON is nlohmann or simdjson, and the entire hot path from accept() to response write is native code with C++20 coroutines that compile to state machines with zero runtime cost.
+
+### Design choice: Flask/FastAPI syntax, C++ speed
+
+The goal was never to reinvent the wheel of API design. FastAPI got the developer experience right: declare what your handler needs as function parameters, let the framework figure out where to get it. No `request.json()`, no manual header parsing, no boilerplate — just a function that says what it wants and receives it.
+
+That's the syntax we wanted. The problem is that Python can't deliver the performance.
+
+C++ is not Python. The syntax limitations are real and there's no point pretending otherwise — no decorators, no runtime introspection of parameter names, no duck typing, no optional typing that the framework reads at runtime. But C++ templates and parameter packs get surprisingly close, and that's what Osodio is: an honest attempt to bring FastAPI's ergonomics into a language that can actually handle hundreds of thousands of requests per second without forking twenty processes.
+
+The comparison is direct:
+
+```python
+# FastAPI
+@app.get("/articles/{id}")
+async def get_article(
+    id: int,
+    db: Database = Depends(get_db),
+    page: int = Query(default=1),
+):
+    ...
+```
+
+```cpp
+// Osodio
+app.get("/articles/:id", [](
+    PathParam<int, "id"> id,
+    Inject<Database>     db,
+    Query<int, "page", "1"> page
+) -> Task<nlohmann::json> {
+    co_return co_await db->get(id);
+});
+```
+
+```python
+# FastAPI
+class CreatePost(BaseModel):
+    title: str
+    content: str
+    tags: Optional[list[str]] = None
+
+    @validator("title")
+    def title_length(cls, v):
+        if len(v) < 3:
+            raise ValueError("min 3 characters")
+        return v
+
+@app.post("/posts")
+async def create_post(post: CreatePost, db: Database = Depends(get_db)):
+    ...
+```
+
+```cpp
+// Osodio
+struct CreatePost {
+    std::string title;
+    std::string content;
+    std::optional<std::vector<std::string>> tags;
+    SCHEMA(CreatePost, title, content, tags)
+
+    std::vector<std::string> validate() const {
+        if (title.size() < 3) return {"title: min 3 characters"};
+        return {};
+    }
+};
+
+app.post("/posts", [](CreatePost post, Inject<Database> db) -> Task<nlohmann::json> {
+    co_return co_await db->insert(post);
+});
+```
+
+The `SCHEMA` macro is the main compromise — and a temporary one. FastAPI reads Pydantic field names via Python's type system at runtime; C++ erases names at compile time, so they have to be declared explicitly for now. Everything else maps almost one-to-one: `Depends()` → `Inject<T>`, `Query(default=...)` → `Query<T, "name", "default">`, `Optional[T]` → `std::optional<T>`, `async def` + `await` → coroutine + `co_await`. The 422 validation response, automatic JSON body parsing, and path parameter coercion all work the same way.
+
+C++26 static reflection (P2996) changes this completely. With `std::meta::members_of` the framework can enumerate struct fields and their names at compile time — no macro, no boilerplate, zero runtime cost. The same struct Pydantic inspects dynamically, C++26 will inspect statically. `SCHEMA` will disappear entirely: declare the struct, use it as a handler parameter, done. Osodio is being built with that future in mind as compiler support rolls out.
+
+It's not identical yet. But it's close enough that someone who knows FastAPI can read Osodio handlers without learning a new mental model, and it's getting closer with every C++ standard.
+
+### What Osodio actually does differently
+
+**True multi-core without forking.** One epoll event loop per hardware thread, all bound to the same port via `SO_REUSEPORT`. The kernel distributes connections across cores. Shared state (DI services, counters) is managed through `std::shared_ptr` and `std::atomic` — no IPC, no serialization, no process boundary.
+
+**Async with no runtime.** C++20 coroutines are a language feature, not a library. `co_await sleep(500)` compiles to a state machine that suspends the current frame and returns control to the event loop — no thread switch, no allocation beyond the initial frame, no scheduler that can be starved. The same coroutine mechanism drives route handlers, middleware chains, WebSocket loops, and SSE streams.
+
+**Zero-copy where it matters.** Static file serving uses `sendfile(2)` — the kernel reads the file descriptor and writes to the socket without the data ever entering userspace. HTTP/2 uses nghttp2's `NGHTTP2_DATA_FLAG_NO_COPY` data provider for the same effect.
+
+**No hidden costs.** No reflection framework scanning classes at startup. No runtime type erasure for handler dispatch. No dynamic dispatch in the middleware chain — it unrolls at compile time through template instantiation.
 
 ---
 
@@ -56,12 +172,14 @@ int main() {
 | **Async** | C++20 `Task<T>` coroutines, `co_await sleep(ms)`, full coroutine chaining |
 | **Cancellation** | `req.is_cancelled()`, `CancellationToken`; `sleep()` exits early on disconnect |
 | **Route groups** | `app.group("/prefix").use(mw)` — URL prefix + per-group middleware |
-| **Middleware** | `logger()`, `cors()`, `compress()`, `helmet()`, `rate_limit()`, `jwt_auth()` built-in |
+| **Middleware** | `logger()`, `cors()`, `compress()`, `helmet()`, `rate_limit()`, `jwt_auth()`, `csrf()` built-in |
 | **JWT** | `jwt::sign` / `jwt::verify` / `jwt_auth()` — HS256 and RS256, claim validation |
+| **Cookies** | `res.cookie()`, `req.cookie()`, `SameSite`, `Secure`, `HttpOnly`, `Max-Age` |
+| **CSRF** | Double-submit cookie pattern, stateless, `RAND_bytes` token, `CRYPTO_memcmp` validation |
 | **Dependency injection** | `app.provide<T>(...)` / `Inject<T>` in any handler — singleton and transient |
 | **Static files** | `serve_static(prefix, dir, spa)` — MIME, ETag, Cache-Control, 304, `sendfile(2)`, SPA fallback |
 | **SSE** | `make_sse(res, req)` — `text/event-stream`, named events, keepalive pings, auto-disconnect |
-| **WebSockets** | `app.ws(path, handler)` — RFC 6455, binary/text frames, ping/pong, fragmentation |
+| **WebSockets** | `app.ws(path, handler)` — RFC 6455, binary/text frames, ping/pong, fragmentation, origin check |
 | **Multipart** | `parse_multipart(req)` — file uploads, field names, Content-Type per part |
 | **Templates** | `res.render("page.html", data)` via inja (Jinja2-compatible) |
 | **OpenAPI + Swagger** | `/openapi.json` and `/docs` auto-generated from handler signatures at startup |
@@ -85,8 +203,6 @@ A complete login → token → protected CRUD flow.
 ```cpp
 #include <osodio/osodio.hpp>
 using namespace osodio;
-
-// ── Models ────────────────────────────────────────────────────────────────────
 
 struct LoginRequest {
     std::string username;
@@ -120,8 +236,6 @@ struct DB {
     int next_id = 1;
 };
 
-// ── App ───────────────────────────────────────────────────────────────────────
-
 const std::string JWT_SECRET = "change-this-in-production";
 
 int main() {
@@ -138,27 +252,21 @@ int main() {
     app.use(osodio::helmet());
     app.use(osodio::rate_limit({.requests = 200, .window_seconds = 60}));
 
-    // ── Public: login ─────────────────────────────────────────────────────────
-
     app.post("/auth/login", [](LoginRequest req) -> nlohmann::json {
-        // In production: verify against a hashed password in the DB.
         if (req.username != "alice" || req.password != "hunter2")
             throw osodio::unauthorized("invalid credentials");
 
         auto token = jwt::sign({
             {"sub",  req.username},
             {"role", "editor"},
-            {"exp",  jwt::expires_in(86400)},  // 24 h
+            {"exp",  jwt::expires_in(86400)},
         }, JWT_SECRET);
 
         return {{"token", token}, {"expires_in", 86400}};
     });
 
-    // ── Protected routes ──────────────────────────────────────────────────────
-
     auto api = app.group("/api/v1");
     api.use(osodio::jwt_auth(JWT_SECRET, {
-        // Allow unauthenticated reads
         .skip = [](const Request& req) { return req.method == "GET"; },
     }));
 
@@ -188,7 +296,6 @@ int main() {
         throw osodio::not_found("article not found");
     });
 
-    // jwt_claims populated by jwt_auth(); contains "sub", "role", "exp".
     api.post("/articles", [](CreateArticle req, Request& r, Inject<DB> db) -> nlohmann::json {
         Article a{db->next_id++, req.title, req.body, r.jwt_claims.value("sub","")};
         db->articles.push_back(a);
@@ -206,8 +313,6 @@ int main() {
         return nlohmann::json{{"ok", true}};
     });
 
-    // ── Error handlers ────────────────────────────────────────────────────────
-
     app.on_error(404, [](int, Request& req, Response& res) {
         res.json({{"error", "Not Found"}, {"path", req.path}});
     });
@@ -215,8 +320,65 @@ int main() {
         res.json({{"error", "Something went wrong"}, {"code", code}});
     });
 
-    app.enable_docs();   // GET /docs + GET /openapi.json
+    app.enable_docs();
     app.run(8080);
+}
+```
+
+---
+
+### Session-based auth with CSRF protection
+
+Cookie sessions + CSRF protection for browser-facing apps. The double-submit pattern is stateless — no session store needed. Requires `cmake -DOSODIO_TLS=ON`.
+
+```cpp
+#include <osodio/osodio.hpp>
+using namespace osodio;
+
+int main() {
+    App app;
+
+    app.use(osodio::logger());
+    app.use(osodio::helmet());
+
+    // csrf() must come before route handlers.
+    // Automatically skips Bearer-token requests and safe methods (GET/HEAD/OPTIONS).
+    // Browser JS reads the csrf_token cookie and echoes it in X-CSRF-Token.
+    app.use(osodio::csrf());
+
+    app.post("/login", [](Request& req, Response& res) {
+        auto f = req.form();
+        if (f["username"] != "alice" || f["password"] != "hunter2") {
+            res.status(401).json({{"error", "invalid credentials"}});
+            return;
+        }
+
+        // Set a session cookie — HttpOnly so JS can't read it, Secure in prod.
+        res.cookie("session", "opaque-session-token", {
+            .secure    = true,
+            .http_only = true,
+            .same_site = SameSite::Lax,
+        });
+        res.json({{"ok", true}});
+    });
+
+    app.post("/logout", [](Request& req, Response& res) {
+        // Overwrite the cookie with Max-Age=0 to delete it.
+        res.clear_cookie("session", {.secure = true});
+        res.json({{"ok", true}});
+    });
+
+    app.get("/profile", [](Request& req, Response& res) {
+        auto session = req.cookie("session");
+        if (!session) {
+            res.status(401).json({{"error", "not logged in"}});
+            return;
+        }
+        res.json({{"user", "alice"}});
+    });
+
+    app.tls("cert.pem", "key.pem");
+    app.run(443);
 }
 ```
 
@@ -238,7 +400,6 @@ int main() {
 
     std::filesystem::create_directories("uploads");
 
-    // POST /upload/avatar   (multipart/form-data, field name "file")
     app.post("/upload/avatar", [](Request& req, Response& res) -> Task<void> {
         auto parts = osodio::parse_multipart(req);
         if (!parts) {
@@ -259,7 +420,7 @@ int main() {
                 res.status(413).json({{"error","max 5 MB"}}); co_return;
             }
 
-            // Sanitise the filename — never trust user-supplied paths.
+            // Never trust user-supplied paths — take only the filename component.
             auto safe = std::filesystem::path(part.filename).filename().string();
             std::ofstream f("uploads/" + safe, std::ios::binary);
             f.write(part.body.data(), static_cast<std::streamsize>(part.body.size()));
@@ -275,9 +436,7 @@ int main() {
         res.status(400).json({{"error","no field named 'file' found"}});
     });
 
-    // Serve uploaded files back
     app.serve_static("/static/uploads", "./uploads");
-
     app.run(8080);
 }
 ```
@@ -286,8 +445,7 @@ int main() {
 
 ### Live updates with Server-Sent Events
 
-A dashboard that receives real-time metrics from the server. The browser
-reconnects automatically using `Last-Event-ID` if the connection drops.
+A dashboard that receives real-time metrics from the server. The browser reconnects automatically using `Last-Event-ID` if the connection drops.
 
 ```cpp
 #include <osodio/osodio.hpp>
@@ -302,21 +460,12 @@ struct Metrics {
 int main() {
     App app;
     app.provide(std::make_shared<Metrics>());
-
-    // Every request increments the counter
-    app.use([](Request&, Response& res, auto next) -> Task<void> {
-        co_await next();
-        // (metrics would be injected in a real app)
-    });
-
     app.use(osodio::cors());
 
-    // SSE stream — one long-lived GET, no polling needed from the client.
     app.get("/metrics/live", [](Request& req, Response& res,
                                 Inject<Metrics> m) -> Task<void> {
         auto sse = osodio::make_sse(res, req);
 
-        // Send current state immediately so the client has data on connect.
         sse.send_event("snapshot", nlohmann::json{
             {"requests", m->requests.load()},
             {"errors",   m->errors.load()},
@@ -328,19 +477,16 @@ int main() {
             co_await osodio::sleep(2000);
             if (req.is_cancelled()) break;
 
-            // Push a delta every 2 s
             sse.send_event("delta", nlohmann::json{
                 {"requests", m->requests.load()},
                 {"errors",   m->errors.load()},
                 {"ts",       std::time(nullptr)},
             }.dump(), std::to_string(++tick));
 
-            // Keepalive comment every 10 ticks so proxies don't close the stream
             if (tick % 10 == 0) sse.ping("keepalive");
         }
     });
 
-    // Dashboard HTML
     app.get("/dashboard", [](Response& res) {
         res.html(R"html(<!DOCTYPE html>
 <html><body>
@@ -362,14 +508,12 @@ int main() {
 
 ### WebSocket: collaborative counter
 
-Multiple browser tabs share a counter. Any tab can increment or reset; all
-connected clients see the change immediately.
+Multiple browser tabs share a counter. Any tab can increment or reset; all connected clients see the change immediately.
 
 ```cpp
 #include <osodio/osodio.hpp>
 using namespace osodio;
 
-// In production: use a DI service and proper locking.
 std::atomic<int> g_counter{0};
 
 int main() {
@@ -377,7 +521,6 @@ int main() {
     app.use(osodio::cors());
 
     app.ws("/counter", [](WSConnection ws) -> Task<void> {
-        // New connection: send the current value right away.
         ws.send(nlohmann::json{{"count", g_counter.load()}}.dump());
 
         while (ws.is_open()) {
@@ -385,15 +528,15 @@ int main() {
             if (!msg || msg->is_close()) break;
             if (!msg->is_text()) continue;
 
-            auto data = nlohmann::json::parse(msg->data, nullptr, /*exceptions=*/false);
+            auto data = nlohmann::json::parse(msg->data, nullptr, false);
             if (data.is_discarded()) continue;
 
             std::string action = data.value("action", "");
-            if (action == "increment") {
+            if (action == "increment")
                 ws.send(nlohmann::json{{"count", ++g_counter}}.dump());
-            } else if (action == "decrement") {
+            else if (action == "decrement")
                 ws.send(nlohmann::json{{"count", --g_counter}}.dump());
-            } else if (action == "reset") {
+            else if (action == "reset") {
                 g_counter = 0;
                 ws.send(nlohmann::json{{"count", 0}}.dump());
             }
@@ -423,7 +566,6 @@ int main() {
 ### Deploying a React / Vue SPA
 
 Serve the compiled frontend and let the client-side router handle all paths.
-The API lives under `/api`; everything else serves `index.html`.
 
 ```cpp
 #include <osodio/osodio.hpp>
@@ -437,18 +579,15 @@ int main() {
     app.use(osodio::helmet());
     app.use(osodio::cors({.origins = {"https://myapp.com"}}));
 
-    // API routes
     auto api = app.group("/api/v1");
     api.use(osodio::jwt_auth("secret"));
     api.get("/me", [](Request& req) -> nlohmann::json {
         return {{"sub", req.jwt_claims.value("sub", "")},
                 {"role", req.jwt_claims.value("role", "")}};
     });
-    // ... more routes
 
-    // SPA fallback: any path not matched above → serve ./dist/index.html
-    // Hashed assets (app.abc123.js) get Cache-Control: immutable for 1 year.
-    // All other files get Cache-Control: max-age=3600, must-revalidate.
+    // SPA fallback: unmatched paths → ./dist/index.html.
+    // Hashed assets (app.abc123.js) → Cache-Control: immutable for 1 year.
     app.serve_static("/", "./dist", /*spa=*/true);
 
     app.run(8080);
@@ -525,29 +664,20 @@ struct Product {
     int         id;
     std::string name;
     double      price;
-    std::optional<std::string> description;  // absent or null → std::nullopt
+    std::optional<std::string> description;
 
     SCHEMA(Product, id, name, price, description)
 
-    // Optional: business-rule validation.
-    // Return one string per error; empty vector → 200, non-empty → 422.
     std::vector<std::string> validate() const {
         std::vector<std::string> errs;
-        if (price <= 0)       errs.push_back("price: must be positive");
-        if (name.empty())     errs.push_back("name: required");
+        if (price <= 0)    errs.push_back("price: must be positive");
+        if (name.empty())  errs.push_back("name: required");
         return errs;
     }
 };
 
-// Usage — no Body<> wrapper needed:
 app.post("/products", [](Product p) -> nlohmann::json {
     return {{"id", p.id}, {"name", p.name}};
-});
-
-// Or use Body<T> when you need to distinguish parse failure from an empty result:
-app.post("/products", [](Body<Product> body, Response& res) {
-    if (!body) co_return;   // response already set to 400/422 by the framework
-    return nlohmann::json{{"id", body->id}};
 });
 ```
 
@@ -563,6 +693,17 @@ res.send("raw body")
 res.header("X-Custom", "value")
 res.render("index.html", data)      // inja Jinja2 template
 res.send_file("/abs/path/to/file")  // zero-copy sendfile(2) for non-TLS
+
+// Cookies
+res.cookie("name", "value");
+res.cookie("session", token, {
+    .path      = "/",
+    .secure    = true,
+    .http_only = true,
+    .same_site = SameSite::Strict,
+    .max_age   = 86400,
+});
+res.clear_cookie("name");           // Set-Cookie with Max-Age=0
 ```
 
 Handlers can return a value instead of writing to `res` — auto-serialized to JSON:
@@ -571,24 +712,42 @@ Handlers can return a value instead of writing to `res` — auto-serialized to J
 app.get("/a", [](Response& res) { res.json({{"x",1}}); });
 app.get("/b", []() { return nlohmann::json{{"x",1}}; });
 app.get("/c", []() -> Task<nlohmann::json> { co_return {{"x",1}}; });
-app.get("/d", []() -> Product { return {1,"widget",9.99}; });  // SCHEMA struct
+app.get("/d", []() -> Product { return {1,"widget",9.99}; });
+```
+
+### Cookies
+
+```cpp
+// Read a cookie from the request (lazy-parsed, O(1) after first call)
+auto session = req.cookie("session");
+if (!session) { /* not set */ }
+
+// SameSite enum: SameSite::Strict | SameSite::Lax | SameSite::None
+// SameSite::None forces Secure=true automatically.
+
+// Write a cookie to the response (multiple cookies, each a Set-Cookie header)
+res.cookie("pref", "dark", {
+    .path      = "/",
+    .domain    = "example.com",
+    .max_age   = 365 * 86400,
+    .secure    = true,
+    .http_only = false,         // JS-readable preference cookie
+    .same_site = SameSite::Lax,
+});
 ```
 
 ### Async & Cancellation
 
 ```cpp
-// sleep() schedules via the thread-local event loop — no req.loop needed.
 app.get("/delayed", []() -> Task<nlohmann::json> {
     co_await sleep(500);
     co_return nlohmann::json{{"done", true}};
 });
 
-// Check cancellation in long-running handlers so they exit when the client disconnects.
 app.get("/poll", [](Request& req) -> Task<nlohmann::json> {
     for (int i = 0; i < 30; ++i) {
         co_await sleep(1000);
         if (req.is_cancelled()) co_return {};
-        // ... poll a queue, check a DB, etc.
     }
     co_return nlohmann::json{{"cycles", 30}};
 });
@@ -601,20 +760,18 @@ app.get("/poll", [](Request& req) -> Task<nlohmann::json> {
 ```cpp
 // Custom middleware
 app.use([](Request& req, Response& res, auto next) -> Task<void> {
-    // Before handler
     co_await next();
-    // After handler (headers not sent yet — safe to add them here)
     res.header("X-Request-ID", "...");
 });
 
 // Built-ins
 app.use(osodio::logger());
-app.use(osodio::logger(std::cerr));   // custom stream
+app.use(osodio::logger(std::cerr));
 
 app.use(osodio::compress());
 app.use(osodio::compress({.min_size = 512, .level = 9, .brotli_quality = 5}));
 
-app.use(osodio::cors());              // allow *
+app.use(osodio::cors());
 app.use(osodio::cors({
     .origins     = {"https://app.example.com"},
     .credentials = true,
@@ -630,9 +787,22 @@ app.use(osodio::helmet({
 app.use(osodio::rate_limit({.requests = 60, .window_seconds = 60}));
 app.use(osodio::rate_limit({
     .requests = 1000,
-    // Key by API key header, falling back to IP
     .key_fn   = [](const Request& r) {
         return r.header("x-api-key").value_or(r.remote_ip);
+    },
+}));
+
+// CSRF — double-submit cookie (requires OSODIO_TLS=ON)
+// No-op for Bearer-token clients (Authorization: header bypasses it).
+// No-op for safe methods (GET, HEAD, OPTIONS, TRACE).
+app.use(osodio::csrf());
+app.use(osodio::csrf({
+    .cookie_name = "csrf_token",
+    .header_name = "x-csrf-token",
+    .cookie_opts = {.secure = true, .same_site = SameSite::Strict},
+    // Skip webhook endpoints that use HMAC signatures instead
+    .skip = [](const Request& r) {
+        return r.path.starts_with("/webhooks/");
     },
 }));
 ```
@@ -642,31 +812,23 @@ app.use(osodio::rate_limit({
 ```cpp
 #include <osodio/jwt.hpp>
 
-// Sign
 auto token = osodio::jwt::sign({
     {"sub",  "user-123"},
     {"role", "admin"},
-    {"exp",  osodio::jwt::expires_in(3600)},  // seconds from now
+    {"exp",  osodio::jwt::expires_in(3600)},
 }, "my-secret");
 
-// Verify — throws osodio::JwtError on any failure
 auto claims = osodio::jwt::verify(token, "my-secret");
 std::string sub = claims.value("sub", "");
 
-// HS256 middleware
 app.use(osodio::jwt_auth("my-secret"));
-
-// RS256 middleware (PEM public key)
 app.use(osodio::jwt_auth_rsa(public_key_pem));
-
-// Skip auth on specific routes
 app.use(osodio::jwt_auth("secret", {
     .skip = [](const Request& req) {
         return req.path == "/auth/login" || req.path == "/health";
     },
 }));
 
-// Claims available in every handler after jwt_auth()
 app.get("/me", [](Request& req) -> nlohmann::json {
     return {{"sub",  req.jwt_claims.value("sub",  "")},
             {"role", req.jwt_claims.value("role", "")}};
@@ -676,13 +838,9 @@ app.get("/me", [](Request& req) -> nlohmann::json {
 ### Dependency Injection
 
 ```cpp
-// Register a singleton — same shared_ptr for every request.
 app.provide(std::make_shared<Database>(conn_str));
-
-// Register a transient — new instance per Inject<T> resolution.
 app.provide<Logger>([] { return std::make_shared<Logger>(); });
 
-// Use in any handler:
 app.get("/users", [](Inject<Database> db, Inject<Logger> log) -> Task<nlohmann::json> {
     log->info("listing users");
     auto rows = co_await db->query("SELECT id, name FROM users");
@@ -693,7 +851,6 @@ app.get("/users", [](Inject<Database> db, Inject<Logger> log) -> Task<nlohmann::
 ### Error Handling
 
 ```cpp
-// Throw from any handler — caught by the framework, serialized to JSON.
 throw osodio::not_found("user not found");        // 404
 throw osodio::bad_request("invalid email");       // 400
 throw osodio::unauthorized("login required");     // 401
@@ -703,12 +860,9 @@ throw osodio::unprocessable("invalid data");      // 422
 throw osodio::too_many_requests("slow down");     // 429
 throw osodio::internal_error("db error");         // 500
 
-// Per-code handlers
 app.on_error(404, [](int, Request& req, Response& res) {
     res.json({{"error","Not Found"},{"path",req.path}});
 });
-
-// Catch-all for any 4xx/5xx
 app.on_error([](int code, Request&, Response& res) {
     res.json({{"error","Something went wrong"},{"code",code}});
 });
@@ -717,68 +871,49 @@ app.on_error([](int code, Request&, Response& res) {
 ### Static Files & SPA
 
 ```cpp
-app.serve_static("/static", "./public");          // prefix → directory
-app.serve_static("/", "./dist", true);            // SPA: unknown paths → index.html
+app.serve_static("/static", "./public");
+app.serve_static("/", "./dist", true);   // SPA: unknown paths → index.html
 
 // ETag + Cache-Control set automatically.
 // Hashed filenames (e.g. main.a1b2c3.js) → immutable for 1 year.
 // All other files                          → max-age=3600, must-revalidate.
 // Unchanged files                          → 304 Not Modified.
 // Non-TLS: sendfile(2) — zero-copy kernel transfer.
+// Dotfiles (.env, .git, .htaccess) → 404, never served.
 ```
 
 ### Server-Sent Events
 
 ```cpp
 app.get("/events", [](Request& req, Response& res) -> Task<void> {
-    auto sse = osodio::make_sse(res, req);   // writes headers immediately
+    auto sse = osodio::make_sse(res, req);
 
     int seq = 0;
     while (sse.is_open()) {
-        sse.send(std::to_string(seq++));                      // data: N\n\n
-        sse.send_event("tick", "payload", "evt-" + std::to_string(seq)); // named + id
-        sse.ping();                                           // keepalive comment
+        sse.send(std::to_string(seq++));
+        sse.send_event("tick", "payload", "evt-" + std::to_string(seq));
+        sse.ping();
         co_await osodio::sleep(1000);
     }
-});
-```
-
-- `is_open()` → false when the client disconnects (via `CancellationToken`)
-- `sleep()` wakes early on disconnect so the loop exits cleanly
-- The browser uses `Last-Event-ID` to resume from the right event after reconnect
-
-### Multipart / File Uploads
-
-```cpp
-app.post("/upload", [](Request& req, Response& res) -> Task<void> {
-    auto parts = osodio::parse_multipart(req);
-    if (!parts) { res.status(400).json({{"error","not multipart"}}); co_return; }
-
-    for (auto& p : *parts) {
-        if (!p.filename.empty()) {
-            // p.name, p.filename, p.content_type, p.body (raw bytes as std::string)
-            std::ofstream f("uploads/" + p.filename, std::ios::binary);
-            f.write(p.body.data(), static_cast<std::streamsize>(p.body.size()));
-        } else {
-            // Text field: p.name, p.body
-        }
-    }
-    res.json({{"uploaded", static_cast<int>(parts->size())}});
 });
 ```
 
 ### WebSockets
 
 ```cpp
+// Basic echo
 app.ws("/chat", [](WSConnection ws) -> Task<void> {
     while (ws.is_open()) {
-        auto msg = co_await ws.recv();   // suspends; resumes on message or disconnect
+        auto msg = co_await ws.recv();
         if (!msg || msg->is_close()) break;
-
         if (msg->is_text())   ws.send("echo: " + msg->data);
         if (msg->is_binary()) ws.send_binary(msg->data.data(), msg->data.size());
     }
-    // ws.close() called automatically when WSConnection is destroyed
+});
+
+// Restrict to known origins (Cross-Site WebSocket Hijacking protection)
+app.ws("/secure-chat", handler, WSOptions{
+    .allowed_origins = {"https://myapp.com", "https://staging.myapp.com"},
 });
 ```
 
@@ -788,12 +923,11 @@ app.ws("/chat", [](WSConnection ws) -> Task<void> {
 // Install: sudo apt install libssl-dev libnghttp2-dev
 // Compile: cmake -DOSODIO_TLS=ON -DOSODIO_HTTP2=ON ...
 
-app.tls("cert.pem", "key.pem");   // must be called before run()
+app.tls("cert.pem", "key.pem");
 app.run(443);
 ```
 
-HTTP/2 is negotiated via ALPN during the TLS handshake. The same handler code
-works for both HTTP/1.1 and HTTP/2 — including SSE and WebSockets.
+HTTP/2 is negotiated via ALPN during the TLS handshake. The same handler code works for both HTTP/1.1 and HTTP/2 — including SSE and WebSockets (RFC 8441).
 
 ---
 
@@ -853,9 +987,11 @@ third_party/
 | `helmet()` — CSP, HSTS, X-Frame-Options, X-Content-Type-Options | ✅ |
 | `rate_limit()` — fixed-window per IP or custom key | ✅ |
 | `jwt_auth()` / `jwt::sign` / `jwt::verify` — HS256 + RS256 | ✅ |
-| Static files — MIME, ETag, 304, sendfile(2), SPA fallback | ✅ |
+| Cookies — `res.cookie()`, `req.cookie()`, `SameSite`, `Secure`, `HttpOnly` | ✅ |
+| CSRF — double-submit cookie, stateless, constant-time comparison | ✅ |
+| Static files — MIME, ETag, 304, sendfile(2), SPA fallback, dotfile blocking | ✅ |
 | SSE — `make_sse()`, named events, ping, auto-disconnect | ✅ |
-| WebSockets — RFC 6455, binary/text, ping/pong, fragmentation | ✅ |
+| WebSockets — RFC 6455, binary/text, ping/pong, fragmentation, origin check | ✅ |
 | Multipart/form-data — `parse_multipart()`, file + text fields | ✅ |
 | HTML templates via inja (Jinja2-compatible) | ✅ |
 | OpenAPI 3.0 + Swagger UI at `/docs` | ✅ |
@@ -865,5 +1001,7 @@ third_party/
 | Graceful shutdown — SIGTERM drains, second signal forces exit | ✅ |
 | HTTPS / TLS via OpenSSL | ✅ |
 | HTTP/2 via nghttp2 with ALPN | ✅ |
+| HTTP/2 WebSockets (RFC 8441) | ✅ |
+| HTTP/2 Rapid Reset mitigation (CVE-2023-44487) | ✅ |
 | Brotli compression | ✅ |
 | Vendored deps — no cmake network access | ✅ |
