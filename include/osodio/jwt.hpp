@@ -250,31 +250,52 @@ inline nlohmann::json verify(const std::string& token,
     try { claims = nlohmann::json::parse(detail::base64url_decode(pay_b64)); }
     catch (...) { throw JwtError("invalid payload"); }
 
-    // Standard claim validation
+    // Standard claim validation.  Every .get<>() is wrapped: a malicious token
+    // with a non-numeric "exp" (e.g. "exp": "abc") would otherwise raise a
+    // nlohmann::json::type_error that escapes verify() and surfaces as 500.
+    // We translate any unexpected claim shape into a clean JwtError → 401.
     using Clock = std::chrono::system_clock;
     auto now = Clock::now().time_since_epoch() / std::chrono::seconds(1);
 
-    if (opts.check_exp && claims.contains("exp")) {
-        if (claims["exp"].get<int64_t>() < now)
-            throw JwtError("token expired");
+    if (opts.check_exp) {
+        if (!claims.contains("exp"))
+            throw JwtError("token has no expiration claim");
+        if (!claims["exp"].is_number())
+            throw JwtError("invalid exp claim");
+        try {
+            if (claims["exp"].get<int64_t>() < now) throw JwtError("token expired");
+        } catch (const JwtError&) { throw; }
+          catch (...)             { throw JwtError("invalid exp claim"); }
     }
     if (opts.check_nbf && claims.contains("nbf")) {
-        if (claims["nbf"].get<int64_t>() > now)
-            throw JwtError("token not yet valid");
+        if (!claims["nbf"].is_number())
+            throw JwtError("invalid nbf claim");
+        try {
+            if (claims["nbf"].get<int64_t>() > now) throw JwtError("token not yet valid");
+        } catch (const JwtError&) { throw; }
+          catch (...)             { throw JwtError("invalid nbf claim"); }
     }
-    if (opts.issuer && claims.value("iss", "") != *opts.issuer)
-        throw JwtError("issuer mismatch");
+    if (opts.issuer) {
+        if (claims.contains("iss") && !claims["iss"].is_string())
+            throw JwtError("invalid iss claim");
+        if (claims.value("iss", "") != *opts.issuer)
+            throw JwtError("issuer mismatch");
+    }
     if (opts.audience) {
-        // "aud" may be a string or an array
+        // "aud" may be a string or an array of strings.
         bool found = false;
         if (claims.contains("aud")) {
-            auto& a = claims["aud"];
-            if (a.is_string())      found = (a.get<std::string>() == *opts.audience);
-            else if (a.is_array()) {
-                for (auto& v : a)
-                    if (v.is_string() && v.get<std::string>() == *opts.audience)
-                        { found = true; break; }
-            }
+            const auto& a = claims["aud"];
+            try {
+                if (a.is_string())      found = (a.get<std::string>() == *opts.audience);
+                else if (a.is_array()) {
+                    for (const auto& v : a)
+                        if (v.is_string() && v.get<std::string>() == *opts.audience)
+                            { found = true; break; }
+                }
+                else throw JwtError("invalid aud claim");
+            } catch (const JwtError&) { throw; }
+              catch (...)             { throw JwtError("invalid aud claim"); }
         }
         if (!found) throw JwtError("audience mismatch");
     }

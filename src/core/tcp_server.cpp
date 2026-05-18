@@ -45,16 +45,24 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
         sockaddr_in6 addr{};
         addr.sin6_family = AF_INET6;
         addr.sin6_port   = htons(port);
-        inet_pton(AF_INET6, host == "::" ? "::" : host.c_str(), &addr.sin6_addr);
+        const char* h = (host == "::") ? "::" : host.c_str();
+        if (inet_pton(AF_INET6, h, &addr.sin6_addr) != 1)
+            throw std::runtime_error("invalid IPv6 host: " + host);
         if (bind(listen_fd_, (sockaddr*)&addr, sizeof(addr)) < 0)
             throw std::runtime_error(std::string("bind: ") + strerror(errno));
     } else {
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port   = htons(port);
-        addr.sin_addr.s_addr = (host == "0.0.0.0")
-            ? INADDR_ANY
-            : inet_addr(host.c_str());
+        if (host == "0.0.0.0") {
+            addr.sin_addr.s_addr = INADDR_ANY;
+        } else {
+            // inet_pton returns 0 for malformed input; inet_addr would silently
+            // accept some malformed strings or return INADDR_NONE, causing a
+            // confusing bind on broadcast/all-ones.
+            if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+                throw std::runtime_error("invalid IPv4 host: " + host);
+        }
         if (bind(listen_fd_, (sockaddr*)&addr, sizeof(addr)) < 0)
             throw std::runtime_error(std::string("bind: ") + strerror(errno));
     }
@@ -96,10 +104,11 @@ void TcpServer::on_accept() {
         if (current >= max_connections_) {
             conn_count_->fetch_sub(1, std::memory_order_relaxed);
             // Write a minimal 503 without allocating an HttpConnection.
+            // Body is exactly 32 bytes — keep Content-Length in sync.
             const char resp[] =
                 "HTTP/1.1 503 Service Unavailable\r\n"
                 "Content-Type: application/json\r\n"
-                "Content-Length: 29\r\n"
+                "Content-Length: 32\r\n"
                 "Connection: close\r\n\r\n"
                 "{\"error\":\"Too many connections\"}";
             (void)::write(client_fd, resp, sizeof(resp) - 1);

@@ -33,11 +33,25 @@ public:
     core::EventLoop* loop = nullptr;
 
     // Raw socket fd — used by res.sse(req) and WebSocket upgrade.
+    // ONLY valid for HTTP/1.1 over plaintext.  For TLS or HTTP/2, this is set
+    // but MUST NOT be used directly for I/O — go through _raw_write / _ws_on_data
+    // instead, which respect the TLS / nghttp2 transport layer.
     int _conn_fd = -1;
 
-    // WebSocket mode: called by HttpConnection::do_read() to feed incoming
-    // bytes into the WSState frame parser.  Set by the ws() upgrade wrapper.
-    std::function<void()> _ws_on_readable;
+    // TLS-aware single write.  Returns bytes written, or -1 with errno set
+    // (EAGAIN when the kernel/TLS buffer is full, EBADF after close, EIO on
+    // a fatal TLS error).  Set by HttpConnection::dispatch() to call either
+    // ::write(fd) or SSL_write(ssl) depending on the transport.  Used by SSE,
+    // the WebSocket handshake, and WS frame writers — these paths bypass the
+    // normal response pipeline so they cannot rely on the connection's
+    // buffered SSL_write loop.
+    std::function<ssize_t(const char*, size_t)> _raw_write;
+
+    // WebSocket mode: called by HttpConnection::do_read() with the bytes it
+    // just decrypted/read from the socket.  Set by the ws() upgrade wrapper to
+    // forward to WSState::feed().  Replacing the older _ws_on_readable (which
+    // did its own ::read) so reads work over TLS too.
+    std::function<void(const char*, size_t)> _ws_on_data;
 
     // Pointer to the service container (set by App::run before dispatch).
     // Non-owning: the App owns the container and outlives all requests.
@@ -134,8 +148,10 @@ private:
                 char buf[3] = {s[i+1], s[i+2], '\0'};
                 char* end;
                 unsigned long v = std::strtoul(buf, &end, 16);
-                if (end == buf + 2) { out += static_cast<char>(v); i += 2; }
-                else                { out += '%'; }
+                if (end == buf + 2) {
+                    if (v != 0) out += static_cast<char>(v);  // reject %00 null bytes
+                    i += 2;
+                } else { out += '%'; }
             } else {
                 out += s[i];
             }

@@ -133,32 +133,71 @@ static bool try_serve_static(
             }
         }
 
-        fs::path file = fs::path(m.root) / rel.substr(1);
-
-        auto canonical_root = fs::weakly_canonical(m.root);
-        auto canonical_file = fs::weakly_canonical(file);
-        auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
-                                      canonical_file.begin());
-        if (ri != canonical_root.end()) {
-            res.status(403).json({{"error", "Forbidden"}});
+        // canonical() for the root resolves any symlinks inside the serve root
+        // itself (e.g. if m.root is itself a symlink to /var/www).  Required
+        // so the mismatch check below compares fully-resolved paths.
+        std::error_code root_ec;
+        auto canonical_root = fs::canonical(m.root, root_ec);
+        if (root_ec) {
+            res.status(500).json({{"error", "Server misconfiguration"}});
             return true;
         }
 
+        fs::path file = canonical_root / rel.substr(1);
+
+        // First pass: weakly_canonical catches ".." traversal even when the
+        // target file does not exist yet (needed for the 404 branch below).
         std::error_code ec;
-        auto status = fs::status(canonical_file, ec);
+        auto preliminary = fs::weakly_canonical(file);
+        {
+            auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
+                                          preliminary.begin());
+            if (ri != canonical_root.end()) {
+                res.status(403).json({{"error", "Forbidden"}});
+                return true;
+            }
+        }
+
+        auto canonical_file = preliminary;
+
+        auto status = fs::status(preliminary, ec);
         if (ec || !fs::is_regular_file(status)) {
             // SPA fallback: serve index.html for unknown paths so client-side
             // routers (React Router, Vue Router, etc.) can handle the URL.
             if (m.spa) {
-                canonical_file = fs::weakly_canonical(fs::path(m.root) / "index.html");
-                auto spa_status = fs::status(canonical_file, ec);
-                if (ec || !fs::is_regular_file(spa_status)) {
+                canonical_file = fs::canonical(canonical_root / "index.html", ec);
+                if (ec || !fs::is_regular_file(fs::status(canonical_file))) {
                     res.status(404).json({{"error", "Not Found"}});
                     return true;
                 }
-                // Continue below with canonical_file = index.html
+                // index.html itself may be a symlink pointing outside the root.
+                // Re-check that the resolved path still lives inside canonical_root
+                // so a misconfigured/compromised dist directory cannot exfiltrate
+                // arbitrary files via the SPA fallback.
+                auto [ri3, fi3] = std::mismatch(canonical_root.begin(),
+                                                 canonical_root.end(),
+                                                 canonical_file.begin());
+                if (ri3 != canonical_root.end()) {
+                    res.status(403).json({{"error", "Forbidden"}});
+                    return true;
+                }
             } else {
                 res.status(404).json({{"error", "Not Found"}});
+                return true;
+            }
+        } else {
+            // File exists: fully resolve symlinks and re-check traversal.
+            // The first pass caught ".." sequences; this pass catches symlinks
+            // that point outside the root (e.g. uploads/evil -> /etc/passwd).
+            canonical_file = fs::canonical(preliminary, ec);
+            if (ec) {
+                res.status(404).json({{"error", "Not Found"}});
+                return true;
+            }
+            auto [ri2, fi2] = std::mismatch(canonical_root.begin(), canonical_root.end(),
+                                             canonical_file.begin());
+            if (ri2 != canonical_root.end()) {
+                res.status(403).json({{"error", "Forbidden"}});
                 return true;
             }
         }

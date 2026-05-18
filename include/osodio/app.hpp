@@ -171,6 +171,13 @@ public:
 
     template<typename F>
     App& ws(std::string path, F&& fn) {
+        // No allowed_origins configured: any website can open a WebSocket
+        // to this endpoint and inherit the user's cookies (CSWSH).
+        // Safe only for unauthenticated / public endpoints.
+        // Suppress this warning with: app.ws(path, fn, {.allowed_origins = {"https://your-app.com"}})
+        std::cerr << "[osodio] ws(\"" << path << "\"): no allowed_origins set — "
+                     "cross-site WebSocket hijacking possible on cookie-authenticated endpoints. "
+                     "Use ws(path, fn, {.allowed_origins = {\"https://your-app.com\"}}) to restrict.\n";
         return ws(std::move(path), std::forward<F>(fn), WSOptions{});
     }
 
@@ -224,10 +231,13 @@ public:
                 co_return;
             }
 
-            if (req._conn_fd < 0) {
-                res.status(500).json({{"error","no fd for WS upgrade"}});
+            if (!req._raw_write) {
+                res.status(500).json({{"error","no raw writer for WS upgrade"}});
                 co_return;
             }
+
+            // Write the handshake through the TLS-aware writer so HTTPS works
+            // identically to plain HTTP.
             std::string hs =
                 "HTTP/1.1 101 Switching Protocols\r\n"
                 "Upgrade: websocket\r\n"
@@ -235,17 +245,41 @@ public:
                 "Sec-WebSocket-Accept: " + detail::ws_accept(*key) + "\r\n\r\n";
             size_t sent = 0;
             while (sent < hs.size()) {
-                ssize_t n = ::write(req._conn_fd, hs.data()+sent, hs.size()-sent);
-                if (n <= 0) co_return;
+                ssize_t n = req._raw_write(hs.data() + sent, hs.size() - sent);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    co_return;
+                }
+                if (n == 0) co_return;
                 sent += static_cast<size_t>(n);
             }
 
             auto ws_state = std::make_shared<detail::WSState>();
-            ws_state->fd    = req._conn_fd;
             ws_state->token = req.cancel_token;
             ws_state->loop  = req.loop;
+            // Outbound frames: best-effort lossy write through the TLS-aware
+            // writer.  EAGAIN/partial writes drop the frame to keep the loop
+            // responsive (matches the prior plaintext behaviour).
+            auto writer = req._raw_write;
+            ws_state->send_fn = [writer](std::string frame) {
+                size_t w = 0;
+                while (w < frame.size()) {
+                    ssize_t n = writer(frame.data() + w, frame.size() - w);
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        return;   // EAGAIN / fatal → drop remainder
+                    }
+                    if (n == 0) return;
+                    w += static_cast<size_t>(n);
+                }
+            };
 
-            req._ws_on_readable = [ws_state]() { ws_state->on_readable(); };
+            // Incoming bytes (decrypted by HttpConnection::do_read) flow here.
+            auto state_weak = std::weak_ptr<detail::WSState>(ws_state);
+            req._ws_on_data = [state_weak](const char* data, size_t len) {
+                if (auto s = state_weak.lock())
+                    s->feed(reinterpret_cast<const uint8_t*>(data), len);
+            };
             res.mark_ws_started();
 
             WSConnection ws_conn(ws_state);

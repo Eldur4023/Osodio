@@ -116,25 +116,43 @@ parse_multipart(const Request& req) {
             std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
             if (key == "content-disposition") {
-                // Extract name="..." and optional filename="..."
+                // Extract name="..." and optional filename="..." — the attribute
+                // must appear as a standalone parameter (preceded by ';' or at the
+                // start of the value).  Without the boundary check, find("name=")
+                // would match the "name=" substring inside "filename=", returning
+                // the filename for part.name.
                 auto extract = [&](const std::string& attr) -> std::string {
-                    std::string needle = attr + "=\"";
-                    auto p = val.find(needle);
-                    if (p == std::string::npos) {
-                        // Also try unquoted: attr=value
-                        needle = attr + "=";
-                        p = val.find(needle);
+                    size_t pos = 0;
+                    while (pos < val.size()) {
+                        auto p = val.find(attr, pos);
                         if (p == std::string::npos) return "";
-                        p += needle.size();
-                        auto q = val.find_first_of("; \r\n", p);
-                        return val.substr(p, q == std::string::npos ? std::string::npos : q - p);
+                        bool at_boundary = (p == 0);
+                        if (!at_boundary) {
+                            size_t b = p;
+                            while (b > 0 && (val[b-1] == ' ' || val[b-1] == '\t')) --b;
+                            if (b > 0 && val[b-1] == ';') at_boundary = true;
+                        }
+                        size_t after = p + attr.size();
+                        if (at_boundary && after < val.size() && val[after] == '=') {
+                            size_t v = after + 1;
+                            if (v < val.size() && val[v] == '"') {
+                                ++v;
+                                auto q = val.find('"', v);
+                                return q == std::string::npos ? "" : val.substr(v, q - v);
+                            }
+                            auto q = val.find_first_of("; \r\n\t", v);
+                            return val.substr(v, q == std::string::npos ? std::string::npos : q - v);
+                        }
+                        pos = p + 1;
                     }
-                    p += needle.size();
-                    auto q = val.find('"', p);
-                    return q == std::string::npos ? "" : val.substr(p, q - p);
+                    return "";
                 };
                 part.name     = extract("name");
                 part.filename = extract("filename");
+                // Strip path separators from filename to prevent directory
+                // traversal if callers use part.filename directly as a save path.
+                for (auto& c : part.filename)
+                    if (c == '/' || c == '\\') c = '_';
             } else if (key == "content-type") {
                 part.content_type = val;
             }

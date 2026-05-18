@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <chrono>
 #include <iostream>
+#include <algorithm>
 
 namespace osodio {
 
@@ -49,8 +50,17 @@ inline std::string build_set_cookie(std::string name, std::string value,
                 ++it;
         }
     };
+    // Path/Domain are concatenated into the Set-Cookie header below.  Without
+    // sanitising them, a handler that passes user input (e.g. tenant-specific
+    // path) could inject arbitrary headers via CR/LF.
+    auto strip_crlf = [](std::string& s) {
+        s.erase(std::remove_if(s.begin(), s.end(),
+            [](char c){ return c == '\r' || c == '\n'; }), s.end());
+    };
     strip(name);
     strip(value);
+    strip_crlf(opts.path);
+    strip_crlf(opts.domain);
 
     // Browsers silently drop SameSite=None without Secure.  Auto-correct so the
     // cookie actually reaches the client.

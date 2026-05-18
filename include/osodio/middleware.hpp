@@ -1,6 +1,7 @@
 #pragma once
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -266,6 +267,32 @@ struct HelmetOptions {
     bool no_sniff   = true;   // X-Content-Type-Options: nosniff
     bool no_iframe  = true;   // X-Frame-Options: SAMEORIGIN
     bool xss_filter = false;  // X-XSS-Protection: 0  (disabled — modern browsers ignore it)
+
+    // Cross-Origin-Opener-Policy: isolates the browsing context from
+    // cross-origin documents, blocking Spectre side-channel attacks and
+    // cross-origin window references via window.opener.
+    // "same-origin" is the safest value.  Set to "" to disable (e.g. if
+    // the app uses cross-origin OAuth pop-ups).
+    std::string coop = "same-origin";
+
+    // Cross-Origin-Embedder-Policy: requires all cross-origin subresources
+    // to opt-in via CORS or CORP.  Needed to enable SharedArrayBuffer /
+    // high-resolution timers.  Defaults to "" (disabled) because enabling
+    // it breaks apps that embed third-party resources without CORS headers.
+    // Set to "require-corp" to opt-in.
+    std::string coep = "";
+
+    // Cross-Origin-Resource-Policy: controls which origins may read this
+    // response in a no-cors fetch.  Set to "" to disable.
+    // "same-origin" — only same-origin reads allowed (safest for APIs).
+    // "same-site"   — allows same-site cross-origin reads.
+    // "cross-origin"— allows any origin to read (equivalent to CORS *).
+    std::string corp = "";
+
+    // Permissions-Policy (Feature-Policy): restricts browser feature access.
+    // Defaults to "" (no policy).  Recommended value for typical apps:
+    //   "camera=(), microphone=(), geolocation=()"
+    std::string permissions_policy = "";
 };
 
 // ─── helmet() ─────────────────────────────────────────────────────────────────
@@ -296,6 +323,14 @@ inline Middleware helmet(HelmetOptions opts = {}) {
     if (!opts.xss_filter)
         hdrs.push_back({"X-XSS-Protection", "0"});
     hdrs.push_back({"Referrer-Policy", "strict-origin-when-cross-origin"});
+    if (!opts.coop.empty())
+        hdrs.push_back({"Cross-Origin-Opener-Policy", opts.coop});
+    if (!opts.coep.empty())
+        hdrs.push_back({"Cross-Origin-Embedder-Policy", opts.coep});
+    if (!opts.corp.empty())
+        hdrs.push_back({"Cross-Origin-Resource-Policy", opts.corp});
+    if (!opts.permissions_policy.empty())
+        hdrs.push_back({"Permissions-Policy", opts.permissions_policy});
 
     return [hdrs = std::move(hdrs)](Request& /*req*/, Response& res, NextFn next) -> Task<void> {
         co_await next();
@@ -374,7 +409,10 @@ inline Middleware rate_limit(RateLimitOptions opts = {}) {
             bucket.window_start = now;
         }
 
-        ++bucket.count;
+        // Saturate at INT_MAX to avoid signed overflow under a sustained flood;
+        // once we're already past `requests` the exact count doesn't matter,
+        // only that the 429 branch keeps firing.
+        if (bucket.count < std::numeric_limits<int>::max()) ++bucket.count;
         res.header("X-RateLimit-Limit",     std::to_string(opts.requests));
         res.header("X-RateLimit-Remaining", std::to_string(
             std::max(0, opts.requests - bucket.count)));

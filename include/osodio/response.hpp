@@ -84,6 +84,10 @@ public:
     }
 
     Response& text(std::string body) {
+        if (state_->body_committed) {
+            std::cerr << "[osodio] Response.text() called after body already committed — ignoring\n";
+            return *this;
+        }
         header("Content-Type", "text/plain; charset=utf-8");
         state_->body = std::move(body);
         state_->body_committed = true;
@@ -91,11 +95,32 @@ public:
     }
 
     Response& html(const std::string& content) {
+        if (state_->body_committed) {
+            std::cerr << "[osodio] Response.html() called after body already committed — ignoring\n";
+            return *this;
+        }
         header("Content-Type", "text/html; charset=utf-8");
         state_->body_committed = true;
         if (is_template_name(content)) {
             namespace fs = std::filesystem;
-            fs::path path = fs::path(state_->templates_dir) / content;
+            // Reject traversal/absolute paths: html("../../etc/passwd.html") would
+            // otherwise read arbitrary files reachable from the templates dir.
+            fs::path requested(content);
+            if (requested.is_absolute()) {
+                state_->status_code = 403;
+                state_->body = R"({"error":"Forbidden"})";
+                state_->headers["Content-Type"] = "application/json; charset=utf-8";
+                return *this;
+            }
+            for (const auto& comp : requested) {
+                if (comp == "..") {
+                    state_->status_code = 403;
+                    state_->body = R"({"error":"Forbidden"})";
+                    state_->headers["Content-Type"] = "application/json; charset=utf-8";
+                    return *this;
+                }
+            }
+            fs::path path = fs::path(state_->templates_dir) / requested;
             std::ifstream f(path, std::ios::binary);
             if (!f) {
                 std::cerr << "[osodio] template not found: " << path.string() << '\n';
@@ -113,6 +138,10 @@ public:
     }
 
     Response& json(const nlohmann::json& j) {
+        if (state_->body_committed) {
+            std::cerr << "[osodio] Response.json() called after body already committed — ignoring\n";
+            return *this;
+        }
         header("Content-Type", "application/json; charset=utf-8");
         state_->body = j.dump();
         state_->body_committed = true;
@@ -120,6 +149,10 @@ public:
     }
 
     Response& send(std::string body) {
+        if (state_->body_committed) {
+            std::cerr << "[osodio] Response.send() called after body already committed — ignoring\n";
+            return *this;
+        }
         state_->body = std::move(body);
         state_->body_committed = true;
         return *this;
@@ -132,6 +165,30 @@ public:
     //
     Response& render(const std::string& template_name,
                      const nlohmann::json& data = {}) {
+        if (state_->body_committed) {
+            std::cerr << "[osodio] Response.render() called after body already committed — ignoring\n";
+            return *this;
+        }
+        // Reject traversal/absolute paths before handing to inja.
+        {
+            std::filesystem::path requested(template_name);
+            if (requested.is_absolute()) {
+                state_->status_code = 403;
+                state_->body = R"({"error":"Forbidden"})";
+                state_->headers["Content-Type"] = "application/json; charset=utf-8";
+                state_->body_committed = true;
+                return *this;
+            }
+            for (const auto& comp : requested) {
+                if (comp == "..") {
+                    state_->status_code = 403;
+                    state_->body = R"({"error":"Forbidden"})";
+                    state_->headers["Content-Type"] = "application/json; charset=utf-8";
+                    state_->body_committed = true;
+                    return *this;
+                }
+            }
+        }
         header("Content-Type", "text/html; charset=utf-8");
         try {
             // One inja::Environment per (thread × templates_dir): templates are
@@ -158,7 +215,21 @@ public:
     // Zero-copy static file: instead of reading the file into the body,
     // record the path and let the connection layer use sendfile(2).
     // Content-Type should be set by the caller before calling send_file().
+    //
+    // WARNING: if `path` is derived from user input, use serve_file_from()
+    // instead — it enforces a root directory and resolves symlinks safely.
     Response& send_file(const std::filesystem::path& path) {
+        // Reject paths with ".." components to prevent directory traversal.
+        // Internal callers (serve_file_from, try_serve_static) pass canonical
+        // paths so this check is a no-op for them.
+        for (const auto& comp : path) {
+            if (comp == "..") {
+                state_->status_code = 403;
+                state_->body = R"({"error":"Forbidden"})";
+                state_->headers["Content-Type"] = "application/json; charset=utf-8";
+                return *this;
+            }
+        }
         std::error_code ec;
         auto sz = std::filesystem::file_size(path, ec);
         if (ec) { state_->status_code = 500; state_->body = "Cannot stat file"; return *this; }
@@ -176,17 +247,34 @@ public:
         return *this;
     }
 
-    // Safe file serving with path-traversal protection.
-    // Resolves root/user_path canonically and rejects anything that escapes root.
-    // Use this instead of send_file() when user_path comes from request input.
+    // Safe file serving with path-traversal and symlink protection.
+    // Fully resolves root/user_path (following all symlinks) and rejects
+    // anything that resolves outside root.  Use this instead of send_file()
+    // when user_path comes from request input.
     //
     //   res.serve_file_from("./uploads", req.param("name").value_or(""));
     //
     Response& serve_file_from(const std::filesystem::path& root,
                                const std::filesystem::path& user_path) {
         namespace fs = std::filesystem;
-        auto canonical_root = fs::weakly_canonical(root);
-        auto canonical_file = fs::weakly_canonical(canonical_root / user_path);
+        std::error_code ec;
+        // canonical() resolves ALL symlinks (unlike weakly_canonical), which
+        // prevents symlink-swap attacks where a symlink inside root points to
+        // a file outside root.
+        auto canonical_root = fs::canonical(root, ec);
+        if (ec) {
+            state_->status_code = 500;
+            state_->body = R"({"error":"Internal Server Error"})";
+            state_->headers["Content-Type"] = "application/json; charset=utf-8";
+            return *this;
+        }
+        auto canonical_file = fs::canonical(canonical_root / user_path, ec);
+        if (ec) {
+            state_->status_code = 404;
+            state_->body = R"({"error":"Not Found"})";
+            state_->headers["Content-Type"] = "application/json; charset=utf-8";
+            return *this;
+        }
         auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
                                        canonical_file.begin());
         if (ri != canonical_root.end()) {

@@ -33,23 +33,25 @@ namespace osodio {
 //
 class SSEWriter {
 public:
-    // HTTP/1.1 path — writes directly to a socket fd.
-    SSEWriter(int fd, std::shared_ptr<CancellationToken> token)
-        : fd_(fd), token_(std::move(token)) {}
+    // HTTP/1.1 path — writes through req._raw_write (TLS-aware) so SSE works
+    // identically over plaintext HTTP/1.1 and HTTPS+HTTP/1.1.
+    SSEWriter(std::function<ssize_t(const char*, size_t)> writer,
+              std::shared_ptr<CancellationToken> token)
+        : writer_(std::move(writer)), token_(std::move(token)) {}
 
     // HTTP/2 path — routes through the nghttp2 DATA frame pipeline.
     SSEWriter(std::shared_ptr<Request::H2SSEContext> ctx,
               std::shared_ptr<CancellationToken>     token)
-        : fd_(-1), token_(std::move(token)), h2_ctx_(std::move(ctx)) {}
+        : token_(std::move(token)), h2_ctx_(std::move(ctx)) {}
 
     // Non-copyable, movable — move clears h2_ctx_ so the destructor
     // doesn't end the stream twice.
     SSEWriter(const SSEWriter&)            = delete;
     SSEWriter& operator=(const SSEWriter&) = delete;
     SSEWriter(SSEWriter&& o) noexcept
-        : fd_(o.fd_), token_(std::move(o.token_)),
+        : writer_(std::move(o.writer_)), token_(std::move(o.token_)),
           h2_ctx_(std::move(o.h2_ctx_)), ended_(o.ended_)
-    { o.fd_ = -1; o.ended_ = true; }
+    { o.ended_ = true; }
     SSEWriter& operator=(SSEWriter&&) = delete;
 
     // On HTTP/2, closing the SSEWriter sends the DATA+END_STREAM frame.
@@ -85,7 +87,7 @@ public:
     bool is_open() const { return token_ && !token_->is_cancelled(); }
 
 private:
-    int  fd_;
+    std::function<ssize_t(const char*, size_t)> writer_;
     std::shared_ptr<CancellationToken>     token_;
     std::shared_ptr<Request::H2SSEContext> h2_ctx_;
     bool ended_ = false;
@@ -131,18 +133,20 @@ private:
             return true;
         }
 
-        // HTTP/1.1 path: write directly to the socket fd.
+        // HTTP/1.1 path: write through the TLS-aware writer.
         // EAGAIN on the first byte → drop this event (no bytes sent yet, stream intact).
         // EAGAIN after a partial write → stream is corrupted; treat as fatal.
+        if (!writer_) return false;
         size_t written = 0;
         while (written < frame.size()) {
-            ssize_t n = ::write(fd_, frame.data() + written, frame.size() - written);
+            ssize_t n = writer_(frame.data() + written, frame.size() - written);
             if (n < 0) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                     return written == 0;  // true=clean drop; false=partial write, close
                 return false;
             }
+            if (n == 0) return false;
             written += static_cast<size_t>(n);
         }
         return true;
@@ -176,18 +180,20 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
     // ── HTTP/1.1 path ─────────────────────────────────────────────────────────
     res.header("Connection", "keep-alive");
 
-    // Build and write headers directly to the socket — bypasses write_buf_
+    // Build and write headers through the TLS-aware writer — bypasses write_buf_
+    // so the headers go out immediately, but still respects TLS framing when
+    // running under HTTPS.
     std::string headers = res.build_sse_headers();
-    if (req._conn_fd >= 0) {
+    if (req._raw_write) {
         size_t written = 0;
         while (written < headers.size()) {
-            ssize_t n = ::write(req._conn_fd,
-                                headers.data() + written,
-                                headers.size() - written);
+            ssize_t n = req._raw_write(headers.data() + written,
+                                       headers.size() - written);
             if (n < 0) {
                 if (errno == EINTR) continue;
                 break;  // connection gone; SSEWriter::is_open() → false
             }
+            if (n == 0) break;
             written += static_cast<size_t>(n);
         }
     }
@@ -195,7 +201,7 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
     // Tell finish_dispatch that headers are already out
     res.mark_sse_started();
 
-    return SSEWriter(req._conn_fd, req.cancel_token);
+    return SSEWriter(req._raw_write, req.cancel_token);
 }
 
 } // namespace osodio

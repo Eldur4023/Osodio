@@ -35,7 +35,9 @@ static std::string url_decode(const std::string& s) {
             char* endptr;
             unsigned long v = std::strtoul(buf, &endptr, 16);
             if (endptr == buf + 2) {
-                out += static_cast<char>(v);
+                // Reject %00 (null byte): it can bypass string comparisons
+                // used for authorization checks (e.g. "\0admin" != "admin").
+                if (v != 0) out += static_cast<char>(v);
                 i += 2;
             } else {
                 out += s[i];  // keep literal '%' for invalid hex sequences
@@ -199,12 +201,6 @@ void HttpConnection::do_tls_handshake() {
 // ── Read path ─────────────────────────────────────────────────────────────────
 
 void HttpConnection::do_read() {
-    // WebSocket mode: delegate all reading to the WS frame parser.
-    if (auto req = current_req_.lock(); req && req->_ws_on_readable) {
-        req->_ws_on_readable();
-        return;
-    }
-
     char buf[16384];
     while (!closed_) {
         ssize_t n;
@@ -229,7 +225,12 @@ void HttpConnection::do_read() {
                 close(); return;
             }
         }
-        if (!parser_.feed(buf, static_cast<size_t>(n))) {
+
+        // WebSocket mode: forward decrypted bytes to the WS frame parser.
+        // Otherwise hand them to the HTTP parser.
+        if (auto req = current_req_.lock(); req && req->_ws_on_data) {
+            req->_ws_on_data(buf, static_cast<size_t>(n));
+        } else if (!parser_.feed(buf, static_cast<size_t>(n))) {
             send_error(400, "Bad Request");
             close();
             return;
@@ -258,6 +259,32 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->loop         = &loop_;
     req_ptr->cancel_token = cancel_token_;
     req_ptr->_conn_fd     = fd_;
+
+    // TLS-aware writer for SSE / WebSocket / any path that needs direct socket
+    // I/O.  Captures `this` via shared_from_this so the SSL* and fd stay valid
+    // for the lifetime of the lambda.  After close(), ssl_ is null and fd_ is
+    // -1, so calls degrade to write(-1) which returns EBADF cleanly.
+    {
+        auto self = shared_from_this();
+        req_ptr->_raw_write = [self](const char* data, size_t len) -> ssize_t {
+            if (self->closed_) { errno = EBADF; return -1; }
+#ifdef OSODIO_HAS_TLS
+            if (self->ssl_) {
+                int n = SSL_write(self->ssl_, data, static_cast<int>(len));
+                if (n > 0) return n;
+                int err = SSL_get_error(self->ssl_, n);
+                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                    errno = EAGAIN;
+                    return -1;
+                }
+                errno = EIO;
+                return -1;
+            }
+#endif
+            return ::write(self->fd_, data, len);
+        };
+    }
+
     parse_query(req_parsed.query, req_ptr->query);
 
     // Keep a weak ref for WebSocket mode — do_read() routes through it.
@@ -564,13 +591,12 @@ void HttpConnection::close() {
     // Signal any suspended coroutines (sleep, ws.recv()) to wake up and exit.
     if (cancel_token_) cancel_token_->cancel();
 
-    // Wake any suspended ws.recv() awaitable directly.
-    if (auto req = current_req_.lock(); req && req->_ws_on_readable) {
-        // _ws_on_readable holds a shared_ptr to WSState; access it via the
-        // lambda's closure.  We notify closed via cancel_token (already done
-        // above via set_wake), but also call notify_closed in case recv_waiter
-        // was registered after the last set_wake.
-        req->_ws_on_readable = nullptr;  // prevent further calls after close
+    // Drop the data callback so no further bytes get dispatched.  The
+    // shared_ptr<WSState> captured inside the closure stays alive via the
+    // running handler coroutine until that coroutine observes the cancellation
+    // and unwinds.
+    if (auto req = current_req_.lock(); req && req->_ws_on_data) {
+        req->_ws_on_data = nullptr;
     }
     current_req_.reset();
 

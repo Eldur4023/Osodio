@@ -86,6 +86,7 @@ private:
         bool                     ws_protocol  = false; // :protocol: websocket seen
         bool                     ws_mode      = false; // begin() called
         std::deque<std::string>  ws_pending;           // outgoing WS frame bytes
+        size_t                   ws_pending_bytes = 0; // total bytes in ws_pending
         bool                     ws_deferred  = false;
         bool                     ws_ended     = false;
         // Feed callback — routes incoming DATA to WSState::feed()
@@ -95,6 +96,7 @@ private:
     std::unordered_map<int32_t, Stream> streams_;
 
     static constexpr size_t kMaxSsePendingBytes = 1 * 1024 * 1024; // 1 MiB per stream
+    static constexpr size_t kMaxWsPendingBytes  = 1 * 1024 * 1024; // 1 MiB per stream
 
     // ── CVE-2023-44487 (HTTP/2 Rapid Reset) defense ─────────────────────────
     // Track streams cancelled by the client before completion within a rolling

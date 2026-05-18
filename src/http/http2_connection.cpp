@@ -27,8 +27,10 @@ static std::string url_decode(const std::string& s) {
             char buf[3] = {s[i+1], s[i+2], '\0'};
             char* end;
             unsigned long v = std::strtoul(buf, &end, 16);
-            if (end == buf + 2) { out += static_cast<char>(v); i += 2; }
-            else                { out += '%'; }
+            if (end == buf + 2) {
+                if (v != 0) out += static_cast<char>(v);  // reject %00 null bytes
+                i += 2;
+            } else { out += '%'; }
         } else if (s[i] == '+') {
             out += ' ';
         } else {
@@ -447,7 +449,7 @@ void Http2Connection::h2_begin_sse(int32_t stream_id, const osodio::Response& re
             size_t n = std::min(chunk.size(), len - written);
             std::memcpy(buf + written, chunk.data(), n);
             written += n;
-            s.sse_pending_bytes -= n;
+            s.sse_pending_bytes = (s.sse_pending_bytes > n) ? s.sse_pending_bytes - n : 0;
             if (n == chunk.size()) {
                 s.sse_pending.pop_front();
             } else {
@@ -561,6 +563,7 @@ void Http2Connection::h2_begin_ws(int32_t stream_id,
             size_t n = std::min(chunk.size(), len - written);
             std::memcpy(buf + written, chunk.data(), n);
             written += n;
+            s.ws_pending_bytes = (s.ws_pending_bytes > n) ? s.ws_pending_bytes - n : 0;
             if (n == chunk.size()) {
                 s.ws_pending.pop_front();
             } else {
@@ -579,15 +582,30 @@ void Http2Connection::h2_begin_ws(int32_t stream_id,
 }
 
 // h2_push_ws — enqueue outgoing WS frame bytes and resume the data provider.
+// Drops the frame and cancels the stream if the queue exceeds kMaxWsPendingBytes:
+// a slow client could otherwise grow the buffer indefinitely.
 void Http2Connection::h2_push_ws(int32_t stream_id, std::string frame) {
     if (closed_) return;
     auto it = streams_.find(stream_id);
     if (it == streams_.end() || !it->second.ws_mode) return;
 
-    it->second.ws_pending.push_back(std::move(frame));
+    auto& s = it->second;
+    if (s.ws_pending_bytes + frame.size() > kMaxWsPendingBytes) {
+        if (s.cancel_token) s.cancel_token->cancel();
+        s.ws_ended = true;
+        if (s.ws_deferred) {
+            s.ws_deferred = false;
+            nghttp2_session_resume_data(session_, stream_id);
+        }
+        flush();
+        return;
+    }
 
-    if (it->second.ws_deferred) {
-        it->second.ws_deferred = false;
+    s.ws_pending_bytes += frame.size();
+    s.ws_pending.push_back(std::move(frame));
+
+    if (s.ws_deferred) {
+        s.ws_deferred = false;
         nghttp2_session_resume_data(session_, stream_id);
     }
     flush();

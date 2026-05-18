@@ -332,9 +332,14 @@ struct extractor<Inject<T>> {
         }
         auto ptr = req.container->template resolve<T>();
         if (!ptr) {
-            // Do not expose typeid(T).name() — it reveals internal class names.
-            std::cerr << "[osodio] Inject<T>: service not registered: "
-                      << typeid(T).name() << '\n';
+            // The previous version logged typeid(T).name() to stderr "for
+            // debugging" while the response body said only "Service not
+            // registered" — that leaks the demangled class name to anyone
+            // with stderr access (e.g. shared log pipelines).  Keep the log
+            // generic; the developer who registered the route can identify T
+            // from the request path.
+            std::cerr << "[osodio] Inject<T>: service not registered for "
+                      << req.method << ' ' << req.path << '\n';
             res.status(500).json({{"error", "Service not registered"}});
             return {};
         }

@@ -4,6 +4,7 @@
 #include <optional>
 #include <algorithm>
 #include <type_traits>
+#include <cstdio>
 #include <nlohmann/json.hpp>
 #include "handler_traits.hpp"  // PathParam, Body, Query, fixed_string, is_task
 #if __cpp_reflection
@@ -293,6 +294,32 @@ inline nlohmann::json build_openapi_doc(
 // For air-gapped deployments: embed swagger-ui-dist assets instead.
 
 inline std::string swagger_ui_html(const std::string& spec_url = "/openapi.json") {
+    // Defence-in-depth: spec_url is normally a hard-coded route, but any path
+    // that ends up here gets escaped as a JS string literal so a misconfigured
+    // caller (e.g. enable_docs(req.query["x"])) cannot inject script.
+    std::string escaped;
+    escaped.reserve(spec_url.size() + 8);
+    for (char c : spec_url) {
+        switch (c) {
+            case '\\': escaped += "\\\\"; break;
+            case '"':  escaped += "\\\""; break;
+            case '\'': escaped += "\\u0027"; break;
+            case '<':  escaped += "\\u003c"; break;
+            case '>':  escaped += "\\u003e"; break;
+            case '&':  escaped += "\\u0026"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\n': escaped += "\\n"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char b[8];
+                    std::snprintf(b, sizeof(b), "\\u%04x", c);
+                    escaped += b;
+                } else {
+                    escaped += c;
+                }
+        }
+    }
+
     return R"(<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -306,7 +333,7 @@ inline std::string swagger_ui_html(const std::string& spec_url = "/openapi.json"
   <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
   <script>
     SwaggerUIBundle({
-      url: ")" + spec_url + R"(",
+      url: ")" + escaped + R"(",
       dom_id: '#swagger-ui',
       deepLinking: true,
       presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
