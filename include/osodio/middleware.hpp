@@ -1,5 +1,7 @@
 #pragma once
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -376,20 +378,30 @@ inline Middleware rate_limit(RateLimitOptions opts = {}) {
         opts.key_fn ? opts.key_fn
                     : [](const Request& r) { return r.remote_ip; };
 
-    // State is thread_local: each worker thread has independent counters.
-    // With N threads, effective per-IP rate ≈ opts.requests × N.
-    // This avoids cross-thread locking and is idiomatic for SO_REUSEPORT servers.
+    // Per-thread state, ISOLATED per rate_limit() instance.  A thread_local
+    // declared inside the closure body would be shared across every call to
+    // rate_limit() (same lambda body → same thread_local), so configuring
+    // limits for /api and /auth separately would merge their quotas.  We key
+    // the thread_local map by a unique instance id assigned at construction.
+    static std::atomic<uint64_t> g_next_instance_id{0};
+    const uint64_t instance_id = g_next_instance_id.fetch_add(1,
+                                      std::memory_order_relaxed);
+
     static constexpr size_t kMaxBuckets = 10'000;
 
-    return [opts, key_fn](Request& req, Response& res, NextFn next) -> Task<void> {
+    return [opts, key_fn, instance_id](Request& req, Response& res,
+                                        NextFn next) -> Task<void> {
         using Seconds = std::chrono::seconds;
-        thread_local std::unordered_map<std::string, Bucket> state;
+        // Outer key = rate_limit instance, inner key = caller-supplied key.
+        // With SO_REUSEPORT each worker thread has its own state — effective
+        // per-IP rate ≈ opts.requests × num_threads.
+        thread_local std::unordered_map<uint64_t,
+                          std::unordered_map<std::string, Bucket>> all_state;
+        auto& state = all_state[instance_id];
 
         auto now = Clock::now();
 
         // Evict expired buckets when the map grows large.
-        // Without this, a botnet cycling through many source IPs causes
-        // unbounded memory growth — one bucket per unique IP, never freed.
         if (state.size() > kMaxBuckets) {
             auto window = std::chrono::seconds(opts.window_seconds);
             for (auto it = state.begin(); it != state.end(); ) {

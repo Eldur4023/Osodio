@@ -112,7 +112,13 @@ parse_multipart(const Request& req) {
             auto colon = hline.find(':');
             if (colon == std::string::npos) continue;
             std::string key = hline.substr(0, colon);
-            std::string val = (colon + 2 <= hline.size()) ? hline.substr(colon + 2) : "";
+            // Skip RFC 7230 OWS (optional whitespace) after ':'.  The previous
+            // version hard-coded ": " and lost the first byte when a sender
+            // wrote "Content-Type:image/png" with no space.
+            size_t vstart = colon + 1;
+            while (vstart < hline.size() && (hline[vstart] == ' ' || hline[vstart] == '\t'))
+                ++vstart;
+            std::string val = hline.substr(vstart);
             std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
             if (key == "content-disposition") {

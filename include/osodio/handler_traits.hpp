@@ -262,7 +262,17 @@ T parse_scalar(const std::string& s) {
     else if constexpr (std::is_same_v<T, long>)   { result = std::stol(s, &pos); }
     else if constexpr (std::is_same_v<T, float>)  { result = std::stof(s, &pos); }
     else if constexpr (std::is_same_v<T, double>) { result = std::stod(s, &pos); }
-    else if constexpr (std::is_same_v<T, bool>)   { return s == "true" || s == "1"; }
+    else if constexpr (std::is_same_v<T, bool>)   {
+        // Accept "1", "true", "TRUE", "True", … so ?flag=True works the same
+        // way browsers and most frameworks treat boolean query params.
+        if (s == "1") return true;
+        if (s.size() == 4) {
+            char a = s[0], b = s[1], c = s[2], d = s[3];
+            if ((a == 't' || a == 'T') && (b == 'r' || b == 'R')
+             && (c == 'u' || c == 'U') && (d == 'e' || d == 'E')) return true;
+        }
+        return false;
+    }
     else if constexpr (std::is_same_v<T, std::string>) { return s; }
     else return T{};
     if (pos != s.size()) throw std::invalid_argument("trailing characters");

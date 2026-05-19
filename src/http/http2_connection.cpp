@@ -342,6 +342,14 @@ void Http2Connection::finish_stream(int32_t stream_id, const osodio::Response& r
     stream.body_src = std::make_unique<BodySrc>();
 
     if (!res.sendfile_path().empty()) {
+        // HTTP/2 over TLS can't use sendfile(2), so the file has to live in
+        // userspace.  Cap the in-memory copy so a multi-GB static asset (or a
+        // misconfigured route) can't blow up the process per concurrent client.
+        if (res.sendfile_size() > kMaxStreamBodyBytes) {
+            nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE,
+                                      stream_id, NGHTTP2_INTERNAL_ERROR);
+            flush(); return;
+        }
         std::ifstream f(res.sendfile_path(), std::ios::binary);
         if (!f) {
             nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE,
@@ -349,6 +357,12 @@ void Http2Connection::finish_stream(int32_t stream_id, const osodio::Response& r
             flush(); return;
         }
         stream.body_src->data.assign((std::istreambuf_iterator<char>(f)), {});
+        if (stream.body_src->data.size() > kMaxStreamBodyBytes) {
+            // File grew between stat and read — bail rather than ship.
+            nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE,
+                                      stream_id, NGHTTP2_INTERNAL_ERROR);
+            flush(); return;
+        }
     } else {
         stream.body_src->data = res.body();
     }
@@ -682,6 +696,19 @@ int Http2Connection::on_header_cb(nghttp2_session*,
 
     std::string n(reinterpret_cast<const char*>(name),  namelen);
     std::string v(reinterpret_cast<const char*>(value), valuelen);
+
+    // Reject control characters in pseudo-headers and any HEADERS field.
+    // nghttp2 validates HPACK framing but lets through CR/LF/NUL/0x7F, which
+    // would let an attacker smuggle log lines or downstream header injection
+    // into anything that re-emits req.path / req.headers["host"].
+    auto has_ctl = [](const std::string& s) {
+        for (unsigned char c : s) {
+            if (c == 0 || c == '\r' || c == '\n' || c == 0x7F) return true;
+        }
+        return false;
+    };
+    if (has_ctl(n) || has_ctl(v))
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
 
     auto& s = it->second;
     if      (n == ":method")    s.method    = std::move(v);

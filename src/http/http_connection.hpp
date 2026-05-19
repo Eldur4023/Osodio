@@ -60,6 +60,17 @@ private:
     size_t      write_offset_ = 0;
     bool        keep_alive_   = false;  // stored here so on_write_complete can act
 
+    // ── Pipelining serialisation ─────────────────────────────────────────────
+    // While a request's response is being produced and written, no second
+    // dispatch may run on the same connection (write_buf_ is shared, timers
+    // are per-connection).  The parser is paused on each message_complete;
+    // any trailing bytes that arrived in the same TCP segment are saved here
+    // and replayed in on_write_complete once the previous response is out.
+    // pending_buf_ is capped to bound memory under a buggy/abusive pipeliner.
+    std::string                pending_buf_;
+    bool                       in_flight_ = false;
+    static constexpr size_t    kMaxPendingBuf = 64 * 1024;  // 64 KB pipelined
+
     // ── Timeouts ──────────────────────────────────────────────────────────────
     // kHeaderTimeoutMs: armed at construction; fires 408 if complete headers are
     //   not received within this window (Slowloris defence).

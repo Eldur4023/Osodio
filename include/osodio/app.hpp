@@ -226,8 +226,48 @@ public:
             // ── HTTP/1.1 path (RFC 6455 — 101 Switching Protocols) ───────────
             auto upgrade = req.header("upgrade");
             auto key     = req.header("sec-websocket-key");
-            if (!upgrade || upgrade->find("websocket") == std::string::npos || !key) {
-                res.status(426).json({{"error","WebSocket upgrade required"}});
+
+            // Token-level match for Upgrade (RFC 7230 §3.2.6): split on ',',
+            // trim, compare case-insensitively.  A substring search would
+            // accept "notwebsocket" and reject "WebSocket".
+            auto has_websocket_token = [](const std::string& h) {
+                size_t pos = 0;
+                while (pos < h.size()) {
+                    size_t comma = h.find(',', pos);
+                    size_t end = (comma == std::string::npos) ? h.size() : comma;
+                    size_t a = pos, b = end;
+                    while (a < b && (h[a] == ' ' || h[a] == '\t')) ++a;
+                    while (b > a && (h[b-1] == ' ' || h[b-1] == '\t')) --b;
+                    if (b - a == 9) {
+                        bool eq = true;
+                        static const char kWs[] = "websocket";
+                        for (size_t i = 0; i < 9; ++i) {
+                            char c = h[a + i];
+                            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+                            if (c != kWs[i]) { eq = false; break; }
+                        }
+                        if (eq) return true;
+                    }
+                    if (comma == std::string::npos) break;
+                    pos = comma + 1;
+                }
+                return false;
+            };
+
+            if (!upgrade || !has_websocket_token(*upgrade) || !key) {
+                res.status(426)
+                   .header("Sec-WebSocket-Version", "13")
+                   .json({{"error","WebSocket upgrade required"}});
+                co_return;
+            }
+
+            // RFC 6455 §4.1: Sec-WebSocket-Version MUST be 13.  Reject other
+            // drafts with 426 + the version header so the client can retry.
+            auto ws_ver = req.header("sec-websocket-version");
+            if (!ws_ver || *ws_ver != "13") {
+                res.status(426)
+                   .header("Sec-WebSocket-Version", "13")
+                   .json({{"error","Unsupported WebSocket version"}});
                 co_return;
             }
 

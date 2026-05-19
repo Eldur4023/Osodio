@@ -124,7 +124,10 @@ static int cb_on_message_complete(llhttp_t* p) {
     c->current      = {};
     c->header_count = 0;
 
-    return HPE_OK;
+    // Pause so the connection layer can serialise pipelined requests: the
+    // bytes that follow this message stay in the caller's buffer until the
+    // current response is on the wire.
+    return HPE_PAUSED;
 }
 
 // ── HttpParser ─────────────────────────────────────────────────────────────
@@ -153,8 +156,29 @@ HttpParser::~HttpParser() = default;
 
 bool HttpParser::feed(const char* data, size_t len) {
     if (ctx_->error) return false;
-    llhttp_errno_t err = llhttp_execute(parser_.get(), data, static_cast<size_t>(len));
-    return (err == HPE_OK) && !ctx_->error;
+    last_data_ = data;
+    last_len_  = len;
+    llhttp_errno_t err = llhttp_execute(parser_.get(), data, len);
+    if (err == HPE_OK)     return !ctx_->error;
+    if (err == HPE_PAUSED) return true;   // request completed → paused for serialisation
+    return false;
+}
+
+bool HttpParser::is_paused() const {
+    return llhttp_get_errno(parser_.get()) == HPE_PAUSED;
+}
+
+size_t HttpParser::unconsumed() const {
+    if (!is_paused() || !last_data_) return 0;
+    const char* pos = llhttp_get_error_pos(parser_.get());
+    if (pos == nullptr || pos < last_data_ || pos > last_data_ + last_len_) return 0;
+    return last_len_ - static_cast<size_t>(pos - last_data_);
+}
+
+void HttpParser::resume() {
+    if (is_paused()) llhttp_resume(parser_.get());
+    last_data_ = nullptr;
+    last_len_  = 0;
 }
 
 void HttpParser::reset() {
@@ -164,6 +188,8 @@ void HttpParser::reset() {
     ctx_->value_pending = false;
     ctx_->header_count  = 0;
     ctx_->error         = false;
+    last_data_ = nullptr;
+    last_len_  = 0;
     llhttp_reset(parser_.get());
 }
 

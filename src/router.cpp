@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 namespace osodio {
@@ -47,7 +48,17 @@ std::string Router::normalize_pattern(const std::string& p) {
         if (p[i] == '{') {
             out += ':';
             ++i;
-            while (i < p.size() && p[i] != '}') out += p[i++];
+            bool closed = false;
+            while (i < p.size()) {
+                if (p[i] == '}') { closed = true; break; }
+                out += p[i++];
+            }
+            if (!closed) {
+                // Unclosed brace: the pattern is malformed.  Better to fail
+                // loudly at registration than silently match weird URLs.
+                throw std::invalid_argument(
+                    "osodio::Router: unterminated '{' in pattern: " + p);
+            }
         } else {
             out += p[i];
         }

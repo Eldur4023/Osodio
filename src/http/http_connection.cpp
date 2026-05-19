@@ -227,13 +227,42 @@ void HttpConnection::do_read() {
         }
 
         // WebSocket mode: forward decrypted bytes to the WS frame parser.
-        // Otherwise hand them to the HTTP parser.
         if (auto req = current_req_.lock(); req && req->_ws_on_data) {
             req->_ws_on_data(buf, static_cast<size_t>(n));
-        } else if (!parser_.feed(buf, static_cast<size_t>(n))) {
+            continue;
+        }
+
+        // Pipelining: while a previous request is in flight the parser is
+        // paused.  Buffer the bytes; on_write_complete replays them once the
+        // current response has been written.
+        if (in_flight_ || parser_.is_paused()) {
+            if (pending_buf_.size() + static_cast<size_t>(n) > kMaxPendingBuf) {
+                send_error(400, "Pipelined request too large");
+                close();
+                return;
+            }
+            pending_buf_.append(buf, static_cast<size_t>(n));
+            continue;
+        }
+
+        if (!parser_.feed(buf, static_cast<size_t>(n))) {
             send_error(400, "Bad Request");
             close();
             return;
+        }
+
+        // Parser pauses after each completed message — save any trailing
+        // bytes that belong to the next pipelined request.
+        if (parser_.is_paused()) {
+            size_t un = parser_.unconsumed();
+            if (un > 0) {
+                if (un > kMaxPendingBuf) {
+                    send_error(400, "Pipelined request too large");
+                    close();
+                    return;
+                }
+                pending_buf_.append(buf + static_cast<size_t>(n) - un, un);
+            }
         }
     }
 }
@@ -241,6 +270,11 @@ void HttpConnection::do_read() {
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 void HttpConnection::dispatch(ParsedRequest req_parsed) {
+    // Mark the connection as busy until on_write_complete fires.  do_read()
+    // will buffer further bytes rather than starting a second dispatch that
+    // would race for write_buf_ / timeout_tfd_.
+    in_flight_ = true;
+
     // Fresh cancellation token for this request.
     cancel_token_ = std::make_shared<osodio::CancellationToken>();
 
@@ -549,10 +583,41 @@ void HttpConnection::on_write_complete() {
     // Cancel the request timeout — response delivered successfully
     loop_.cancel_timer(timeout_tfd_);
     timeout_tfd_ = -1;
+    in_flight_ = false;
 
     if (!keep_alive_) {
         close();
         return;
+    }
+
+    // Pipelining: drain any buffered bytes that belong to the next request.
+    // Resume the parser, feed the saved bytes, and let the resulting dispatch
+    // start a fresh response cycle.  We deliberately avoid re-arming EPOLLIN
+    // here when a new dispatch fires — the next on_write_complete will do it.
+    if (parser_.is_paused()) parser_.resume();
+    if (!pending_buf_.empty()) {
+        std::string buf;
+        buf.swap(pending_buf_);
+        if (!parser_.feed(buf.data(), buf.size())) {
+            send_error(400, "Bad Request");
+            close();
+            return;
+        }
+        if (parser_.is_paused()) {
+            size_t un = parser_.unconsumed();
+            if (un > 0) {
+                if (un > kMaxPendingBuf) {
+                    send_error(400, "Pipelined request too large");
+                    close();
+                    return;
+                }
+                pending_buf_.assign(buf.data() + buf.size() - un, un);
+            }
+        }
+        // dispatch() inside feed() flipped in_flight_ back on; defer the
+        // EPOLLIN re-arm and the Slowloris timer until that request's write
+        // completes.
+        if (in_flight_) return;
     }
 
     // Re-arm the header timeout for the next pipelined/keep-alive request.

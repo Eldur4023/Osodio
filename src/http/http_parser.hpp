@@ -31,6 +31,13 @@ inline constexpr size_t kMaxHeaderCount =  100;
 inline constexpr size_t kMaxBodySize    = 16 * 1024 * 1024; // 16 MB
 
 // Incremental HTTP/1.1 request parser backed by llhttp.
+//
+// Pipelining serialization: when a request completes mid-buffer, the parser
+// pauses (returns from feed()).  unconsumed() then reports how many trailing
+// bytes belong to the next request.  The connection layer buffers them and
+// calls resume() + feed() once the current response is fully sent.  Without
+// this, two pipelined requests on the same TCP segment would race for the
+// connection's write buffer.
 class HttpParser {
 public:
     using OnComplete = std::function<void(ParsedRequest)>;
@@ -41,7 +48,19 @@ public:
     ~HttpParser();
 
     // Returns false on a parse error (caller should close the connection).
+    // After a successful completed request the parser is left in paused state;
+    // call resume() before feeding more bytes.
     bool feed(const char* data, size_t len);
+
+    // True if the most recent feed() stopped because a request completed.
+    bool is_paused() const;
+
+    // Bytes from the most recent feed() that the parser did NOT consume.
+    // Only meaningful while paused — they belong to the next pipelined request.
+    size_t unconsumed() const;
+
+    // Resume after a pause.  Safe to call when not paused.
+    void resume();
 
     void reset();
 
@@ -50,6 +69,11 @@ private:
     std::unique_ptr<ParseContext>    ctx_;
     std::unique_ptr<llhttp_t>        parser_;
     std::unique_ptr<llhttp_settings_t> settings_;
+
+    // Last buffer passed to feed(); used to compute unconsumed() via the
+    // llhttp_get_error_pos pointer.
+    const char* last_data_ = nullptr;
+    size_t      last_len_  = 0;
 };
 
 } // namespace osodio::http

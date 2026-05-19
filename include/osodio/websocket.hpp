@@ -201,7 +201,16 @@ struct WSState {
             size_t   hdr = 2;
             uint64_t payload_len;
             if      (len7 == 126) { if (read_buf.size()<4)  break; payload_len=(uint8_t(p[2])<<8)|uint8_t(p[3]); hdr+=2; }
-            else if (len7 == 127) { if (read_buf.size()<10) break; payload_len=0; for(int i=0;i<8;++i) payload_len=(payload_len<<8)|p[2+i]; hdr+=8; }
+            else if (len7 == 127) {
+                if (read_buf.size()<10) break;
+                payload_len=0;
+                for(int i=0;i<8;++i) payload_len=(payload_len<<8)|p[2+i];
+                hdr+=8;
+                // RFC 6455 §5.2: the most significant bit of the 64-bit length
+                // MUST be 0.  Fail the connection cleanly rather than rely on
+                // the 16 MB cap to mop up the resulting nonsense.
+                if (payload_len & (uint64_t(1) << 63)) { fail_close(1002); return; }
+            }
             else                  { payload_len = len7; }
 
             // RFC 6455 §5.5: control frames MUST NOT be fragmented and MUST

@@ -100,7 +100,16 @@ static std::string url_decode_path(const std::string& s) {
             char buf[3] = {s[i+1], s[i+2], '\0'};
             char* end;
             unsigned long v = std::strtoul(buf, &end, 16);
-            if (end == buf + 2) { out += static_cast<char>(v); i += 2; continue; }
+            if (end == buf + 2) {
+                // Drop %00: it truncates POSIX path operations after
+                // canonicalisation, creating a mismatch between what auth
+                // middlewares see (decoded path) and what the filesystem
+                // resolves (truncated at NUL).  Matches the HTTP-level
+                // url_decode() in http_connection.cpp.
+                if (v != 0) out += static_cast<char>(v);
+                i += 2;
+                continue;
+            }
         }
         out += s[i];
     }
@@ -521,6 +530,13 @@ void App::run(const std::string& host, uint16_t port) {
     main_loop.run();
 
     for (auto& t : threads) t.join();
+
+    // Restore default signal disposition BEFORE closing the pipe.  Otherwise
+    // a stray SIGINT/SIGTERM between the close and the SIG_DFL reset would
+    // run signal_handler with g_signal_pipe[1] either invalid or already
+    // reassigned to an unrelated fd opened in another thread.
+    std::signal(SIGINT,  SIG_DFL);
+    std::signal(SIGTERM, SIG_DFL);
 
     Metrics::instance().active_connections_ = nullptr;
     g_initiate_drain = nullptr;
