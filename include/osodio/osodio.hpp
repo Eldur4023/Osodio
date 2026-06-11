@@ -4,6 +4,7 @@
 // #include <osodio/osodio.hpp>  — that's all you need.
 
 #include "cancel.hpp"
+#include "logger.hpp"
 #include "types.hpp"
 #include "task.hpp"
 #include "cookies.hpp"

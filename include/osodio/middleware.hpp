@@ -16,35 +16,76 @@
 #include "request.hpp"
 #include "response.hpp"
 #include "task.hpp"
+#include "logger.hpp"
 
 namespace osodio {
 
 // ─── logger() ─────────────────────────────────────────────────────────────────
 //
-// Logs every request with method, path, status code, and duration in ms.
-// Because it co_awaits next(), it measures the FULL handler + middleware time
-// (including async handlers).
+// Logs every request with method, path, status code, and duration through the
+// global Logger (see logger.hpp — configure file output and the performance
+// report there). Because it co_awaits next(), it measures the FULL handler +
+// middleware time (including async handlers). It also feeds the request
+// counters behind the performance report.
 //
 //   app.use(osodio::logger());
 //
-// Optional: supply a custom output stream.
-inline Middleware logger(std::ostream* out = &std::cout) {
-    return [out](Request& req, Response& res, NextFn next) -> Task<void> {
+inline Middleware logger() {
+    return [](Request& req, Response& res, NextFn next) -> Task<void> {
         using Clock = std::chrono::steady_clock;
+        auto& lg = Logger::instance();
+        lg.request_started();
         auto t0 = Clock::now();
 
-        co_await next();
-
-        if (!out) co_return;
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      Clock::now() - t0).count();
-        *out << req.method << ' ' << req.path
-             << " -> " << res.status_code()
-             << " (" << ms << " ms)\n";
+        auto elapsed_us = [&t0] {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                       Clock::now() - t0).count();
+        };
+        try {
+            co_await next();
+        } catch (...) {
+            // Keep the in-flight gauge balanced; the framework's error
+            // handling upstream produces the actual 500 response.
+            auto us = elapsed_us();
+            lg.request_finished(500, us);
+            lg.error(req.method, ' ', req.path, " threw after ",
+                     us / 1000, " ms");
+            throw;
+        }
+        auto us = elapsed_us();
+        lg.request_finished(res.status_code(), us);
+        lg.info(req.method, ' ', req.path, " -> ", res.status_code(),
+                " (", us / 1000, " ms)");
     };
 }
 
-// Reference overload for backward compatibility — still captures by pointer.
+// Legacy overloads: log to a caller-supplied stream instead of the global
+// Logger. Still feed the performance counters so the report stays accurate.
+inline Middleware logger(std::ostream* out) {
+    return [out](Request& req, Response& res, NextFn next) -> Task<void> {
+        using Clock = std::chrono::steady_clock;
+        Logger::instance().request_started();
+        auto t0 = Clock::now();
+
+        try {
+            co_await next();
+        } catch (...) {
+            Logger::instance().request_finished(
+                500, std::chrono::duration_cast<std::chrono::microseconds>(
+                         Clock::now() - t0).count());
+            throw;
+        }
+
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      Clock::now() - t0).count();
+        Logger::instance().request_finished(res.status_code(), us);
+        if (!out) co_return;
+        *out << req.method << ' ' << req.path
+             << " -> " << res.status_code()
+             << " (" << us / 1000 << " ms)\n";
+    };
+}
+
 inline Middleware logger(std::ostream& out) { return logger(&out); }
 
 // ─── CorsOptions ──────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 #include "../include/osodio/app.hpp"
+#include "../include/osodio/logger.hpp"
 #include "../include/osodio/metrics.hpp"
 #ifdef OSODIO_HAS_TLS
 #  include <openssl/ssl.h>
@@ -462,10 +463,10 @@ void App::run(const std::string& host, uint16_t port) {
 
                 if (remaining == 0 || timed_out) {
                     if (timed_out && remaining > 0)
-                        std::cout << "Grace period expired — " << remaining
-                                  << " connection(s) dropped.\n";
+                        log().warn("shutdown: grace period expired — ",
+                                   remaining, " connection(s) dropped");
                     else
-                        std::cout << "All connections drained.\n";
+                        log().info("shutdown: all connections drained");
                     std::lock_guard<std::mutex> lk(all_mutex);
                     for (auto* l : all_loops) l->stop();
                     return;
@@ -524,8 +525,8 @@ void App::run(const std::string& host, uint16_t port) {
     }
 
     const char* scheme = ssl_ctx ? "https" : "http";
-    std::cout << " * Osodio running on " << scheme << "://" << host << ":" << port
-              << "  (threads=" << num_threads << ", press CTRL+C to quit)\n";
+    log().info("Osodio running on ", scheme, "://", host, ':', port,
+               " (threads=", num_threads, ", press CTRL+C to quit)");
 
     main_loop.run();
 

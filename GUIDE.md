@@ -597,13 +597,46 @@ app.use([](Request& req, Response& res, NextFn next) -> Task<void> {
 
 ### logger()
 
-Logs every request to stdout: method, path, status, duration.
+Logs every request through the global logger: method, path, status, duration.
 
 ```cpp
 app.use(osodio::logger());
 ```
 
-Output format: `GET /users 200 1.2ms`
+Output format: `2026-06-11 10:20:22.912 INFO  GET /users -> 200 (1 ms)`
+
+The global logger (`osodio::log()`) is general-purpose — use it anywhere in
+your app, not just for HTTP:
+
+```cpp
+osodio::log().info("cache warmed, ", n, " entries");
+osodio::log().warn("retrying payment provider, attempt ", attempt);
+osodio::log().error("db connection lost: ", err);
+```
+
+Unconfigured it logs to the console only (Info and above). `configure()`
+turns on rotating file output and, optionally, a periodic performance report:
+
+```cpp
+osodio::log().configure({
+    .dir           = "./logs",            // folder, created if missing
+    .filename      = "app.log",
+    .max_file_size = 10 * 1024 * 1024,    // rotate to app.1.log, app.2.log, …
+    .max_files     = 5,                   // rotated files to keep (0 = all)
+    .level         = osodio::LogLevel::Debug,
+    .performance    = true,                // report every 60 s
+});
+```
+
+With `performance = true` (and the `logger()` middleware installed) one line
+per minute summarises throughput, latency and an estimated load percentage —
+Little's law: req/s × avg latency ÷ worker threads — with a short diagnosis:
+
+```
+10:21:19.743 INFO  [performance] 1432 req/60s (23.9 req/s) | avg 3.2 ms | max 87.0 ms | peak in-flight 4 | 5xx 0 | load ~12.0% — healthy, plenty of headroom
+```
+
+The line is logged as WARN when the window contains 5xx responses.
 
 ### cors()
 
@@ -1438,6 +1471,7 @@ include/osodio/
   errors.hpp        — HttpError, not_found(), bad_request(), etc.
   di.hpp            — ServiceContainer, Inject<T>
   middleware.hpp    — logger(), cors(), compress(), helmet(), rate_limit()
+  logger.hpp        — Logger singleton: levels, rotating files, performance report
   jwt.hpp           — jwt::sign/verify/decode, jwt_auth(), jwt_auth_rsa()
   sse.hpp           — SSEWriter, make_sse()
   websocket.hpp     — WSConnection, WSMessage, WSState, frame builder

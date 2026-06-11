@@ -3,6 +3,7 @@
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/task.hpp"
 #include "../../include/osodio/metrics.hpp"
+#include "../../include/osodio/logger.hpp"
 
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -265,7 +266,7 @@ void Http2Connection::dispatch_stream(int32_t stream_id, Stream& s) {
                       osodio::DispatchFn                disp) -> osodio::Task<void> {
         try { co_await disp(*req, *res); }
         catch (const std::exception& e) {
-            std::cerr << "[osodio] unhandled exception: " << e.what() << '\n';
+            osodio::log().error("unhandled exception: ", e.what());
             res->status(500).json({{"error", "Internal Server Error"}});
         }
         catch (...) { res->status(500).json({{"error", "Internal Server Error"}}); }

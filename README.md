@@ -766,7 +766,13 @@ app.use([](Request& req, Response& res, auto next) -> Task<void> {
 
 // Built-ins
 app.use(osodio::logger());
-app.use(osodio::logger(std::cerr));
+
+// The logger() middleware writes through the global logger — configure file
+// output, rotation and the per-minute performance report once at startup:
+osodio::log().configure({
+    .dir = "./logs", .max_file_size = 10 * 1024 * 1024, .performance = true,
+});
+osodio::log().info("general-purpose logging, not just HTTP");
 
 app.use(osodio::compress());
 app.use(osodio::compress({.min_size = 512, .level = 9, .brotli_quality = 5}));
@@ -983,7 +989,7 @@ third_party/
 | Connection limit (`app.max_connections`) | ✅ |
 | `compress()` — gzip + Brotli, negotiated via Accept-Encoding | ✅ |
 | `cors()` — full preflight, allow-list, credentials | ✅ |
-| `logger()` — method, path, status, duration | ✅ |
+| `logger()` — method, path, status, duration; rotating file output + performance report via `log().configure()` | ✅ |
 | `helmet()` — CSP, HSTS, X-Frame-Options, X-Content-Type-Options | ✅ |
 | `rate_limit()` — fixed-window per IP or custom key | ✅ |
 | `jwt_auth()` / `jwt::sign` / `jwt::verify` — HS256 + RS256 | ✅ |

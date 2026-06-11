@@ -6,6 +6,7 @@
 #include "../../include/osodio/response.hpp"
 #include "../../include/osodio/task.hpp"
 #include "../../include/osodio/metrics.hpp"
+#include "../../include/osodio/logger.hpp"
 
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -365,7 +366,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
         } catch (const std::exception& e) {
             // Log internally but do not expose e.what() to clients — it may
             // contain connection strings, file paths, or other internal detail.
-            std::cerr << "[osodio] unhandled exception: " << e.what() << '\n';
+            osodio::log().error("unhandled exception: ", e.what());
             res_ptr->status(500).json({{"error", "Internal Server Error"}});
         } catch (...) {
             res_ptr->status(500).json({{"error", "Internal Server Error"}});

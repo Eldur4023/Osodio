@@ -12,7 +12,9 @@
 #include <iostream>
 #include <vector>
 #include <nlohmann/json.hpp>
-#include <inja.hpp>
+#include <jinja2cpp/template_env.h>
+#include <jinja2cpp/filesystem_handler.h>
+#include <jinja2cpp/value.h>
 #include "cookies.hpp"
 
 namespace osodio {
@@ -158,8 +160,8 @@ public:
         return *this;
     }
 
-    // Render a Jinja2-compatible template from the templates directory.
-    // Uses inja; the Environment is cached per thread per templates_dir.
+    // Render a Jinja2 template from the templates directory.
+    // Uses Jinja2Cpp; the TemplateEnv is cached per thread per templates_dir.
     //
     //   res.render("index.html", {{"user", user_data}, {"items", items}});
     //
@@ -169,7 +171,7 @@ public:
             std::cerr << "[osodio] Response.render() called after body already committed — ignoring\n";
             return *this;
         }
-        // Reject traversal/absolute paths before handing to inja.
+        // Reject traversal/absolute paths before handing to Jinja2Cpp.
         {
             std::filesystem::path requested(template_name);
             if (requested.is_absolute()) {
@@ -190,25 +192,37 @@ public:
             }
         }
         header("Content-Type", "text/html; charset=utf-8");
-        try {
-            // One inja::Environment per (thread × templates_dir): templates are
-            // parsed once and cached inside the Environment.
-            thread_local std::unordered_map<std::string, inja::Environment> envs;
-            auto it = envs.find(state_->templates_dir);
-            if (it == envs.end()) {
-                it = envs.emplace(
-                    state_->templates_dir,
-                    inja::Environment{state_->templates_dir + "/"}
-                ).first;
-            }
-            state_->body_committed = true;
-            state_->body = it->second.render_file(template_name, data);
-        } catch (const std::exception& e) {
-            std::cerr << "[osodio] template render error: " << e.what() << '\n';
+        // One TemplateEnv per (thread × templates_dir): Jinja2Cpp caches parsed
+        // templates inside the environment, same pattern as the old inja setup.
+        thread_local std::unordered_map<std::string,
+                                        std::unique_ptr<jinja2::TemplateEnv>> envs;
+        auto it = envs.find(state_->templates_dir);
+        if (it == envs.end()) {
+            auto env = std::make_unique<jinja2::TemplateEnv>();
+            env->AddFilesystemHandler(
+                "", std::make_shared<jinja2::RealFileSystem>(state_->templates_dir));
+            it = envs.emplace(state_->templates_dir, std::move(env)).first;
+        }
+        state_->body_committed = true;
+        auto tmpl = it->second->LoadTemplate(template_name);
+        if (!tmpl) {
+            std::cerr << "[osodio] template load error: "
+                      << tmpl.error().ToString() << '\n';
             state_->status_code = 500;
             state_->body = R"({"error":"Internal Server Error"})";
             state_->headers["Content-Type"] = "application/json; charset=utf-8";
+            return *this;
         }
+        auto result = tmpl->RenderAsString(json_to_values_map(data));
+        if (!result) {
+            std::cerr << "[osodio] template render error: "
+                      << result.error().ToString() << '\n';
+            state_->status_code = 500;
+            state_->body = R"({"error":"Internal Server Error"})";
+            state_->headers["Content-Type"] = "application/json; charset=utf-8";
+            return *this;
+        }
+        state_->body = std::move(result.value());
         return *this;
     }
 
@@ -345,6 +359,31 @@ public:
     }
 
 private:
+    static jinja2::Value json_to_value(const nlohmann::json& j) {
+        if (j.is_null())             return {};
+        if (j.is_boolean())          return j.get<bool>();
+        if (j.is_number_integer())   return j.get<int64_t>();
+        if (j.is_number_float())     return j.get<double>();
+        if (j.is_string())           return j.get<std::string>();
+        if (j.is_array()) {
+            jinja2::ValuesList list;
+            list.reserve(j.size());
+            for (const auto& item : j) list.push_back(json_to_value(item));
+            return list;
+        }
+        // object
+        jinja2::ValuesMap map;
+        for (auto& [k, v] : j.items()) map[k] = json_to_value(v);
+        return map;
+    }
+
+    static jinja2::ValuesMap json_to_values_map(const nlohmann::json& j) {
+        jinja2::ValuesMap map;
+        if (j.is_object())
+            for (auto& [k, v] : j.items()) map[k] = json_to_value(v);
+        return map;
+    }
+
     static bool is_template_name(const std::string& s) {
         if (s.empty() || s.find('\n') != std::string::npos) return false;
         if (s.find('<') != std::string::npos) return false;
