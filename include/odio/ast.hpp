@@ -120,10 +120,22 @@ struct FnDecl {
     SourceLoc          loc;
 };
 
+// Un constructor.  Sin cuerpo, asigna cada parametro al campo del mismo
+// nombre; con cuerpo, lo ejecuta con `this` ya creado y con todos los campos
+// a null.
+struct CtorDecl {
+    std::vector<Param> params;
+    Block              body;
+    bool               has_body = false;
+    SourceLoc          loc;
+};
+
 struct ClassDecl {
     std::string               name;
     std::vector<Field>        fields;
     std::vector<ValidateRule> rules;
+    std::vector<FnDecl>       methods;
+    std::vector<CtorDecl>     ctors;
     SourceLoc                 loc;
 };
 

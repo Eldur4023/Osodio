@@ -384,21 +384,52 @@ void Parser::parse_class(Program& out) {
             }
             match(Tok::Dedent);
         }
-        // Constructor: NombreDeLaClase(...) — se reconoce para poder decir que
-        // no esta implementado, en vez de confundirlo con un campo.
-        else if (check(Tok::Ident) && peek().text == c.name && peek(1).is(Tok::LParen)) {
-            diags_.error(peek().loc, "los constructores todavia no estan implementados");
-            while (!check(Tok::Newline) && !check(Tok::Dedent) &&
-                   !check(Tok::EndOfFile)) advance();
-            skip_newlines();
-            if (check(Tok::Indent)) {          // constructor con cuerpo: saltarlo
-                int depth = 0;
-                do {
-                    if (check(Tok::Indent)) ++depth;
-                    if (check(Tok::Dedent)) --depth;
-                    advance();
-                } while (depth > 0 && !check(Tok::EndOfFile));
+        // Metodo: fn <tipo> <nombre>(...)
+        else if (check(Tok::KwFn)) {
+            FnDecl m;
+            m.loc = advance().loc;
+            m.return_type = parse_type();
+            if (check(Tok::Ident)) m.name = advance().text;
+            else { error_here("se esperaba el nombre del metodo"); break; }
+
+            for (const auto& prev_m : c.methods)
+                if (prev_m.name == m.name)
+                    diags_.error(m.loc, "el metodo '" + m.name + "' ya esta declarado "
+                                        "en la clase '" + c.name + "'");
+
+            expect(Tok::LParen, "tras el nombre del metodo");
+            while (!check(Tok::RParen) && !check(Tok::EndOfFile)) {
+                m.params.push_back(parse_param());
+                if (!match(Tok::Comma)) break;
             }
+            expect(Tok::RParen, "al cerrar los parametros del metodo");
+            expect(Tok::Colon, "al abrir el cuerpo del metodo");
+            m.body = parse_block();
+            c.methods.push_back(std::move(m));
+        }
+        // Constructor: NombreDeLaClase(...), con cuerpo o sin el.
+        else if (check(Tok::Ident) && peek().text == c.name && peek(1).is(Tok::LParen)) {
+            CtorDecl ct;
+            ct.loc = advance().loc;
+            advance();                                   // '('
+            while (!check(Tok::RParen) && !check(Tok::EndOfFile)) {
+                ct.params.push_back(parse_param());
+                if (!match(Tok::Comma)) break;
+            }
+            expect(Tok::RParen, "al cerrar los parametros del constructor");
+
+            for (const auto& prev_ct : c.ctors)
+                if (prev_ct.params.size() == ct.params.size())
+                    diags_.error(ct.loc, "ya hay un constructor de '" + c.name +
+                                         "' con " + std::to_string(ct.params.size()) +
+                                         " parametro(s); se distinguen por su numero");
+
+            // Sin dos puntos, es el constructor por mapeo automatico.
+            if (match(Tok::Colon)) {
+                ct.has_body = true;
+                ct.body     = parse_block();
+            }
+            c.ctors.push_back(std::move(ct));
         }
         // Campo: <tipo> <nombre>
         else {

@@ -220,6 +220,60 @@ error de compilación y no llega a producción:
 ./app.odio:9:9: error: 'nombrre' no esta declarada
 ```
 
+### Constructores
+
+```odio
+class Punto:
+    int x
+    int y
+
+    Punto(int x):              # con cuerpo
+        this.x = x
+        this.y = 0
+
+    Punto(int x, int y)        # sin cuerpo: cada parámetro va a su campo
+```
+
+Se distinguen por el **número** de parámetros. Sin ninguno declarado, se ofrece uno con
+todos los campos en orden de declaración. Los campos que el constructor no toque valen
+`null`.
+
+### Métodos
+
+```odio
+class Punto:
+    int x
+    int y
+
+    fn int cuadrado():
+        return this.x * this.x + this.y * this.y
+
+    fn string etiqueta(string prefijo = "P"):
+        return prefijo + "(" + str(this.x) + "," + str(this.y) + ")"
+
+    fn Punto desplazado(int dx, int dy):
+        return Punto(this.x + dx, this.y + dy)
+```
+
+```odio
+Punto p = Punto(3, 4)
+p.cuadrado()            # 25
+p.etiqueta("Q")         # "Q(3,4)"
+```
+
+Métodos y constructores se compilan como funciones con `this` de primer parámetro, así que
+usan la misma pila de marcos y admiten recursión y valores por defecto igual que `fn`.
+
+La llamada **se resuelve al compilar** a partir del tipo declarado del receptor, así que un
+método mal escrito no llega a producción:
+
+```
+./app.odio:8:20: error: 'P' no tiene un metodo 'triple'
+```
+
+Una instancia construida y una enlazada del cuerpo de la petición son lo mismo: los métodos
+funcionan igual sobre las dos.
+
 ---
 
 ## 7. Respuestas

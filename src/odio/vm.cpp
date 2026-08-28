@@ -395,6 +395,20 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 return r;
             }
 
+            case Op::SetMember: {
+                Value v   = pop();
+                Value obj = pop();
+                const std::string& name = chunk.constants[in.operand].as_str();
+                if (!obj.is_dict())
+                    return fail(std::string("no se puede asignar '") + name +
+                                "' sobre " + obj.type_name(), in.loc);
+                // El Dict se comparte por shared_ptr, asi que la escritura la ve
+                // quien tenga el mismo valor.
+                obj.as_dict()[name] = v;
+                push(std::move(v));
+                break;
+            }
+
             case Op::CallFunction: {
                 size_t index = in.operand >> 8;
                 int    argc  = static_cast<int>(in.operand & 0xFF);

@@ -1,6 +1,8 @@
 #include <odio/emitter.hpp>
 #include <odio/natives.hpp>
 
+#include <algorithm>
+
 namespace odio {
 
 void Emitter::error(SourceLoc loc, std::string msg) {
@@ -8,7 +10,8 @@ void Emitter::error(SourceLoc loc, std::string msg) {
     failed_ = true;
 }
 
-int Emitter::declare_local(const std::string& name, SourceLoc loc) {
+int Emitter::declare_local(const std::string& name, SourceLoc loc,
+                           const std::string& type) {
     for (auto it = locals_.rbegin(); it != locals_.rend(); ++it) {
         if (it->depth < scope_depth_) break;
         if (it->name == name) {
@@ -16,11 +19,19 @@ int Emitter::declare_local(const std::string& name, SourceLoc loc) {
             return static_cast<int>(std::distance(locals_.begin(), it.base()) - 1);
         }
     }
-    locals_.push_back({name, scope_depth_});
+    locals_.push_back({name, scope_depth_, type});
     int slot = static_cast<int>(locals_.size()) - 1;
     if (slot + 1 > chunk_->num_locals) chunk_->num_locals = slot + 1;
     chunk_->local_names.push_back(name);
     return slot;
+}
+
+const std::string& Emitter::local_type(const std::string& name) const {
+    static const std::string kNone;
+    for (int i = static_cast<int>(locals_.size()) - 1; i >= 0; --i)
+        if (locals_[static_cast<size_t>(i)].name == name)
+            return locals_[static_cast<size_t>(i)].type;
+    return kNone;
 }
 
 int Emitter::resolve_local(const std::string& name) const {
@@ -47,7 +58,7 @@ bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
     loops_.clear();
     scope_depth_ = 0;
 
-    for (const auto& p : route.params) declare_local(p.name, p.loc);
+    for (const auto& p : route.params) declare_local(p.name, p.loc, p.type.name);
 
     // Las guardas del grupo se emiten antes del cuerpo, de fuera hacia dentro:
     // para llegar al handler hay que pasar primero la del grupo padre.  Cada
@@ -80,10 +91,70 @@ bool Emitter::emit_function(const FnDecl& fn, Chunk& out) {
     loops_.clear();
     scope_depth_ = 0;
 
-    for (const auto& p : fn.params) declare_local(p.name, p.loc);
+    for (const auto& p : fn.params) declare_local(p.name, p.loc, p.type.name);
 
     emit_block(fn.body);
     out.emit(Op::ReturnNull, fn.loc);
+    return !failed_;
+}
+
+bool Emitter::emit_method(const std::string& cls, const FnDecl& m, Chunk& out) {
+    chunk_        = &out;
+    route_method_ = "FN";
+    failed_       = false;
+    locals_.clear();
+    loops_.clear();
+    scope_depth_ = 0;
+
+    // `this` es simplemente el parametro 0.
+    declare_local("this", m.loc, cls);
+    for (const auto& p : m.params) declare_local(p.name, p.loc, p.type.name);
+
+    emit_block(m.body);
+    out.emit(Op::ReturnNull, m.loc);
+    return !failed_;
+}
+
+bool Emitter::emit_ctor(const std::string& cls, const std::vector<std::string>& fields,
+                        const CtorDecl& ct, Chunk& out) {
+    chunk_        = &out;
+    route_method_ = "FN";
+    failed_       = false;
+    locals_.clear();
+    loops_.clear();
+    scope_depth_ = 0;
+
+    for (const auto& p : ct.params) declare_local(p.name, p.loc, p.type.name);
+    int self = declare_local("this", ct.loc, cls);
+
+    // La instancia arranca con todos los campos declarados a null, para que
+    // acceder a uno que el constructor no toque de null y no falle.
+    for (const auto& f : fields) {
+        chunk_->emit(Op::Const, ct.loc, chunk_->add_constant(Value::str(f)));
+        chunk_->emit(Op::Const, ct.loc, chunk_->add_constant(Value::null()));
+    }
+    chunk_->emit(Op::MakeDict, ct.loc, static_cast<uint32_t>(fields.size()));
+    chunk_->emit(Op::StoreLocal, ct.loc, static_cast<uint32_t>(self));
+
+    if (ct.has_body) {
+        emit_block(ct.body);
+    } else {
+        // Sin cuerpo: cada parametro va al campo de su mismo nombre.
+        for (const auto& p : ct.params) {
+            if (std::find(fields.begin(), fields.end(), p.name) == fields.end()) {
+                error(p.loc, "'" + p.name + "' no es un campo de '" + cls + "'");
+                continue;
+            }
+            chunk_->emit(Op::LoadLocal, ct.loc, static_cast<uint32_t>(self));
+            int slot = resolve_local(p.name);
+            chunk_->emit(Op::LoadLocal, ct.loc, static_cast<uint32_t>(slot));
+            chunk_->emit(Op::SetMember, ct.loc, chunk_->add_constant(Value::str(p.name)));
+            chunk_->emit(Op::Pop, ct.loc);
+        }
+    }
+
+    chunk_->emit(Op::LoadLocal, ct.loc, static_cast<uint32_t>(self));
+    chunk_->emit(Op::Return, ct.loc);
     return !failed_;
 }
 
@@ -137,7 +208,7 @@ void Emitter::emit_stmt(const Stmt& s) {
         case StmtKind::VarDecl: {
             if (s.value) emit_expr(*s.value);
             else         chunk_->emit(Op::Const, s.loc, chunk_->add_constant(Value::null()));
-            int slot = declare_local(s.name, s.loc);
+            int slot = declare_local(s.name, s.loc, s.type.name);
             chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(slot));
             break;
         }
@@ -160,9 +231,18 @@ void Emitter::emit_stmt(const Stmt& s) {
                 return;
             }
 
+            // `this.campo = v` y `objeto.campo = v`.
+            if (s.target->kind == ExprKind::Member) {
+                emit_expr(*s.target->object);
+                emit_expr(*s.value);
+                chunk_->emit(Op::SetMember, s.loc,
+                             chunk_->add_constant(Value::str(s.target->text)));
+                chunk_->emit(Op::Pop, s.loc);
+                return;
+            }
+
             if (s.target->kind != ExprKind::Ident) {
-                error(s.loc, "solo se puede asignar a una variable simple o a "
-                             "un campo de 'session'");
+                error(s.loc, "solo se puede asignar a una variable o a un campo");
                 return;
             }
             int slot = resolve_local(s.target->text);
@@ -253,7 +333,7 @@ void Emitter::emit_stmt(const Stmt& s) {
             int index = declare_local(" index", s.loc);
             chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(index));
 
-            int var = declare_local(s.name, s.loc);
+            int var = declare_local(s.name, s.loc, s.type.name);
 
             size_t start = chunk_->here();
             chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(index));
@@ -479,11 +559,41 @@ void Emitter::emit_expr(const Expr& e) {
             break;
         }
 
-        case ExprKind::This:
-            error(e.loc, "'this' solo tiene sentido dentro de una clase, que "
-                         "todavia no esta implementada");
+        case ExprKind::This: {
+            int slot = resolve_local("this");
+            if (slot < 0) {
+                error(e.loc, "'this' solo existe dentro de un metodo o un constructor");
+                return;
+            }
+            chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(slot));
             break;
+        }
     }
+}
+
+void Emitter::emit_method_call_dynamic(const Expr& e) {
+    emit_expr(*e.object->object);
+    size_t argc = 0, named = 0;
+    for (const auto& a : e.args) {
+        if (!a.name.empty()) { ++named; continue; }
+        emit_expr(*a.value);
+        ++argc;
+    }
+    // Los argumentos con nombre se agrupan en un Dict que ocupa el ultimo hueco
+    // posicional, igual que en render().
+    if (named > 0) {
+        for (const auto& a : e.args) {
+            if (a.name.empty()) continue;
+            chunk_->emit(Op::Const, a.loc, chunk_->add_constant(Value::str(a.name)));
+            emit_expr(*a.value);
+        }
+        chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(named));
+        ++argc;
+    }
+    if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
+    chunk_->emit(Op::CallMethod, e.loc,
+                 (chunk_->add_constant(Value::str(e.object->text)) << 8) |
+                 static_cast<uint32_t>(argc));
 }
 
 void Emitter::emit_call(const Expr& e, bool awaited) {
@@ -559,35 +669,91 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
                              static_cast<uint32_t>(argc));
                 return;
             }
+            // Constructor: una llamada al nombre de una clase.
+            auto ct = classes_ ? classes_->find(name) : ClassSigs::const_iterator();
+            if (classes_ && ct != classes_->end()) {
+                size_t argc = 0;
+                for (const auto& a : e.args) {
+                    if (!a.name.empty()) {
+                        error(a.loc, "un constructor no admite argumentos con nombre");
+                        return;
+                    }
+                    emit_expr(*a.value);
+                    ++argc;
+                }
+                auto found = ct->second.ctors.find(argc);
+                if (found == ct->second.ctors.end()) {
+                    std::string opciones;
+                    for (const auto& [n, _] : ct->second.ctors)
+                        opciones += (opciones.empty() ? "" : ", ") + std::to_string(n);
+                    error(e.loc, "'" + name + "' no tiene constructor de " +
+                                 std::to_string(argc) + " parametro(s)" +
+                                 (opciones.empty() ? "" : "; los hay de " + opciones));
+                    return;
+                }
+                chunk_->emit(Op::CallFunction, e.loc,
+                             (static_cast<uint32_t>(found->second) << 8) |
+                             static_cast<uint32_t>(argc));
+                return;
+            }
+
             error(e.object->loc, "funcion desconocida: '" + name + "'");
             return;
         }
     }
-    // Metodo sobre un valor: el receptor se resuelve en runtime, asi que se
-    // apila y el despacho por tipo lo hace el VM.
-    else if (e.object->kind == ExprKind::Member) {
-        emit_expr(*e.object->object);
-        size_t argc = 0, named = 0;
-        for (const auto& a : e.args) {
-            if (!a.name.empty()) { ++named; continue; }
-            emit_expr(*a.value);
-            ++argc;
-        }
-        // Los argumentos con nombre se agrupan en un Dict que ocupa el ultimo
-        // hueco posicional, igual que en render().
-        if (named > 0) {
-            for (const auto& a : e.args) {
-                if (a.name.empty()) continue;
-                chunk_->emit(Op::Const, a.loc, chunk_->add_constant(Value::str(a.name)));
-                emit_expr(*a.value);
+    // Metodo de clase: el tipo declarado del receptor se conoce al compilar,
+    // asi que se resuelve aqui y un nombre mal escrito no llega a produccion.
+    else if (e.object->kind == ExprKind::Member && classes_) {
+        std::string recv_type;
+        if (e.object->object->kind == ExprKind::Ident)
+            recv_type = local_type(e.object->object->text);
+        else if (e.object->object->kind == ExprKind::This)
+            recv_type = local_type("this");
+
+        auto cls = recv_type.empty() ? classes_->end() : classes_->find(recv_type);
+        if (cls != classes_->end()) {
+            auto m = cls->second.methods.find(e.object->text);
+            if (m == cls->second.methods.end()) {
+                // Puede ser un campo con un metodo generico encima, o un error.
+                if (!cls->second.fields.empty() &&
+                    std::find(cls->second.fields.begin(), cls->second.fields.end(),
+                              e.object->text) == cls->second.fields.end()) {
+                    error(e.object->loc, "'" + recv_type + "' no tiene un metodo '" +
+                                         e.object->text + "'");
+                    return;
+                }
+            } else {
+                const FnSig& sig = m->second;
+                emit_expr(*e.object->object);          // `this`
+                size_t given = 0;
+                for (const auto& a : e.args) {
+                    if (!a.name.empty()) {
+                        error(a.loc, "un metodo no admite argumentos con nombre");
+                        return;
+                    }
+                    emit_expr(*a.value);
+                    ++given;
+                }
+                if (given < sig.required || given > sig.defaults.size()) {
+                    error(e.loc, "'" + recv_type + "." + e.object->text +
+                                 "()' espera " + std::to_string(sig.required) +
+                                 " argumento(s), pero recibe " + std::to_string(given));
+                    return;
+                }
+                for (size_t i = given; i < sig.defaults.size(); ++i)
+                    emit_expr(*sig.defaults[i]);
+
+                chunk_->emit(Op::CallFunction, e.loc,
+                             (static_cast<uint32_t>(sig.index) << 8) |
+                             static_cast<uint32_t>(sig.defaults.size() + 1));
+                return;
             }
-            chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(named));
-            ++argc;
         }
-        if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
-        chunk_->emit(Op::CallMethod, e.loc,
-                     (chunk_->add_constant(Value::str(e.object->text)) << 8) |
-                     static_cast<uint32_t>(argc));
+        emit_method_call_dynamic(e);
+        return;
+    }
+    else if (e.object->kind == ExprKind::Member) {
+        emit_method_call_dynamic(e);
         return;
     }
     else {

@@ -34,6 +34,7 @@ enum class Op : uint8_t {
     GetIndex,
     IterList,     // convierte la cima en la lista que se va a recorrer
     GetMember,    // operand = indice de constante con el nombre
+    SetMember,    // idem; apila objeto y valor, y deja el valor
 
     CallFunction, // operand = (indice-de-funcion << 8) | argc
     CallMethod,   // operand = (indice-de-constante-con-el-nombre << 8) | argc

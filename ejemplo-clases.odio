@@ -1,0 +1,65 @@
+app:
+    port 8080
+
+class Punto:
+    int x
+    int y
+
+    # Constructor con cuerpo.
+    Punto(int x):
+        this.x = x
+        this.y = 0
+
+    # Constructor por mapeo: sin cuerpo, cada parametro va a su campo.
+    Punto(int x, int y)
+
+    fn int cuadrado():
+        return this.x * this.x + this.y * this.y
+
+    fn string etiqueta(string prefijo = "P"):
+        return prefijo + "(" + str(this.x) + "," + str(this.y) + ")"
+
+    fn Punto desplazado(int dx, int dy):
+        return Punto(this.x + dx, this.y + dy)
+
+
+class Caja:
+    string nombre
+    int    ancho
+    int    alto
+
+    validate:
+        ancho > 0   "ancho: tiene que ser positivo"
+
+    fn int area():
+        return this.ancho * this.alto
+
+
+get endpoint("/uno/:x", int x):
+    Punto p = Punto(x)
+    return { "x": p.x, "y": p.y, "cuadrado": p.cuadrado() }
+
+get endpoint("/dos/:x/:y", int x, int y):
+    Punto p = Punto(x, y)
+    return { "etiqueta": p.etiqueta(), "otra": p.etiqueta("Q"), "cuadrado": p.cuadrado() }
+
+get endpoint("/desplaza/:x/:y", int x, int y):
+    Punto p = Punto(x, y)
+    Punto q = p.desplazado(10, 20)
+    return { "origen": p.etiqueta(), "movido": q.etiqueta() }
+
+# Sin constructor declarado, se ofrece el de todos los campos en orden.
+get endpoint("/caja"):
+    Caja c = Caja("grande", 3, 4)
+    return { "nombre": c.nombre, "area": c.area() }
+
+# Una clase sigue funcionando como cuerpo de peticion.
+post endpoint("/caja", Caja c):
+    return { "area": c.area() }
+
+get endpoint("/lista"):
+    List<int> areas = []
+    for int i in [1, 2, 3]:
+        Punto p = Punto(i, i)
+        areas.add(p.cuadrado())
+    return { "areas": areas }

@@ -303,7 +303,7 @@ struct ClassInfo {
 using ClassTable = std::map<std::string, std::shared_ptr<ClassInfo>>;
 
 void build_classes(const Program& program, const FunctionSigs& fns,
-                   ClassTable& out, DiagnosticBag& diags) {
+                   const ClassSigs& sigs, ClassTable& out, DiagnosticBag& diags) {
     for (const auto& c : program.classes) {
         if (out.count(c.name)) {
             diags.error(c.loc, "la clase '" + c.name + "' ya esta declarada");
@@ -333,7 +333,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         // nombre que no existe, el error sale aqui y no en produccion.
         for (const auto& r : c.rules) {
             auto    chunk = std::make_shared<Chunk>();
-            Emitter emitter(diags, &fns);
+            Emitter emitter(diags, &fns, &sigs);
             if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
             info->rules.push_back({chunk, r.message});
         }
@@ -955,6 +955,100 @@ nlohmann::json build_openapi(const Program& program, const ClassTable& classes) 
 // Las funciones se compilan antes que rutas y manejadores, y todas ven la
 // tabla completa: asi pueden llamarse entre si sin importar el orden en que se
 // declararon ni el fichero en que estan.
+// Rellena FnSig a partir de una lista de parametros, comprobando que ningun
+// obligatorio va detras de uno con valor por defecto.
+FnSig make_sig(size_t index, const std::vector<Param>& params, DiagnosticBag& diags) {
+    FnSig sig;
+    sig.index = index;
+    bool seen_default = false;
+    for (const auto& p : params) {
+        sig.defaults.push_back(p.default_value.get());
+        if (p.default_value) seen_default = true;
+        else {
+            if (seen_default)
+                diags.error(p.loc, "un parametro sin valor por defecto no puede ir "
+                                   "despues de uno que lo tiene");
+            ++sig.required;
+        }
+    }
+    return sig;
+}
+
+// Metodos y constructores se compilan como funciones con `this` de primer
+// parametro, asi que van a la misma tabla que las funciones sueltas.
+ClassSigs build_class_signatures(Module& mod, DiagnosticBag& diags) {
+    ClassSigs out;
+
+    for (const auto& c : mod.program.classes) {
+        if (out.count(c.name)) continue;      // duplicado ya reportado
+        ClassSig sig;
+        for (const auto& f : c.fields) sig.fields.push_back(f.name);
+
+        for (const auto& m : c.methods) {
+            size_t idx = mod.functions.size();
+            mod.functions.push_back(std::make_shared<Chunk>());
+            sig.methods[m.name] = make_sig(idx, m.params, diags);
+        }
+        for (const auto& ct : c.ctors) {
+            size_t idx = mod.functions.size();
+            mod.functions.push_back(std::make_shared<Chunk>());
+            sig.ctors[ct.params.size()] = idx;
+        }
+
+        // Sin constructor declarado, se ofrece el de mapeo completo: todos los
+        // campos en orden.
+        if (sig.ctors.empty() && !c.fields.empty()) {
+            size_t idx = mod.functions.size();
+            mod.functions.push_back(std::make_shared<Chunk>());
+            sig.ctors[c.fields.size()] = idx;
+        }
+        out[c.name] = std::move(sig);
+    }
+    return out;
+}
+
+void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs& fns,
+                       DiagnosticBag& diags) {
+    for (const auto& c : mod.program.classes) {
+        auto it = classes.find(c.name);
+        if (it == classes.end()) continue;
+        const ClassSig& sig = it->second;
+
+        for (const auto& m : c.methods) {
+            auto ms = sig.methods.find(m.name);
+            if (ms == sig.methods.end()) continue;
+            Emitter emitter(diags, &fns, &classes);
+            emitter.emit_method(c.name, m, *mod.functions[ms->second.index]);
+        }
+        for (const auto& ct : c.ctors) {
+            auto cs = sig.ctors.find(ct.params.size());
+            if (cs == sig.ctors.end()) continue;
+            Emitter emitter(diags, &fns, &classes);
+            emitter.emit_ctor(c.name, sig.fields, ct, *mod.functions[cs->second]);
+        }
+
+        // El constructor implicito: un CtorDecl sintetico con un parametro por
+        // campo, en orden de declaracion.
+        if (c.ctors.empty() && !c.fields.empty()) {
+            CtorDecl implicito;
+            implicito.loc = c.loc;
+            for (const auto& f : c.fields) {
+                Param p;
+                p.loc  = f.loc;
+                p.name = f.name;
+                p.type = f.type;
+                implicito.params.push_back(std::move(p));
+            }
+            auto cs = sig.ctors.find(c.fields.size());
+            if (cs != sig.ctors.end()) {
+                Emitter emitter(diags, &fns, &classes);
+                emitter.emit_ctor(c.name, sig.fields, implicito,
+                                  *mod.functions[cs->second]);
+            }
+        }
+    }
+}
+
 FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
     FunctionSigs index;
 
@@ -965,20 +1059,7 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
         }
         if (index.count(f.name)) continue;   // el parser ya reporto el duplicado
 
-        FnSig sig;
-        sig.index = mod.functions.size();
-        bool seen_default = false;
-        for (const auto& p : f.params) {
-            sig.defaults.push_back(p.default_value.get());
-            if (p.default_value) seen_default = true;
-            else {
-                if (seen_default)
-                    diags.error(p.loc, "un parametro sin valor por defecto no puede "
-                                       "ir despues de uno que lo tiene");
-                ++sig.required;
-            }
-        }
-        index[f.name] = std::move(sig);
+        index[f.name] = make_sig(mod.functions.size(), f.params, diags);
         mod.functions.push_back(std::make_shared<Chunk>());
     }
 
@@ -992,17 +1073,18 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
 }
 
 void build_error_handlers(Module& mod, const FunctionSigs& fns,
-                          DiagnosticBag& diags) {
+                          const ClassSigs& sigs, DiagnosticBag& diags) {
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns);
+        Emitter emitter(diags, &fns, &sigs);
         if (!emitter.emit_error_handler(e, *chunk)) continue;
         mod.error_handlers[e.code] = std::move(chunk);
     }
 }
 
 void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth,
-                  const FunctionSigs& fns, DiagnosticBag& diags) {
+                  const FunctionSigs& fns, const ClassSigs& sigs,
+                  DiagnosticBag& diags) {
     // El Module posee la tabla y sobrevive a cualquier peticion en vuelo: el
     // dispatcher mantiene vivo su shared_ptr mientras el handler se ejecuta.
     const FunctionTable* fn_table = &mod.functions;
@@ -1033,7 +1115,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             }
 
             auto    ws_chunk = std::make_shared<Chunk>();
-            Emitter ws_emitter(diags, &fns);
+            Emitter ws_emitter(diags, &fns, &sigs);
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
 
             ++mod.vm_routes;
@@ -1108,7 +1190,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             }
 
             auto    sse_chunk = std::make_shared<Chunk>();
-            Emitter sse_emitter(diags, &fns);
+            Emitter sse_emitter(diags, &fns, &sigs);
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
 
             ++mod.vm_routes;
@@ -1173,7 +1255,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         if (!bind_params(r, classes, binds, diags)) continue;
 
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns);
+        Emitter emitter(diags, &fns, &sigs);
         if (!emitter.emit_route(r, *chunk)) continue;
 
         ++mod.vm_routes;
@@ -1291,12 +1373,15 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     // primero porque las rutas se enlazan contra ellas; dentro de cada pasada el
     // orden de los ficheros es indiferente.
     if (diags.empty()) {
-        // Las funciones se construyen primero: las reglas de `validate` y los
-        // cuerpos de las rutas pueden llamarlas.
-        auto fns = build_functions(*mod, diags);
+        // Orden: primero las firmas de todo lo llamable —funciones sueltas,
+        // metodos y constructores—, y solo despues los cuerpos.  Asi cualquiera
+        // puede llamar a cualquiera sin importar el orden de declaracion.
+        auto fns  = build_functions(*mod, diags);
+        auto sigs = build_class_signatures(*mod, diags);
+        emit_class_bodies(*mod, sigs, fns, diags);
 
         ClassTable classes;
-        build_classes(mod->program, fns, classes, diags);
+        build_classes(mod->program, fns, sigs, classes, diags);
 
         AuthConfig auth;
         auth.session_secret  = mod->program.app.session_secret;
@@ -1305,8 +1390,8 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
 
-        if (diags.empty()) build_routes(*mod, classes, auth, fns, diags);
-        if (diags.empty()) build_error_handlers(*mod, fns, diags);
+        if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, diags);
+        if (diags.empty()) build_error_handlers(*mod, fns, sigs, diags);
         if (diags.empty()) mod->openapi = build_openapi(mod->program, classes);
     }
 
