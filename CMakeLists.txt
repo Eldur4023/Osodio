@@ -114,6 +114,7 @@ add_library(odio STATIC
     src/odio/diagnostic.cpp
     src/odio/lexer.cpp
     src/odio/parser.cpp
+    src/odio/crypto.cpp
     src/odio/value.cpp
     src/odio/natives.cpp
     src/odio/emitter.cpp
@@ -132,6 +133,9 @@ target_link_libraries(osodio-bin PRIVATE odio)
 # Herramientas de desarrollo del frontend.
 add_executable(dump_tokens src/odio/tools/dump_tokens.cpp)
 target_link_libraries(dump_tokens PRIVATE odio)
+
+add_executable(crypto_check src/odio/tools/crypto_check.cpp)
+target_link_libraries(crypto_check PRIVATE odio)
 
 # ── Ejemplos ──────────────────────────────────────────────────────────────────
 if(OSODIO_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
