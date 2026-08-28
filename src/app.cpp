@@ -334,23 +334,32 @@ Task<void> App::handle_request(Request& req, Response& res) {
 
         // El cuerpo por defecto ya esta escrito y marcado como comprometido.
         // Un manejador de error existe precisamente para sustituirlo, asi que
-        // se descarta antes de darle el control; sin esto, su res.json() o
+        // se retira antes de darle el control; sin esto, su res.json() o
         // res.render() se ignoraria en silencio.
-        auto with_reset = [&res](auto&& fn) { res.reset_body(); fn(); };
+        //
+        // Si el manejador no escribe nada, se repone el cuerpo original: no
+        // haberlo escrito no puede significar quedarse sin respuesta.
+        auto guarded = [&res](auto&& fn) {
+            std::string saved = res.take_body();
+            fn();
+            if (!res.is_committed()) res.restore_body(std::move(saved));
+        };
 
         auto ait = async_error_handlers_.find(code);
         if (ait != async_error_handlers_.end()) {
-            res.reset_body();
+            std::string saved = res.take_body();
             co_await ait->second(code, req, res);
+            if (!res.is_committed()) res.restore_body(std::move(saved));
         } else if (catchall_async_error_handler_) {
-            res.reset_body();
+            std::string saved = res.take_body();
             co_await catchall_async_error_handler_(code, req, res);
+            if (!res.is_committed()) res.restore_body(std::move(saved));
         } else {
             auto it = error_handlers_.find(code);
             if (it != error_handlers_.end()) {
-                with_reset([&] { it->second(code, req, res); });
+                guarded([&] { it->second(code, req, res); });
             } else if (catchall_error_handler_) {
-                with_reset([&] { catchall_error_handler_(code, req, res); });
+                guarded([&] { catchall_error_handler_(code, req, res); });
             }
         }
     }

@@ -54,20 +54,31 @@ public:
         return *this;
     }
 
-    // Descarta el cuerpo ya escrito para que pueda escribirse otro.
+    // Retira el cuerpo ya escrito y lo devuelve, dejando la respuesta libre
+    // para escribir otro.
     //
     // Existe para los manejadores de error: cuando uno se dispara, el cuerpo
     // por defecto ya esta comprometido, asi que sin esto cualquier res.json()
-    // o res.render() del manejador se descartaria en silencio.
+    // o res.render() del manejador se descartaria en silencio.  Devolverlo
+    // permite reponerlo si el manejador decide no escribir nada.
     //
     // No toca el codigo de estado ni las cabeceras, y es un no-op sobre una
     // respuesta en modo SSE o WebSocket, donde ya se enviaron bytes al socket.
-    Response& reset_body() {
-        if (state_->sse_started || state_->ws_started) return *this;
+    std::string take_body() {
+        if (state_->sse_started || state_->ws_started) return {};
+        std::string old = std::move(state_->body);
         state_->body.clear();
         state_->sendfile_path.clear();
         state_->sendfile_size = 0;
         state_->body_committed = false;
+        return old;
+    }
+
+    // Repone un cuerpo retirado con take_body().
+    Response& restore_body(std::string body) {
+        if (state_->sse_started || state_->ws_started) return *this;
+        state_->body = std::move(body);
+        state_->body_committed = true;
         return *this;
     }
 

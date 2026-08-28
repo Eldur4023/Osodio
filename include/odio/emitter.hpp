@@ -42,10 +42,12 @@ private:
     std::vector<Local> locals_;
     int                scope_depth_ = 0;
 
-    // Saltos pendientes de los break/continue del bucle en curso.
+    // Saltos pendientes del bucle en curso.  Los dos se parchean al cerrarlo:
+    // en un `for` el destino de `continue` es el incremento, que todavia no se
+    // ha emitido cuando aparece el `continue` dentro del cuerpo.
     struct LoopCtx {
-        size_t              continue_target;
         std::vector<size_t> breaks;
+        std::vector<size_t> continues;
     };
     std::vector<LoopCtx> loops_;
 

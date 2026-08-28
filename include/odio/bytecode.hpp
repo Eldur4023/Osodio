@@ -31,6 +31,7 @@ enum class Op : uint8_t {
     MakeList,     // operand = numero de elementos
     MakeDict,     // operand = numero de pares
     GetIndex,
+    IterList,     // convierte la cima en la lista que se va a recorrer
     GetMember,    // operand = indice de constante con el nombre
 
     CallNative,   // operand = (id << 8) | argc

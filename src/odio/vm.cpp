@@ -257,6 +257,22 @@ VM::Result VM::execute(NativeCtx& ctx) {
                 break;
             }
 
+            // Un `for` siempre recorre una lista: un Dict se recorre por sus
+            // claves, que es lo que espera quien viene de Python.
+            case Op::IterList: {
+                Value v = pop();
+                if (v.is_list()) { push(std::move(v)); break; }
+                if (v.is_dict()) {
+                    Value::List keys;
+                    keys.reserve(v.as_dict().size());
+                    for (const auto& [k, _] : v.as_dict()) keys.push_back(Value::str(k));
+                    push(Value::list(std::move(keys)));
+                    break;
+                }
+                return fail(std::string("no se puede recorrer ") + v.type_name() +
+                            " con 'for'", in.loc);
+            }
+
             case Op::GetMember: {
                 Value obj = pop();
                 const std::string& name = chunk.constants[in.operand].as_str();

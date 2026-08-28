@@ -1,0 +1,48 @@
+app:
+    port 8088
+
+get endpoint("/suma"):
+    List<int> xs = [1, 2, 3, 4, 5]
+    int total = 0
+    for int x in xs:
+        total = total + x
+    return { "total": total }
+
+get endpoint("/pares"):
+    List<int> xs = [1, 2, 3, 4, 5, 6]
+    List<int> out = []
+    for int x in xs:
+        if x % 2 != 0:
+            continue
+        out = out + [x]
+    return { "pares": out }
+
+get endpoint("/corta"):
+    List<int> xs = [1, 2, 3, 4, 5]
+    int visto = 0
+    for int x in xs:
+        if x == 3:
+            break
+        visto = visto + 1
+    return { "visto": visto }
+
+get endpoint("/anidado"):
+    List<int> a = [1, 2]
+    List<int> b = [10, 20]
+    int total = 0
+    for int x in a:
+        for int y in b:
+            total = total + x * y
+    return { "total": total }
+
+get endpoint("/claves"):
+    Dict<string,int> d = { "uno": 1, "dos": 2 }
+    List<string> ks = []
+    for string k in d:
+        ks = ks + [k]
+    return { "claves": ks }
+
+get endpoint("/malo"):
+    for int x in 42:
+        return { "no": true }
+    return { "fin": true }

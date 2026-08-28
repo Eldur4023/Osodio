@@ -131,6 +131,7 @@ const char* op_name(Op op) {
         case Op::MakeList:         return "MAKE_LIST";
         case Op::MakeDict:         return "MAKE_DICT";
         case Op::GetIndex:         return "GET_INDEX";
+        case Op::IterList:         return "ITER_LIST";
         case Op::GetMember:        return "GET_MEMBER";
         case Op::CallNative:       return "CALL_NATIVE";
         case Op::CallAsync:        return "CALL_ASYNC";

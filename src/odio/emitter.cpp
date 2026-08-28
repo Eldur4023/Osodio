@@ -181,8 +181,10 @@ void Emitter::emit_stmt(const Stmt& s) {
             emit_expr(*s.value);
             size_t to_end = chunk_->emit(Op::JumpIfFalse, s.loc);
 
-            loops_.push_back({start, {}});
+            loops_.push_back({});
             emit_block(s.body);
+            // En un while, `continue` vuelve a evaluar la condicion.
+            for (size_t j : loops_.back().continues) chunk_->patch(j, start);
             chunk_->emit(Op::Jump, s.loc, static_cast<uint32_t>(start));
             chunk_->patch(to_end, chunk_->here());
 
@@ -211,13 +213,64 @@ void Emitter::emit_stmt(const Stmt& s) {
 
         case StmtKind::Continue:
             if (loops_.empty()) { error(s.loc, "'continue' fuera de un bucle"); return; }
-            chunk_->emit(Op::Jump, s.loc,
-                         static_cast<uint32_t>(loops_.back().continue_target));
+            loops_.back().continues.push_back(chunk_->emit(Op::Jump, s.loc));
             break;
 
-        case StmtKind::For:
-            error(s.loc, "'for' todavia no esta implementado");
+        // `for T x in xs:` se desazucara a un indice sobre la lista.  Las
+        // ranuras auxiliares llevan un espacio en el nombre, que ningun
+        // identificador de Odio puede contener: asi nunca chocan con las del
+        // usuario ni entre dos bucles anidados.
+        case StmtKind::For: {
+            begin_scope();
+
+            emit_expr(*s.target);
+            chunk_->emit(Op::IterList, s.loc);
+            int items = declare_local(" items", s.loc);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(items));
+
+            chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(items));
+            chunk_->emit(Op::CallNative, s.loc,
+                         (static_cast<uint32_t>(native_id("len")) << 8) | 1u);
+            int count = declare_local(" count", s.loc);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(count));
+
+            chunk_->emit(Op::Const, s.loc, chunk_->add_constant(Value::integer(0)));
+            int index = declare_local(" index", s.loc);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(index));
+
+            int var = declare_local(s.name, s.loc);
+
+            size_t start = chunk_->here();
+            chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(index));
+            chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(count));
+            chunk_->emit(Op::Lt, s.loc);
+            size_t to_end = chunk_->emit(Op::JumpIfFalse, s.loc);
+
+            chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(items));
+            chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(index));
+            chunk_->emit(Op::GetIndex, s.loc);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(var));
+
+            loops_.push_back({});
+            emit_block(s.body);
+
+            // `continue` salta al incremento, no al principio: si no, el bucle
+            // no avanzaria nunca.
+            size_t step = chunk_->here();
+            for (size_t j : loops_.back().continues) chunk_->patch(j, step);
+            chunk_->emit(Op::LoadLocal, s.loc, static_cast<uint32_t>(index));
+            chunk_->emit(Op::Const, s.loc, chunk_->add_constant(Value::integer(1)));
+            chunk_->emit(Op::Add, s.loc);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(index));
+            chunk_->emit(Op::Jump, s.loc, static_cast<uint32_t>(start));
+
+            chunk_->patch(to_end, chunk_->here());
+            for (size_t j : loops_.back().breaks) chunk_->patch(j, chunk_->here());
+            loops_.pop_back();
+
+            end_scope();
             break;
+        }
 
         case StmtKind::Try:
             error(s.loc, "'try/catch' todavia no esta implementado");
