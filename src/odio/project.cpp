@@ -8,6 +8,8 @@
 #include <osodio/response.hpp>
 #include <osodio/task.hpp>
 #include <osodio/sse.hpp>
+#include <osodio/websocket.hpp>
+#include <osodio/app.hpp>
 #include <osodio/logger.hpp>
 
 #include <algorithm>
@@ -260,6 +262,11 @@ const std::vector<std::string>& scalar_types() {
 // consulta una vez para no depender del orden.
 int async_sleep_id() {
     static const int id = native_id("sleep");
+    return id;
+}
+
+int async_ws_recv_id() {
+    static const int id = native_id("__ws_recv");
     return id;
 }
 
@@ -597,12 +604,88 @@ bool prepare_args(const std::vector<ParamBind>& binds,
 
 void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) {
     for (const auto& r : mod.program.routes) {
-        if (r.method == "WS") {
-            diags.error(r.loc, "las rutas ws todavia no estan implementadas");
-            continue;
-        }
         if (!r.origins.empty() && r.method != "WS")
             diags.error(r.loc, "origins() solo es valido en rutas ws");
+
+        // ── Rutas ws ─────────────────────────────────────────────────────────
+        // El handshake RFC 6455 lo hace el motor; aqui solo se conduce el VM
+        // con la conexion ya establecida.
+        if (r.method == "WS") {
+            if (r.origins.empty()) {
+                diags.error(r.loc, "una ruta ws necesita origins(...): sin lista "
+                                   "blanca, cualquier web puede abrir la conexion "
+                                   "desde el navegador de tu usuario");
+                continue;
+            }
+
+            std::vector<ParamBind> ws_binds;
+            if (!bind_params(r, classes, ws_binds, diags)) continue;
+            bool body_param = false;
+            for (const auto& b : ws_binds)
+                if (b.kind == BindKind::Body) body_param = true;
+            if (body_param) {
+                diags.error(r.loc, "una ruta ws no lleva cuerpo");
+                continue;
+            }
+
+            auto    ws_chunk = std::make_shared<Chunk>();
+            Emitter ws_emitter(diags);
+            if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
+
+            ++mod.vm_routes;
+            std::string ws_where = "WS " + r.pattern;
+            osodio::App::WSOptions opts;
+            opts.allowed_origins = r.origins;
+
+            mod.router.add_internal("GET", r.pattern,
+                osodio::App::make_ws_handler(
+                    [ws_chunk, ws_binds, ws_where]
+                    (osodio::WSConnection conn, osodio::Request& req,
+                     osodio::Response& res) -> osodio::Task<void> {
+                        NativeCtx ctx{req, res};
+                        ctx.ws              = &conn;
+                        ctx.response_written = true;   // el upgrade ya respondio
+
+                        std::vector<Value> args;
+                        if (!prepare_args(ws_binds, req, res, ctx, args)) co_return;
+
+                        VM         vm;
+                        VM::Result result = vm.start(*ws_chunk, std::move(args), ctx);
+
+                        while (result.status == VM::Status::Suspended) {
+                            Value produced = Value::null();
+
+                            if (result.await_id == async_ws_recv_id()) {
+                                // Primera suspension que devuelve valor: el
+                                // mensaje entra en el VM como resultado del
+                                // `await`.  null significa conexion cerrada.
+                                auto msg = co_await conn.recv();
+                                if (msg && !msg->is_close())
+                                    produced = Value::str(msg->data);
+                            }
+                            else if (result.await_id == async_sleep_id()) {
+                                long long ms = result.await_args.empty()
+                                             ? 0 : result.await_args[0].as_int();
+                                if (ms < 0) ms = 0;
+                                co_await osodio::sleep(static_cast<int>(ms));
+                                if (req.is_cancelled()) co_return;
+                            }
+
+                            result = vm.resume(std::move(produced), ctx);
+                        }
+
+                        if (result.status == VM::Status::Error) {
+                            std::string at = result.error_loc.file
+                                ? *result.error_loc.file + ":" +
+                                  std::to_string(result.error_loc.line) + ":" +
+                                  std::to_string(result.error_loc.col)
+                                : ws_where;
+                            osodio::log().error(at + ": " + result.error);
+                        }
+                    },
+                    std::move(opts)));
+            continue;
+        }
 
         // ── Rutas sse ────────────────────────────────────────────────────────
         // El flujo se abre antes de arrancar el VM y se cierra al terminar el

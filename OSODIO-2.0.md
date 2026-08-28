@@ -251,13 +251,12 @@ plantillas.
    `validate:` compilado a bytecode, con el cuerpo de la peticion enlazado como
    parametro tipado y 422 automatico. Y **`await`**: el VM se detiene y se reanuda
    conservando pila y locales, mientras el `co_await` real lo hace el handler en
-   C++. Sobre eso van las rutas **`sse`**, con `sse.send`, `sse.ping` y `sse.open`
-   como objeto reservado. Falta `for`, `try/catch`, los constructores, los metodos
-   y las rutas `ws`.
+   C++. Sobre eso van las rutas **`sse`** y **`ws`**, con `sse` y `ws` como objetos
+   reservados. Falta `for`, `try/catch`, los constructores y los metodos.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`, `sleep` (asincrono) y los
-   miembros de `sse`.
+   miembros de `sse` y `ws` (`ws.recv` tambien asincrono).
 4. ~~**Watcher + hot swap**~~ — hecho en el hito 1: sondeo de mtimes, swap de un
    `shared_ptr`, y si la nueva versión no compila se sigue sirviendo la anterior.
 5. ~~**Diagnósticos**~~ — hecho en el hito 1: `fichero:línea:columna`, línea de código y

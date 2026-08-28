@@ -165,8 +165,14 @@ public:
         return ws(std::move(path), std::forward<F>(fn), WSOptions{});
     }
 
+    // Construye el handler del upgrade sin registrarlo.  Lo usa ws() y tambien
+    // el frontend de Odio, que tiene su propio router y necesita la misma
+    // logica de handshake sin pasar por el router del motor.
+    //
+    // `fn` recibe la conexion ya establecida junto al Request y el Response de
+    // la peticion que la origino; tras el upgrade, el Response no debe tocarse.
     template<typename F>
-    App& ws(std::string path, F&& fn, WSOptions opts) {
+    static Handler make_ws_handler(F&& fn, WSOptions opts) {
         auto wrapper = [fn = std::forward<F>(fn), opts = std::move(opts)]
                        (Request& req, Response& res) mutable -> Task<void> {
 
@@ -285,10 +291,20 @@ public:
             res.mark_ws_started();
 
             WSConnection ws_conn(ws_state);
-            co_await fn(std::move(ws_conn));
+            co_await fn(std::move(ws_conn), req, res);
         };
-        // HTTP/1.1 uses GET; HTTP/2 CONNECT is routed as GET by dispatch_stream
-        router_.add("GET", std::move(path), std::move(wrapper));
+        return Handler(std::move(wrapper));
+    }
+
+    template<typename F>
+    App& ws(std::string path, F&& fn, WSOptions opts) {
+        router_.add_internal("GET", std::move(path),
+            make_ws_handler(
+                [fn = std::forward<F>(fn)]
+                (WSConnection c, Request&, Response&) mutable -> Task<void> {
+                    co_await fn(std::move(c));
+                },
+                std::move(opts)));
         return *this;
     }
 

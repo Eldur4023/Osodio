@@ -3,6 +3,7 @@
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
 #include <osodio/sse.hpp>
+#include <osodio/websocket.hpp>
 
 #include <array>
 
@@ -166,7 +167,32 @@ Value fn_sse_open(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
     return Value::boolean(ctx.sse->is_open());
 }
 
-const std::array<NativeDef, 17> kNatives = {{
+// ─── ws.* ────────────────────────────────────────────────────────────────────
+
+bool need_ws(NativeCtx& ctx, std::string& error, const char* what) {
+    if (ctx.ws) return true;
+    error = std::string("'ws.") + what + "' solo existe dentro de una ruta ws";
+    return false;
+}
+
+Value fn_ws_send(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!need_ws(ctx, error, "send")) return Value::null();
+    ctx.ws->send(args[0].to_string());
+    return Value::null();
+}
+
+Value fn_ws_open(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
+    if (!need_ws(ctx, error, "open")) return Value::null();
+    return Value::boolean(ctx.ws->is_open());
+}
+
+Value fn_ws_close(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
+    if (!need_ws(ctx, error, "close")) return Value::null();
+    ctx.ws->close();
+    return Value::null();
+}
+
+const std::array<NativeDef, 21> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -186,8 +212,13 @@ const std::array<NativeDef, 17> kNatives = {{
     {"__sse_send", 1, 3,  fn_sse_send},
     {"__sse_ping", 0, 1,  fn_sse_ping},
     {"__sse_open", 0, 0,  fn_sse_open},
+    // ws.* — igual que sse.*, se llega por member_native_id().
+    {"__ws_send",  1, 1,  fn_ws_send},
+    {"__ws_open",  0, 0,  fn_ws_open},
+    {"__ws_close", 0, 0,  fn_ws_close},
     // Asincronos: sin fn, los resuelve el driver del handler.
     {"sleep",     1, 1,  nullptr, true},
+    {"__ws_recv", 0, 0,  nullptr, true},
     // Marcador final para que native_count() no dependa del orden.
     {nullptr,     0, 0,  nullptr},
 }};
@@ -207,10 +238,14 @@ int native_count() { return static_cast<int>(kNatives.size()) - 1; }
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 3> kMembers = {{
-    {"sse", "send", "__sse_send"},
-    {"sse", "ping", "__sse_ping"},
-    {"sse", "open", "__sse_open"},
+const std::array<MemberMap, 7> kMembers = {{
+    {"sse", "send",  "__sse_send"},
+    {"sse", "ping",  "__sse_ping"},
+    {"sse", "open",  "__sse_open"},
+    {"ws",  "send",  "__ws_send"},
+    {"ws",  "open",  "__ws_open"},
+    {"ws",  "close", "__ws_close"},
+    {"ws",  "recv",  "__ws_recv"},
 }};
 } // namespace
 

@@ -295,8 +295,10 @@ void Emitter::emit_expr(const Expr& e) {
                                  "' es una operacion: hay que llamarla con ()");
                     return;
                 }
-                if (e.object->text == "sse" && route_method_ != "SSE") {
-                    error(e.loc, "'sse' solo existe dentro de una ruta sse");
+                if ((e.object->text == "sse" && route_method_ != "SSE") ||
+                    (e.object->text == "ws"  && route_method_ != "WS")) {
+                    error(e.loc, "'" + e.object->text + "' solo existe dentro de "
+                                 "una ruta " + e.object->text);
                     return;
                 }
                 chunk_->emit(Op::CallNative, e.loc,
@@ -351,8 +353,10 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
                                  "' no tiene un miembro '" + e.object->text + "'");
             return;
         }
-        if (e.object->object->text == "sse" && route_method_ != "SSE") {
-            error(e.object->loc, "'sse' solo existe dentro de una ruta sse");
+        const std::string& obj = e.object->object->text;
+        if ((obj == "sse" && route_method_ != "SSE") ||
+            (obj == "ws"  && route_method_ != "WS")) {
+            error(e.object->loc, "'" + obj + "' solo existe dentro de una ruta " + obj);
             return;
         }
     }

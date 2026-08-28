@@ -4,7 +4,7 @@
 
 #include "value.hpp"
 
-namespace osodio { class Request; class Response; class SSEWriter; }
+namespace osodio { class Request; class Response; class SSEWriter; class WSConnection; }
 
 namespace odio {
 
@@ -17,6 +17,9 @@ struct NativeCtx {
     // Solo en rutas sse: el escritor del flujo, creado por el driver antes de
     // arrancar el VM.  Nulo en el resto, y los builtins de sse lo comprueban.
     osodio::SSEWriter* sse = nullptr;
+
+    // Solo en rutas ws: la conexion ya establecida.
+    osodio::WSConnection* ws = nullptr;
 
     // Lo pone cualquier builtin que escriba la respuesta (text, render,
     // redirect...).  Si al terminar el handler sigue en false, el valor
