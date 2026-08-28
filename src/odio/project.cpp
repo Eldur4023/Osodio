@@ -15,6 +15,7 @@
 #include <osodio/logger.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <map>
 #include <fstream>
@@ -804,6 +805,151 @@ bool prepare_args(const std::vector<ParamBind>& binds,
     return true;
 }
 
+// ─── OpenAPI desde el AST ────────────────────────────────────────────────────
+//
+// La version C++ de esto eran 347 lineas de metaprogramacion que deducian el
+// esquema construyendo un T{} por defecto e inspeccionando el JSON resultante.
+// Con un AST delante, los nombres y los tipos ya estan ahi: es recorrer
+// declaraciones.
+
+std::string openapi_type(const std::string& t) {
+    if (t == "int" || t == "long")        return "integer";
+    if (t == "float" || t == "double")    return "number";
+    if (t == "bool")                      return "boolean";
+    return "string";
+}
+
+// El patron de Odio usa :nombre; OpenAPI usa {nombre}.
+std::string openapi_path(const std::string& pattern) {
+    std::string out;
+    size_t i = 0;
+    while (i < pattern.size()) {
+        if (pattern[i] == ':') {
+            size_t j = i + 1;
+            while (j < pattern.size() && pattern[j] != '/') ++j;
+            out += "{" + pattern.substr(i + 1, j - i - 1) + "}";
+            i = j;
+        } else {
+            out += pattern[i++];
+        }
+    }
+    return out;
+}
+
+nlohmann::json build_openapi(const Program& program, const ClassTable& classes) {
+    nlohmann::json doc;
+    doc["openapi"] = "3.0.3";
+    doc["info"]    = {
+        {"title",   program.app.name.empty() ? "Osodio API" : program.app.name},
+        {"version", program.app.version.empty() ? "0.1.0" : program.app.version},
+    };
+
+    // Las clases se publican como esquemas reutilizables.  Los mensajes de
+    // `validate:` se adjuntan como descripcion: son las reglas reales que
+    // aplica el servidor, asi que documentan mejor que cualquier texto aparte.
+    nlohmann::json schemas = nlohmann::json::object();
+    for (const auto& [name, info] : classes) {
+        nlohmann::json props    = nlohmann::json::object();
+        nlohmann::json required = nlohmann::json::array();
+
+        for (const auto& f : info->fields) {
+            props[f.name] = {{"type", openapi_type(f.type)}};
+            if (!f.optional) required.push_back(f.name);
+        }
+
+        nlohmann::json schema = {{"type", "object"}, {"properties", props}};
+        if (!required.empty()) schema["required"] = required;
+
+        if (!info->rules.empty()) {
+            std::string desc = "Reglas de validacion:";
+            for (const auto& r : info->rules) desc += "\n- " + r.message;
+            schema["description"] = desc;
+        }
+        schemas[name] = std::move(schema);
+    }
+    if (!schemas.empty()) doc["components"]["schemas"] = std::move(schemas);
+
+    nlohmann::json paths = nlohmann::json::object();
+
+    for (const auto& r : program.routes) {
+        // Las rutas de flujo no encajan en OpenAPI 3.0: se anuncian como GET
+        // con la respuesta que realmente devuelven, sin fingir un esquema.
+        std::string method = r.method;
+        if (method == "SSE" || method == "WS") method = "GET";
+        if (method == "*")                     method = "get";
+        for (auto& c : method) c = static_cast<char>(::tolower((unsigned char)c));
+
+        auto in_pattern = pattern_params(r.pattern);
+        nlohmann::json params    = nlohmann::json::array();
+        std::string    body_class;
+
+        for (const auto& p : r.params) {
+            if (classes.count(p.type.name)) { body_class = p.type.name; continue; }
+            if (p.type.name == "File" ||
+                (p.type.name == "List" && !p.type.args.empty() &&
+                 p.type.args[0].name == "File")) {
+                body_class = "__multipart";
+                continue;
+            }
+
+            bool in_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
+                           != in_pattern.end();
+            params.push_back({
+                {"name",     p.name},
+                {"in",       in_path ? "path" : "query"},
+                {"required", in_path},
+                {"schema",   {{"type", openapi_type(p.type.name)}}},
+            });
+        }
+
+        nlohmann::json op;
+        if (!params.empty()) op["parameters"] = params;
+
+        if (body_class == "__multipart") {
+            op["requestBody"] = {
+                {"required", true},
+                {"content", {{"multipart/form-data",
+                    {{"schema", {{"type", "object"}}}}}}},
+            };
+        } else if (!body_class.empty()) {
+            op["requestBody"] = {
+                {"required", true},
+                {"content", {{"application/json",
+                    {{"schema", {{"$ref", "#/components/schemas/" + body_class}}}}}}},
+            };
+        }
+
+        nlohmann::json responses;
+        if (r.method == "SSE") {
+            responses["200"] = {{"description", "Flujo de eventos"},
+                                {"content", {{"text/event-stream", nlohmann::json::object()}}}};
+            op["summary"] = "Server-Sent Events";
+        } else if (r.method == "WS") {
+            responses["101"] = {{"description", "Cambio a WebSocket"}};
+            op["summary"] = "WebSocket";
+        } else {
+            responses["200"] = {{"description", "OK"}};
+        }
+        // Solo se declaran los codigos que el servidor produce de verdad.
+        if (!body_class.empty() && body_class != "__multipart")
+            responses["422"] = {{"description", "Validacion fallida"}};
+        if (!r.guards.empty())
+            responses["403"] = {{"description", "Guarda del grupo no superada"}};
+        op["responses"] = std::move(responses);
+
+        // Cada codigo de `on error` declarado se anuncia en todas las rutas.
+        for (const auto& e : program.errors)
+            if (e.code >= 400)
+                op["responses"][std::to_string(e.code)] =
+                    nlohmann::json{{"description", "Manejador propio"}};
+
+        paths[openapi_path(r.pattern)][method] = std::move(op);
+    }
+
+    doc["paths"] = std::move(paths);
+    return doc;
+}
+
 void build_error_handlers(Module& mod, DiagnosticBag& diags) {
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
@@ -1111,6 +1257,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
 
         if (diags.empty()) build_routes(*mod, classes, auth, diags);
         if (diags.empty()) build_error_handlers(*mod, diags);
+        if (diags.empty()) mod->openapi = build_openapi(mod->program, classes);
     }
 
     // Se devuelve siempre: el llamante mira diags.empty() para saber si

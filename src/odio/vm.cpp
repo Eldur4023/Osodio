@@ -73,7 +73,48 @@ VM::Result VM::resume(Value awaited, NativeCtx& ctx) {
     return execute(ctx);
 }
 
+namespace {
+
+// El try mas interno que cubre `pc`: entre varios anidados, el de rango menor.
+const TryRange* find_handler(const Chunk& chunk, size_t pc) {
+    const TryRange* best = nullptr;
+    for (const auto& r : chunk.try_ranges) {
+        if (pc < r.begin || pc >= r.end) continue;
+        if (!best || (r.end - r.begin) < (best->end - best->begin)) best = &r;
+    }
+    return best;
+}
+
+Value error_value(const std::string& message) {
+    Value::Dict d;
+    d["message"] = Value::str(message);
+    return Value::dict(std::move(d));
+}
+
+} // namespace
+
+// Ejecuta y, si algo falla dentro de un `try`, salta a su `catch` y sigue.
+// El error se entrega como un valor mas, en la cima de la pila.
 VM::Result VM::execute(NativeCtx& ctx) {
+    Result r = run_until_error(ctx);
+    while (r.status == Status::Error) {
+        // pc_ ya apunta a la siguiente instruccion, asi que la que fallo es la
+        // anterior.
+        const TryRange* h = find_handler(*chunk_, pc_ - 1);
+        if (!h) return r;
+
+        // En un limite de sentencia la pila de operandos esta vacia, que es
+        // donde puede empezar un try; limpiarla deja el estado consistente sin
+        // tener que anotar profundidades.
+        stack_.clear();
+        push(error_value(r.error));
+        pc_ = h->catch_pc;
+        r = run_until_error(ctx);
+    }
+    return r;
+}
+
+VM::Result VM::run_until_error(NativeCtx& ctx) {
     const Chunk& chunk = *chunk_;
 
     // El contador se reinicia en cada tramo: un bucle de SSE legitimo puede

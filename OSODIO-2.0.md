@@ -255,8 +255,9 @@ plantillas.
    reservados. Tambien `group` con prefijos anidados y guardas acumuladas, y los
    objetos `session` y `jwt`, mas `on error` con `error` y `request` como objetos
    reservados, `for`, el almacen compartido `state`, `log`, cookies, formularios,
-   multipart con `File`/`List<File>`, y metodos sobre valores. Falta `try/catch`,
-   `/docs` desde el AST, los constructores y los metodos de clase.
+   multipart con `File`/`List<File>`, metodos sobre valores, `try/catch` y `/docs`
+   generado desde el AST. **La superficie de la capa 2 esta cubierta.** Quedan los
+   constructores y los metodos de clase, que son lenguaje, no framework.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`, `sleep` (asincrono) y los

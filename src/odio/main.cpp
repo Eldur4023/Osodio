@@ -5,6 +5,7 @@
 #include <osodio/app.hpp>
 #include <osodio/middleware.hpp>
 #include <osodio/logger.hpp>
+#include <osodio/openapi.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -148,6 +149,19 @@ int main(int argc, char** argv) {
     if (!cfg.name.empty()) app.api_info(cfg.name, cfg.version.empty() ? "0.1.0"
                                                                      : cfg.version);
     for (const auto& m : cfg.statics) app.serve_static(m.url_prefix, m.fs_root, m.spa);
+    // /openapi.json y /docs se sirven desde el modulo vivo, no desde una copia
+    // congelada al arrancar: asi la recarga en caliente actualiza tambien la
+    // documentacion.
+    if (cfg.docs) {
+        app.get("/openapi.json", [](osodio::Response& res) {
+            auto mod = current_module();
+            if (!mod) { res.status(503).json({{"error", "sin modulo"}}); return; }
+            res.json(mod->openapi);
+        });
+        app.get("/docs", [](osodio::Response& res) {
+            res.html(osodio::swagger_ui_html("/openapi.json"));
+        });
+    }
     if (cfg.health)  app.enable_health();
     if (cfg.metrics) app.enable_metrics();
 

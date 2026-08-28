@@ -55,6 +55,7 @@ private:
     size_t             pc_ = 0;
 
     Result execute(NativeCtx& ctx);
+    Result run_until_error(NativeCtx& ctx);
 
     void  push(Value v) { stack_.push_back(std::move(v)); }
     Value pop()         { Value v = std::move(stack_.back()); stack_.pop_back(); return v; }

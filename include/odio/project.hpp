@@ -23,6 +23,9 @@ struct Module {
     Program        program;
     osodio::Router router;
 
+    // Especificacion OpenAPI generada desde el AST al compilar.
+    nlohmann::json openapi;
+
     // Manejadores de `on error`, por codigo.  La clave 0 es el global.
     std::map<int, std::shared_ptr<Chunk>> error_handlers;
 

@@ -47,14 +47,26 @@ struct Instr {
     SourceLoc loc;      // para poder situar un error de ejecucion
 };
 
+// Un `try:` cubierto por su `catch:`.
+//
+// Se resuelve por rango en compilacion y no por una pila en runtime: asi un
+// `return`, un `break` o un `continue` que salgan del try no pueden dejar un
+// manejador colgado que atrape un error posterior.
+struct TryRange {
+    size_t begin    = 0;   // primera instruccion protegida
+    size_t end      = 0;   // primera instruccion YA fuera del try
+    size_t catch_pc = 0;
+};
+
 // El codigo de un handler, ya compilado.
 struct Chunk {
     std::vector<Instr> code;
     // Si es false, el handler no puede detenerse y se puede ejecutar sobre un
     // VM reutilizado por hilo en vez de uno por peticion.
     bool               has_await = false;
-    std::vector<Value> constants;
-    int                num_locals = 0;
+    std::vector<Value>    constants;
+    std::vector<TryRange> try_ranges;
+    int                   num_locals = 0;
 
     // Nombres de las ranuras, solo para mensajes de error.
     std::vector<std::string> local_names;

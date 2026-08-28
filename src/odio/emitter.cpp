@@ -272,9 +272,30 @@ void Emitter::emit_stmt(const Stmt& s) {
             break;
         }
 
-        case StmtKind::Try:
-            error(s.loc, "'try/catch' todavia no esta implementado");
+        case StmtKind::Try: {
+            TryRange range;
+            range.begin = chunk_->here();
+            emit_block(s.body);
+            range.end = chunk_->here();
+
+            size_t to_end = chunk_->emit(Op::Jump, s.loc);
+            range.catch_pc = chunk_->here();
+            chunk_->try_ranges.push_back(range);
+
+            // El error llega en la cima como un Dict con `message`.
+            begin_scope();
+            if (!s.name.empty()) {
+                int slot = declare_local(s.name, s.loc);
+                chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(slot));
+            } else {
+                chunk_->emit(Op::Pop, s.loc);
+            }
+            for (const auto& st : s.orelse) emit_stmt(*st);
+            end_scope();
+
+            chunk_->patch(to_end, chunk_->here());
             break;
+        }
     }
 }
 
