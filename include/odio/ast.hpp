@@ -97,6 +97,28 @@ struct Param {
     SourceLoc   loc;
 };
 
+// Un campo de clase.
+struct Field {
+    TypeRef     type;
+    std::string name;
+    SourceLoc   loc;
+};
+
+// Una regla del bloque `validate:`: expresion booleana y el mensaje que se
+// emite cuando es falsa.
+struct ValidateRule {
+    ExprPtr     condition;
+    std::string message;
+    SourceLoc   loc;
+};
+
+struct ClassDecl {
+    std::string               name;
+    std::vector<Field>        fields;
+    std::vector<ValidateRule> rules;
+    SourceLoc                 loc;
+};
+
 struct RouteDecl {
     std::string              method;    // "GET", "POST", ..., "SSE", "WS"
     std::string              pattern;   // "/users/:id"
@@ -126,6 +148,7 @@ struct AppDecl {
 };
 
 struct Program {
+    std::vector<ClassDecl> classes;
     std::vector<RouteDecl> routes;
     AppDecl                app;
 };

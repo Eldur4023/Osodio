@@ -99,11 +99,14 @@ void Parser::parse_declaration(Program& out) {
         case Tok::KwApp:
             parse_app(out);
             return;
+        case Tok::KwClass:
+            parse_class(out);
+            return;
 
-        // Declaraciones que la gramatica define pero el hito 1 aun no compila.
+        // Declaraciones que la gramatica define pero que todavia no se compilan.
         // Se reportan explicitamente en vez de fallar con un error de sintaxis
         // confuso.
-        case Tok::KwClass: case Tok::KwFn: case Tok::KwGroup:
+        case Tok::KwFn: case Tok::KwGroup:
         case Tok::KwImport: case Tok::KwOn:
             error_here(std::string("'") + tok_name(peek().kind) +
                        "' todavia no esta implementado");
@@ -177,6 +180,90 @@ Param Parser::parse_param() {
     else                   error_here("se esperaba el nombre del parametro");
     if (match(Tok::Assign)) p.default_value = parse_expr();
     return p;
+}
+
+// ─── Clases ──────────────────────────────────────────────────────────────────
+
+void Parser::parse_class(Program& out) {
+    ClassDecl c;
+    c.loc = advance().loc;                        // 'class'
+
+    if (check(Tok::Ident)) c.name = advance().text;
+    else { error_here("se esperaba el nombre de la clase"); synchronize(); return; }
+
+    if (!expect(Tok::Colon, "tras el nombre de la clase")) { synchronize(); return; }
+    skip_newlines();
+    if (!expect(Tok::Indent, "al abrir el cuerpo de la clase")) { synchronize(); return; }
+
+    while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+        skip_newlines();
+        if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+        size_t before = i_;
+
+        // validate:
+        //     <expresion>   "mensaje"
+        if (check(Tok::KwValidate)) {
+            advance();
+            expect(Tok::Colon, "tras 'validate'");
+            skip_newlines();
+            if (!expect(Tok::Indent, "al abrir el bloque validate")) break;
+
+            while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+                skip_newlines();
+                if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+
+                ValidateRule rule;
+                rule.loc       = peek().loc;
+                rule.condition = parse_expr();
+                if (check(Tok::String)) rule.message = advance().text;
+                else error_here("cada regla de validate lleva su mensaje entre comillas");
+                c.rules.push_back(std::move(rule));
+                skip_newlines();
+            }
+            match(Tok::Dedent);
+        }
+        // Constructor: NombreDeLaClase(...) — se reconoce para poder decir que
+        // no esta implementado, en vez de confundirlo con un campo.
+        else if (check(Tok::Ident) && peek().text == c.name && peek(1).is(Tok::LParen)) {
+            diags_.error(peek().loc, "los constructores todavia no estan implementados");
+            while (!check(Tok::Newline) && !check(Tok::Dedent) &&
+                   !check(Tok::EndOfFile)) advance();
+            skip_newlines();
+            if (check(Tok::Indent)) {          // constructor con cuerpo: saltarlo
+                int depth = 0;
+                do {
+                    if (check(Tok::Indent)) ++depth;
+                    if (check(Tok::Dedent)) --depth;
+                    advance();
+                } while (depth > 0 && !check(Tok::EndOfFile));
+            }
+        }
+        // Campo: <tipo> <nombre>
+        else {
+            Field f;
+            f.loc  = peek().loc;
+            f.type = parse_type();
+            if (check(Tok::Ident)) f.name = advance().text;
+            else error_here("se esperaba el nombre del campo");
+
+            for (const auto& prev_field : c.fields) {
+                if (prev_field.name == f.name) {
+                    diags_.error(f.loc, "el campo '" + f.name + "' esta duplicado");
+                    break;
+                }
+            }
+            c.fields.push_back(std::move(f));
+        }
+
+        skip_newlines();
+        if (i_ == before) advance();
+    }
+    match(Tok::Dedent);
+
+    if (c.fields.empty())
+        diags_.error(c.loc, "la clase '" + c.name + "' no declara ningun campo");
+
+    out.classes.push_back(std::move(c));
 }
 
 // ─── Bloque app: ─────────────────────────────────────────────────────────────

@@ -20,6 +20,12 @@ public:
     // Devuelve false si algo del cuerpo no se puede compilar todavia.
     bool emit_route(const RouteDecl& route, Chunk& out);
 
+    // Compila una expresion suelta con `names` ya declarados como locales, en
+    // ese orden.  Lo usan las reglas de `validate`: cada una se convierte en un
+    // chunk diminuto que recibe los campos y devuelve un booleano.
+    bool emit_condition(const Expr& e, const std::vector<std::string>& names,
+                        Chunk& out);
+
 private:
     DiagnosticBag& diags_;
     Chunk*         chunk_ = nullptr;

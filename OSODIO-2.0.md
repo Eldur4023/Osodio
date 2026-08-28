@@ -247,7 +247,10 @@ plantillas.
    *Hecho en el hito 2:* pila y locales propios, aritmetica, comparaciones,
    cortocircuito, `if`/`while`/`require`, ternario, listas y diccionarios, llamada
    a builtins, tope de pasos contra bucles infinitos, y errores de ejecucion con
-   `fichero:linea:columna`. Falta `await`, `for`, `try/catch` y `class`.
+   `fichero:linea:columna`. Tambien `class` con campos, campos opcionales y bloque
+   `validate:` compilado a bytecode, con el cuerpo de la peticion enlazado como
+   parametro tipado y 422 automatico. Falta `await`, `for`, `try/catch`, los
+   constructores y los metodos.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`.

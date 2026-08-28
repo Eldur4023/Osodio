@@ -56,6 +56,21 @@ bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
     return !failed_;
 }
 
+bool Emitter::emit_condition(const Expr& e, const std::vector<std::string>& names,
+                             Chunk& out) {
+    chunk_  = &out;
+    failed_ = false;
+    locals_.clear();
+    loops_.clear();
+    scope_depth_ = 0;
+
+    for (const auto& n : names) declare_local(n, e.loc);
+
+    emit_expr(e);
+    out.emit(Op::Return, e.loc);
+    return !failed_;
+}
+
 void Emitter::emit_block(const Block& body) {
     begin_scope();
     for (const auto& s : body) emit_stmt(*s);

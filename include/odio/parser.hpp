@@ -39,6 +39,7 @@ private:
     void parse_declaration(Program& out);
     void parse_route(Program& out, const Token& method_tok);
     void parse_app(Program& out);
+    void parse_class(Program& out);
 
     // ── Sentencias ───────────────────────────────────────────────────────────
     Block   parse_block();

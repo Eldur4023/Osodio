@@ -10,6 +10,7 @@
 #include <osodio/logger.hpp>
 
 #include <algorithm>
+#include <map>
 #include <fstream>
 #include <sstream>
 
@@ -248,13 +249,90 @@ std::vector<std::string> pattern_params(const std::string& pattern) {
     return out;
 }
 
-// Como se rellena una ranura local antes de ejecutar el handler.
-struct ParamBind {
+const std::vector<std::string>& scalar_types() {
+    static const std::vector<std::string> v =
+        {"int", "long", "float", "double", "bool", "string"};
+    return v;
+}
+
+bool is_scalar(const std::string& t) {
+    const auto& v = scalar_types();
+    return std::find(v.begin(), v.end(), t) != v.end();
+}
+
+// ─── Clases ──────────────────────────────────────────────────────────────────
+
+struct ClassField {
     std::string name;
-    std::string type;          // int, long, float, double, bool, string
-    bool        from_path   = false;
+    std::string type;
+    bool        optional = false;
+};
+
+// Una regla de `validate:` ya compilada: recibe los campos como locales, en el
+// orden de declaracion, y devuelve un booleano.
+struct ClassRule {
+    std::shared_ptr<Chunk> chunk;
+    std::string            message;
+};
+
+struct ClassInfo {
+    std::string             name;
+    std::vector<ClassField> fields;
+    std::vector<ClassRule>  rules;
+};
+
+using ClassTable = std::map<std::string, std::shared_ptr<ClassInfo>>;
+
+void build_classes(const Program& program, ClassTable& out, DiagnosticBag& diags) {
+    for (const auto& c : program.classes) {
+        if (out.count(c.name)) {
+            diags.error(c.loc, "la clase '" + c.name + "' ya esta declarada");
+            continue;
+        }
+
+        auto info  = std::make_shared<ClassInfo>();
+        info->name = c.name;
+
+        std::vector<std::string> field_names;
+        bool ok = true;
+
+        for (const auto& f : c.fields) {
+            if (!is_scalar(f.type.name)) {
+                diags.error(f.loc, "el tipo '" + f.type.str() + "' como campo todavia "
+                                   "no esta implementado; de momento solo "
+                                   "int, long, float, double, bool y string");
+                ok = false;
+                continue;
+            }
+            info->fields.push_back({f.name, f.type.name, f.type.optional});
+            field_names.push_back(f.name);
+        }
+        if (!ok) continue;
+
+        // Cada regla se compila contra los campos de la clase: si menciona un
+        // nombre que no existe, el error sale aqui y no en produccion.
+        for (const auto& r : c.rules) {
+            auto    chunk = std::make_shared<Chunk>();
+            Emitter emitter(diags);
+            if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
+            info->rules.push_back({chunk, r.message});
+        }
+
+        out[c.name] = std::move(info);
+    }
+}
+
+// ─── Enlace de parametros ────────────────────────────────────────────────────
+
+enum class BindKind { Path, Query, Body };
+
+struct ParamBind {
+    BindKind    kind = BindKind::Path;
+    std::string name;
+    std::string type;          // escalar, o el nombre de la clase si es Body
     bool        has_default = false;
     std::string default_text;
+    std::shared_ptr<ClassInfo> cls;   // solo Body
 };
 
 // Convierte el texto crudo de la URL al tipo declarado.  Un valor mal formado
@@ -273,13 +351,39 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
     return false;
 }
 
-// Valida los parametros contra el patron y produce el plan de enlace.
-bool bind_params(const RouteDecl& r, std::vector<ParamBind>& out, DiagnosticBag& diags) {
-    static const std::vector<std::string> kScalars =
-        {"int", "long", "float", "double", "bool", "string"};
+// Comprueba que un valor JSON encaja con el tipo declarado del campo.
+// No hay conversion entre familias: un string en un campo int es un error, no
+// un intento de parseo.
+bool json_fits(const nlohmann::json& j, const std::string& type, Value& out) {
+    if (type == "string") {
+        if (!j.is_string()) return false;
+        out = Value::str(j.get<std::string>());
+        return true;
+    }
+    if (type == "bool") {
+        if (!j.is_boolean()) return false;
+        out = Value::boolean(j.get<bool>());
+        return true;
+    }
+    if (type == "int" || type == "long") {
+        if (!j.is_number_integer()) return false;
+        out = Value::integer(j.get<long long>());
+        return true;
+    }
+    if (type == "float" || type == "double") {
+        if (!j.is_number()) return false;
+        out = Value::real(j.get<double>());
+        return true;
+    }
+    return false;
+}
 
+// Valida los parametros contra el patron y produce el plan de enlace.
+bool bind_params(const RouteDecl& r, const ClassTable& classes,
+                 std::vector<ParamBind>& out, DiagnosticBag& diags) {
     auto in_pattern = pattern_params(r.pattern);
-    bool ok = true;
+    bool ok         = true;
+    bool seen_body  = false;
 
     for (const auto& seg : in_pattern) {
         bool found = false;
@@ -292,14 +396,40 @@ bool bind_params(const RouteDecl& r, std::vector<ParamBind>& out, DiagnosticBag&
     }
 
     for (const auto& p : r.params) {
+        bool in_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
+                       != in_pattern.end();
+
+        // Un parametro cuyo tipo es una clase se enlaza al cuerpo de la
+        // peticion: es la idea de FastAPI, el body es un parametro tipado mas.
+        auto it = classes.find(p.type.name);
+        if (it != classes.end()) {
+            if (in_path) {
+                diags.error(p.loc, "'" + p.name + "' esta en el patron de ruta, "
+                                   "asi que no puede ser del tipo '" + p.type.name + "'");
+                ok = false;
+                continue;
+            }
+            if (seen_body) {
+                diags.error(p.loc, "solo puede haber un parametro de cuerpo por ruta");
+                ok = false;
+                continue;
+            }
+            if (r.method == "GET" || r.method == "DELETE") {
+                diags.error(p.loc, "una ruta " + r.method + " no lleva cuerpo");
+                ok = false;
+                continue;
+            }
+            seen_body = true;
+            out.push_back({BindKind::Body, p.name, p.type.name, false, {}, it->second});
+            continue;
+        }
+
         ParamBind b;
         b.name = p.name;
         b.type = p.type.name;
 
-        if (std::find(kScalars.begin(), kScalars.end(), p.type.name) == kScalars.end()) {
-            diags.error(p.loc, "el tipo '" + p.type.str() + "' como parametro de ruta "
-                               "todavia no esta implementado; de momento solo "
-                               "int, long, float, double, bool y string");
+        if (!is_scalar(p.type.name)) {
+            diags.error(p.loc, "tipo desconocido: '" + p.type.str() + "'");
             ok = false;
             continue;
         }
@@ -309,15 +439,14 @@ bool bind_params(const RouteDecl& r, std::vector<ParamBind>& out, DiagnosticBag&
             continue;
         }
 
-        b.from_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
-                      != in_pattern.end();
+        b.kind = in_path ? BindKind::Path : BindKind::Query;
 
-        if (b.from_path && p.default_value) {
+        if (in_path && p.default_value) {
             diags.error(p.loc, "un parametro de ruta no puede tener valor por defecto");
             ok = false;
             continue;
         }
-        if (!b.from_path && p.default_value) {
+        if (!in_path && p.default_value) {
             const Expr& d = *p.default_value;
             if      (d.kind == ExprKind::StringLit) b.default_text = d.text;
             else if (d.kind == ExprKind::IntLit)    b.default_text = std::to_string(d.int_value);
@@ -338,8 +467,8 @@ bool bind_params(const RouteDecl& r, std::vector<ParamBind>& out, DiagnosticBag&
 // Reconoce la forma puramente declarativa: un unico `return` que se resuelve
 // entero en compilacion.  Estas rutas no ejecutan ni un paso de bytecode.
 Action try_declarative(const RouteDecl& r) {
-    if (!r.params.empty())                                     return {};
-    if (r.body.size() != 1)                                    return {};
+    if (!r.params.empty())                                       return {};
+    if (r.body.size() != 1)                                      return {};
     if (r.body[0]->kind != StmtKind::Return || !r.body[0]->value) return {};
 
     DiagnosticBag scratch;
@@ -347,17 +476,89 @@ Action try_declarative(const RouteDecl& r) {
     return scratch.empty() ? a : Action{};
 }
 
+// Construye la instancia a partir del cuerpo JSON.
+//
+// Faltar un campo obligatorio, o traerlo con el tipo equivocado, o incumplir
+// una regla de validate, es 422 con la lista completa de motivos: se reportan
+// todos de una vez, no el primero.  El handler no llega a ejecutarse.
+bool bind_body(const ClassInfo& ci, osodio::Request& req, osodio::Response& res,
+               NativeCtx& ctx, Value& out) {
+    auto body = nlohmann::json::parse(req.body, nullptr, false);
+    if (body.is_discarded()) {
+        res.status(400).json({{"error", "JSON invalido"}});
+        return false;
+    }
+    if (!body.is_object()) {
+        res.status(422).json({{"error", "Validacion fallida"},
+                              {"mensajes", {"el cuerpo tiene que ser un objeto JSON"}}});
+        return false;
+    }
+
+    std::vector<std::string> messages;
+    Value::Dict              fields;
+    std::vector<Value>       ordered;
+
+    for (const auto& f : ci.fields) {
+        auto it = body.find(f.name);
+        if (it == body.end() || it->is_null()) {
+            if (!f.optional) messages.push_back(f.name + ": obligatorio");
+            fields[f.name] = Value::null();
+            ordered.push_back(Value::null());
+            continue;
+        }
+        Value v;
+        if (!json_fits(*it, f.type, v)) {
+            messages.push_back(f.name + ": se esperaba " + f.type);
+            fields[f.name] = Value::null();
+            ordered.push_back(Value::null());
+            continue;
+        }
+        fields[f.name] = v;
+        ordered.push_back(std::move(v));
+    }
+
+    // Las reglas solo se ejecutan si los campos estan bien: evaluarlas sobre
+    // valores ausentes daria errores de tipo en vez del mensaje util.
+    if (messages.empty()) {
+        thread_local VM rule_vm;
+        for (const auto& rule : ci.rules) {
+            VM::Result r = rule_vm.run(*rule.chunk, ordered, ctx);
+            if (!r.ok) {
+                osodio::log().error("validate de " + ci.name + ": " + r.error);
+                res.status(500).json({{"error", r.error}});
+                return false;
+            }
+            if (!r.value.truthy()) messages.push_back(rule.message);
+        }
+    }
+
+    if (!messages.empty()) {
+        res.status(422).json({{"error", "Validacion fallida"}, {"mensajes", messages}});
+        return false;
+    }
+
+    out = Value::dict(std::move(fields));
+    return true;
+}
+
 // Rellena las ranuras de los parametros a partir de la peticion.
-// Devuelve false, con la respuesta 400 ya escrita, si algun valor no encaja.
+// Devuelve false, con la respuesta ya escrita, si algun valor no encaja.
 bool prepare_args(const std::vector<ParamBind>& binds,
                   osodio::Request& req, osodio::Response& res,
-                  std::vector<Value>& out) {
+                  NativeCtx& ctx, std::vector<Value>& out) {
     out.reserve(binds.size());
     for (const auto& b : binds) {
+        if (b.kind == BindKind::Body) {
+            Value v;
+            if (!bind_body(*b.cls, req, res, ctx, v)) return false;
+            out.push_back(std::move(v));
+            continue;
+        }
+
         std::string raw;
         bool present = false;
 
-        if (b.from_path) {
+        if (b.kind == BindKind::Path) {
             auto it = req.params.find(b.name);
             if (it != req.params.end()) { raw = it->second; present = true; }
         } else {
@@ -374,10 +575,10 @@ bool prepare_args(const std::vector<ParamBind>& binds,
             else                         v = Value::integer(0);
         } else if (!coerce(raw, b.type, v)) {
             res.status(400).json({
-                {"error",     "parametro invalido"},
-                {"param",     b.name},
-                {"esperado",  b.type},
-                {"recibido",  raw},
+                {"error",    "parametro invalido"},
+                {"param",    b.name},
+                {"esperado", b.type},
+                {"recibido", raw},
             });
             return false;
         }
@@ -386,7 +587,7 @@ bool prepare_args(const std::vector<ParamBind>& binds,
     return true;
 }
 
-void build_routes(Module& mod, DiagnosticBag& diags) {
+void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) {
     for (const auto& r : mod.program.routes) {
         if (r.method == "SSE" || r.method == "WS") {
             diags.error(r.loc, "las rutas " + r.method + " necesitan await, que "
@@ -409,7 +610,7 @@ void build_routes(Module& mod, DiagnosticBag& diags) {
 
         // Nivel 2: ruta con logica → bytecode sobre el VM.
         std::vector<ParamBind> binds;
-        if (!bind_params(r, binds, diags)) continue;
+        if (!bind_params(r, classes, binds, diags)) continue;
 
         auto    chunk = std::make_shared<Chunk>();
         Emitter emitter(diags);
@@ -420,10 +621,10 @@ void build_routes(Module& mod, DiagnosticBag& diags) {
         mod.router.add_internal(r.method, r.pattern,
             [chunk, binds, where](osodio::Request& req, osodio::Response& res)
                 -> osodio::Task<void> {
-                std::vector<Value> args;
-                if (!prepare_args(binds, req, res, args)) co_return;
-
                 NativeCtx ctx{req, res, false};
+
+                std::vector<Value> args;
+                if (!prepare_args(binds, req, res, ctx, args)) co_return;
 
                 // Un VM por hilo de event loop: ni la pila ni el heap se
                 // comparten, asi que no hay nada que sincronizar entre cores.
@@ -482,8 +683,14 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         parser.parse_into(mod->program);
     }
 
-    // Pasada 2: resolver y construir la tabla de rutas.
-    if (diags.empty()) build_routes(*mod, diags);
+    // Pasada 2: resolver clases y construir la tabla de rutas.  Las clases van
+    // primero porque las rutas se enlazan contra ellas; dentro de cada pasada el
+    // orden de los ficheros es indiferente.
+    if (diags.empty()) {
+        ClassTable classes;
+        build_classes(mod->program, classes, diags);
+        if (diags.empty()) build_routes(*mod, classes, diags);
+    }
 
     // Se devuelve siempre: el llamante mira diags.empty() para saber si
     // publicarlo.  Ver la nota en project.hpp sobre la vida de los SourceLoc.
