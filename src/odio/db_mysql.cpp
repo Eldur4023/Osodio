@@ -173,6 +173,15 @@ public:
         return true;
     }
 
+    bool last_insert_id(size_t worker, long long& id, std::string& error) override {
+        if (worker >= conns_.size() || !conns_[worker]) {
+            error = "mysql: sin conexion";
+            return false;
+        }
+        id = static_cast<long long>(mysql_insert_id(conns_[worker]));
+        return true;
+    }
+
     ~MysqlDriver() override {
         for (auto* c : conns_) if (c) mysql_close(c);
     }

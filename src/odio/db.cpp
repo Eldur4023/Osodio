@@ -9,6 +9,7 @@ DbPool::~DbPool() { stop(); }
 void DbPool::start(size_t workers) {
     if (!threads_.empty()) return;
     workers_.assign(workers, 0);
+    pinned_.resize(workers);
 
     for (size_t i = 0; i < workers; ++i) {
         threads_.emplace_back([this, i] {
@@ -16,10 +17,22 @@ void DbPool::start(size_t workers) {
                 std::function<void(size_t)> job;
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
-                    cv_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
-                    if (stopping_ && jobs_.empty()) return;
-                    job = std::move(jobs_.front());
-                    jobs_.pop();
+                    cv_.wait(lock, [this, i] {
+                        return stopping_ || !jobs_.empty() || !pinned_[i].empty();
+                    });
+                    if (stopping_ && jobs_.empty() && pinned_[i].empty()) return;
+
+                    // Lo fijado a este worker va primero: es la continuacion de
+                    // una transaccion que ya tiene su conexion abierta.
+                    if (!pinned_[i].empty()) {
+                        job = std::move(pinned_[i].front());
+                        pinned_[i].pop();
+                    } else if (!jobs_.empty()) {
+                        job = std::move(jobs_.front());
+                        jobs_.pop();
+                    } else {
+                        continue;
+                    }
                 }
                 // Un trabajo que lanza no puede llevarse por delante el worker:
                 // sin conexion viva, el modulo dejaria de responder para todos.
@@ -36,6 +49,17 @@ void DbPool::submit(std::function<void(size_t)> job) {
         jobs_.push(std::move(job));
     }
     cv_.notify_one();
+}
+
+void DbPool::submit_to(size_t worker, std::function<void(size_t)> job) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_ || worker >= pinned_.size()) return;
+        pinned_[worker].push(std::move(job));
+    }
+    // notify_all y no notify_one: el worker que debe atenderlo puede no ser el
+    // que despierte, y los demas volveran a dormirse.
+    cv_.notify_all();
 }
 
 void DbPool::stop() {

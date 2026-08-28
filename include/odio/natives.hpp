@@ -50,6 +50,15 @@ struct NativeCtx {
     // arrancar el VM.  Nulo en el resto, y los builtins de sse lo comprueban.
     osodio::SSEWriter* sse = nullptr;
 
+    // Transaccion en curso por modulo: nombre -> worker fijado.  Mientras
+    // exista, todas las consultas de ese modulo van por la misma conexion.
+    std::map<std::string, int> pinned_workers;
+
+    // Worker que ejecuto el ultimo exec de cada modulo.  `last_id()` tiene que
+    // ir por esa MISMA conexion: el identificador generado no existe en las
+    // demas.
+    std::map<std::string, int> last_exec_workers;
+
     // Partes multipart ya parseadas.  Un File del lenguaje guarda el indice de
     // su parte aqui, no los bytes: asi copiar un File es copiar un entero.
     const std::vector<osodio::MultipartPart>* parts   = nullptr;

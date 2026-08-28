@@ -32,6 +32,7 @@ enum class Op : uint8_t {
     MakeList,     // operand = numero de elementos
     MakeDict,     // operand = numero de pares
     GetIndex,
+    SetIndex,     // apila contenedor, indice y valor; deja el valor
     IterList,     // convierte la cima en la lista que se va a recorrer
     GetMember,    // operand = indice de constante con el nombre
     SetMember,    // idem; apila objeto y valor, y deja el valor

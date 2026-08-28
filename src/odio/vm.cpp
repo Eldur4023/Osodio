@@ -100,9 +100,8 @@ Value error_value(const std::string& message) {
 VM::Result VM::execute(NativeCtx& ctx) {
     Result r = run_until_error(ctx);
     while (r.status == Status::Error) {
-        // El pc del marco ya apunta a la siguiente instruccion, asi que la que fallo
-        // anterior.
-        // Un error sube por los marcos hasta encontrar un try que lo cubra: si
+        // El pc del marco ya apunta a la siguiente instruccion, asi que la que
+        // fallo es la anterior.  Un error sube por los marcos hasta encontrar un try que lo cubra: si
         // la funcion llamada no lo maneja, puede manejarlo quien la llamo.
         const TryRange* h = nullptr;
         while (!frames_.empty()) {
@@ -393,6 +392,31 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 r.await_args.resize(static_cast<size_t>(argc));
                 for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
                 return r;
+            }
+
+            case Op::SetIndex: {
+                Value v   = pop();
+                Value idx = pop();
+                Value obj = pop();
+                if (obj.is_list()) {
+                    if (!idx.is_int())
+                        return fail("el indice de una List tiene que ser int", in.loc);
+                    long long i = idx.as_int();
+                    auto& l = obj.as_list();
+                    if (i < 0 || i >= (long long)l.size())
+                        return fail("indice fuera de rango: " + std::to_string(i) +
+                                    " (tamano " + std::to_string(l.size()) + ")", in.loc);
+                    l[static_cast<size_t>(i)] = v;
+                } else if (obj.is_dict()) {
+                    if (!idx.is_str())
+                        return fail("la clave de un Dict tiene que ser string", in.loc);
+                    obj.as_dict()[idx.as_str()] = v;
+                } else {
+                    return fail(std::string("no se puede indexar ") + obj.type_name(),
+                                in.loc);
+                }
+                push(std::move(v));
+                break;
             }
 
             case Op::SetMember: {

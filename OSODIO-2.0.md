@@ -342,6 +342,8 @@ dependen del runtime de C++.
 
 La persistencia entra como **módulos**, no como parte del núcleo:
 
+Cada módulo expone `query`, `exec`, `begin`, `commit`, `rollback` y `last_id`.
+
 - `sqlite` — embebido, un fichero, sin servidor
 - `postgres` — vía libpq
 - `mysql` — vía libmysqlclient
@@ -374,6 +376,14 @@ petición. Y una ruta sin base de datos responde en 10 ms con el pool saturado.
 
 También verificado que si el servidor cae, la consulta devuelve un error como valor, y al
 volver el servidor las conexiones se reabren solas.
+
+**Transacciones.** `begin` fija la conexión del worker que la abrió, y todo lo que venga
+después del mismo módulo va por ella hasta `commit` o `rollback`. Un handler que termina sin
+cerrarla la deshace automáticamente y lo avisa por el log: si no, esa conexión volvería al
+pool dentro de una transacción y el siguiente que la cogiera heredaría ese estado.
+
+`last_id()` se encamina a la conexión del último `exec`, porque el identificador generado no
+existe en las demás.
 
 **Inyección de SQL.** Los parámetros van siempre por *bind* —`sqlite3_bind`, `PQexecParams`,
 sentencias preparadas de MySQL— y nunca concatenados. No hay forma de construir SQL por

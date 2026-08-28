@@ -231,6 +231,16 @@ void Emitter::emit_stmt(const Stmt& s) {
                 return;
             }
 
+            // `xs[0] = v` y `d["k"] = v`.
+            if (s.target->kind == ExprKind::Index) {
+                emit_expr(*s.target->object);
+                emit_expr(*s.target->lhs);
+                emit_expr(*s.value);
+                chunk_->emit(Op::SetIndex, s.loc);
+                chunk_->emit(Op::Pop, s.loc);
+                return;
+            }
+
             // `this.campo = v` y `objeto.campo = v`.
             if (s.target->kind == ExprKind::Member) {
                 emit_expr(*s.target->object);
@@ -606,7 +616,40 @@ void Emitter::emit_expr(const Expr& e) {
                 break;
             }
 
-            error(e.loc, "'++' y '--' solo se aplican a una variable o a un campo");
+            if (tgt.kind == ExprKind::Index) {
+                begin_scope();
+                emit_expr(*tgt.object);
+                int cont = declare_local(" contened", e.loc);
+                chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(cont));
+
+                emit_expr(*tgt.lhs);
+                int idx = declare_local(" indice", e.loc);
+                chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(idx));
+
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(cont));
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(idx));
+                chunk_->emit(Op::GetIndex, e.loc);
+                int prev = declare_local(" previo", e.loc);
+                chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(prev));
+
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(cont));
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(idx));
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(prev));
+                one();
+                chunk_->emit(op, e.loc);
+                chunk_->emit(Op::SetIndex, e.loc);
+
+                // SetIndex deja el valor nuevo en la cima.
+                if (post) {
+                    chunk_->emit(Op::Pop, e.loc);
+                    chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(prev));
+                }
+                end_scope();
+                break;
+            }
+
+            error(e.loc, "'++' y '--' solo se aplican a una variable, un campo "
+                         "o un elemento indexado");
             break;
         }
 
@@ -708,6 +751,11 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
             if (argc < static_cast<size_t>(mdef.min_args)) {
                 error(e.loc, "'" + obj + "." + e.object->text +
                              "()' espera al menos la consulta SQL");
+                return;
+            }
+            if (mdef.max_args >= 0 && argc > static_cast<size_t>(mdef.max_args)) {
+                error(e.loc, "'" + obj + "." + e.object->text +
+                             "()' no lleva argumentos");
                 return;
             }
             if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }

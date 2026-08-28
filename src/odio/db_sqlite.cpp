@@ -118,6 +118,15 @@ public:
         return true;
     }
 
+    bool last_insert_id(size_t worker, long long& id, std::string& error) override {
+        if (worker >= conns_.size() || !conns_[worker]) {
+            error = "sqlite: sin conexion";
+            return false;
+        }
+        id = sqlite3_last_insert_rowid(conns_[worker]);
+        return true;
+    }
+
     ~SqliteDriver() override {
         for (auto* db : conns_) if (db) sqlite3_close(db);
     }

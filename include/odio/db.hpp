@@ -31,7 +31,15 @@ public:
     ~DbPool();
 
     void start(size_t workers);
+
+    // Reparto libre: lo coge el primer worker disponible.
     void submit(std::function<void(size_t worker)> job);
+
+    // Fijado a un worker concreto.  Lo necesita una transaccion: BEGIN, las
+    // consultas y COMMIT tienen que ir por la MISMA conexion, y cada worker es
+    // dueno de una.
+    void submit_to(size_t worker, std::function<void(size_t worker)> job);
+
     void stop();
 
     size_t size() const { return workers_.size(); }
@@ -39,7 +47,8 @@ public:
 private:
     std::vector<std::thread>                        threads_;
     std::vector<int>                                workers_;   // solo para el tamano
-    std::queue<std::function<void(size_t)>>         jobs_;
+    std::queue<std::function<void(size_t)>>              jobs_;
+    std::vector<std::queue<std::function<void(size_t)>>> pinned_;
     std::mutex                                      mutex_;
     std::condition_variable                         cv_;
     bool                                            stopping_ = false;
@@ -75,6 +84,15 @@ public:
     virtual bool exec(size_t worker, const std::string& sql,
                       const std::vector<Value>& args,
                       long long& affected, std::string& error) = 0;
+
+    // Identificador generado por el ultimo INSERT en esa conexion.  No todos
+    // los motores lo ofrecen de forma fiable; el que no, lo dice.
+    virtual bool last_insert_id(size_t worker, long long& id, std::string& error) {
+        (void)worker; (void)id;
+        error = std::string(name()) + ": last_id() no esta disponible; usa "
+                "'insert ... returning id' con query()";
+        return false;
+    }
 
     size_t pool_size() const { return pool_size_; }
     void   set_pool_size(size_t n) { pool_size_ = n; }
@@ -127,17 +145,20 @@ struct DbAwaitable {
     DbPool*                        pool;
     osodio::core::EventLoop*       loop;
     std::function<void(size_t)>    work;   // recibe el worker: elige la conexion
+    int                            pinned = -1;   // >= 0 dentro de una transaccion
 
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
         // `this` vive hasta que el co_await termina, y el handle se reanuda una
         // sola vez, asi que capturarlos por valor es seguro.
-        auto* p = pool; auto* l = loop; auto w = work;
-        p->submit([l, h, w](size_t worker) {
+        auto* p = pool; auto* l = loop; auto w = work; int pin = pinned;
+        auto job = [l, h, w](size_t worker) {
             w(worker);
             l->post([h]() mutable { h.resume(); });
-        });
+        };
+        if (pin >= 0) p->submit_to(static_cast<size_t>(pin), std::move(job));
+        else          p->submit(std::move(job));
     }
 
     void await_resume() const noexcept {}

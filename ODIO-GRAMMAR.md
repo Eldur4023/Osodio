@@ -224,8 +224,8 @@ statement     ::= var_decl
 
 var_decl      ::= type IDENT [ "=" expr ] NEWLINE
 assign_stmt   ::= lvalue ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr NEWLINE
-
 lvalue        ::= IDENT { "." IDENT | "[" expr "]" }
+
 
 if_stmt       ::= "if" expr ":" block
                   { ( "elif" | "else" "if" ) expr ":" block }

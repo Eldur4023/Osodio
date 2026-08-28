@@ -334,7 +334,7 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 44> kNatives = {{
+const std::array<NativeDef, 48> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -388,6 +388,10 @@ const std::array<NativeDef, 44> kNatives = {{
     // emisor apila; asi un unico builtin sirve para los tres.
     {"__db_query", 2, -1, nullptr, true},
     {"__db_exec",  2, -1, nullptr, true},
+    {"__db_begin",    1, 1, nullptr, true},
+    {"__db_commit",   1, 1, nullptr, true},
+    {"__db_rollback", 1, 1, nullptr, true},
+    {"__db_last_id",  1, 1, nullptr, true},
     // Marcador final para que native_count() no dependa del orden.
     {nullptr,     0, 0,  nullptr},
 }};
@@ -611,7 +615,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 30> kMembers = {{
+const std::array<MemberMap, 42> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -631,6 +635,18 @@ const std::array<MemberMap, 30> kMembers = {{
     {"postgres", "exec",  "__db_exec"},
     {"mysql",    "query", "__db_query"},
     {"mysql",    "exec",  "__db_exec"},
+    {"sqlite",   "begin",    "__db_begin"},
+    {"sqlite",   "commit",   "__db_commit"},
+    {"sqlite",   "rollback", "__db_rollback"},
+    {"sqlite",   "last_id",  "__db_last_id"},
+    {"postgres", "begin",    "__db_begin"},
+    {"postgres", "commit",   "__db_commit"},
+    {"postgres", "rollback", "__db_rollback"},
+    {"postgres", "last_id",  "__db_last_id"},
+    {"mysql",    "begin",    "__db_begin"},
+    {"mysql",    "commit",   "__db_commit"},
+    {"mysql",    "rollback", "__db_rollback"},
+    {"mysql",    "last_id",  "__db_last_id"},
     {"request", "path",    "__req_path"},
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},

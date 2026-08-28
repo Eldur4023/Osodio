@@ -730,7 +730,8 @@ StmtPtr Parser::parse_statement() {
 
 // Solo una variable o un campo pueden estar a la izquierda de una asignacion.
 bool Parser::assignable(const Expr& e) {
-    return e.kind == ExprKind::Ident || e.kind == ExprKind::Member;
+    return e.kind == ExprKind::Ident || e.kind == ExprKind::Member ||
+           e.kind == ExprKind::Index;
 }
 
 // Copia el lado izquierdo para poder leerlo y escribirlo en la misma sentencia.
@@ -738,7 +739,11 @@ bool Parser::assignable(const Expr& e) {
 ExprPtr Parser::clone_target(const Expr& e) {
     auto out  = make(e.kind, e.loc);
     out->text = e.text;
-    if (e.kind == ExprKind::Member && e.object) out->object = clone_target(*e.object);
+    if (e.object) out->object = clone_target(*e.object);
+    if (e.kind == ExprKind::Index && e.lhs) out->lhs = clone_target(*e.lhs);
+    out->int_value   = e.int_value;
+    out->float_value = e.float_value;
+    out->bool_value  = e.bool_value;
     return out;
 }
 
