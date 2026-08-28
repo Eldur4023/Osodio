@@ -62,9 +62,11 @@ struct NativeCtx {
     // en el primer acceso y solo se reescribe si el handler la modifica.
     SessionState* session = nullptr;
 
-    // Solo en un manejador `on error`: el codigo y el motivo.
-    int         error_code    = 0;
-    std::string error_message;
+    // Solo en un manejador `on error`: el codigo, el motivo, y —cuando el
+    // error viene de validar un cuerpo— la lista completa de mensajes.
+    int                             error_code    = 0;
+    std::string                     error_message;
+    const std::vector<std::string>* error_messages = nullptr;
 
     // Claims del JWT del Authorization: Bearer, ya verificados por el driver.
     const Value* jwt_claims = nullptr;
@@ -107,6 +109,11 @@ int              member_native_id(const std::string& object, const std::string& 
 Value call_method(NativeCtx& ctx, Value& receiver, const std::string& name,
                   std::vector<Value>& args, std::string& error);
 bool             is_reserved_object(const std::string& name);
+
+// Mensajes de la ultima validacion fallida en este hilo.  Se rellenan al
+// construir el 422 y los lee el manejador `on error` de la misma peticion; no
+// hay suspension entre ambos momentos, asi que no pueden cruzarse peticiones.
+std::vector<std::string>& last_validation_messages();
 const NativeDef& native_at(int id);
 int              native_count();
 

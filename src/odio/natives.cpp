@@ -313,6 +313,15 @@ Value fn_error_message(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.error_message);
 }
 
+// Lista vacia y no null cuando el error no viene de validar: asi recorrerla con
+// `for` siempre funciona.
+Value fn_error_messages(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    Value::List out;
+    if (ctx.error_messages)
+        for (const auto& m : *ctx.error_messages) out.push_back(Value::str(m));
+    return Value::list(std::move(out));
+}
+
 Value fn_req_path(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.path);
 }
@@ -325,7 +334,7 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 41> kNatives = {{
+const std::array<NativeDef, 42> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -357,7 +366,8 @@ const std::array<NativeDef, 41> kNatives = {{
     {"__jwt_valid",     0, 0,  fn_jwt_valid},
     {"__jwt_claims",    0, 0,  fn_jwt_claims},
     {"__error_code",    0, 0,  fn_error_code},
-    {"__error_message", 0, 0,  fn_error_message},
+    {"__error_message",  0, 0, fn_error_message},
+    {"__error_messages", 0, 0, fn_error_messages},
     {"__req_path",      0, 0,  fn_req_path},
     {"__req_method",    0, 0,  fn_req_method},
     {"__req_ip",        0, 0,  fn_req_ip},
@@ -379,6 +389,11 @@ const std::array<NativeDef, 41> kNatives = {{
 }};
 
 } // namespace
+
+std::vector<std::string>& last_validation_messages() {
+    thread_local std::vector<std::string> msgs;
+    return msgs;
+}
 
 SharedState& SharedState::instance() {
     static SharedState s;
@@ -592,7 +607,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 23> kMembers = {{
+const std::array<MemberMap, 24> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -604,7 +619,8 @@ const std::array<MemberMap, 23> kMembers = {{
     {"jwt",     "valid",  "__jwt_valid"},
     {"jwt",     "claims", "__jwt_claims"},
     {"error",   "code",    "__error_code"},
-    {"error",   "message", "__error_message"},
+    {"error",   "message",  "__error_message"},
+    {"error",   "messages", "__error_messages"},
     {"request", "path",    "__req_path"},
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},

@@ -198,8 +198,9 @@ int main(int argc, char** argv) {
         if (it == mod->error_handlers.end()) return;   // sin manejador: se deja lo que haya
 
         odio::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "error interno" : "peticion no valida";
+        ctx.error_code     = code;
+        ctx.error_message  = res.status_code() >= 500 ? "error interno" : "peticion no valida";
+        ctx.error_messages = &odio::last_validation_messages();
 
         odio::VM  vm;
         auto result = vm.start(*it->second, {}, ctx, &mod->functions);

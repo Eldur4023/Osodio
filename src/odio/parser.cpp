@@ -116,8 +116,8 @@ void Parser::parse_declaration(Program& out) {
         // Se reportan explicitamente en vez de fallar con un error de sintaxis
         // confuso.
         case Tok::KwImport:
-            error_here(std::string("'") + tok_name(peek().kind) +
-                       "' todavia no esta implementado");
+            error_here("los modulos todavia no existen: la persistencia (sqlite, "
+                       "postgres, mysql) es alcance posterior a 2.0");
             advance();
             synchronize();
             return;

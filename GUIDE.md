@@ -534,6 +534,14 @@ on error:
     return render("500.html")
 ```
 
+En un `on error 422`, `error.messages` trae la lista completa de mensajes de validación —
+vacía si el 422 no vino de validar un cuerpo:
+
+```odio
+on error 422:
+    return { "detalles": error.messages }
+```
+
 Sin código, es el manejador global. **Solo cubre 400–599**: con un 2xx el handler de la ruta
 ya ha escrito la respuesta, y sustituirla sería un filtro de respuesta — es decir,
 middleware, que Osodio 2.0 delega al proxy a propósito.
@@ -695,7 +703,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 | `log` | `info` `warn` `error` | En todas partes |
 | `sse` | `send` `ping` `open` | Rutas `sse` |
 | `ws` | `send` `recv` `open` `close` | Rutas `ws` |
-| `error` | `code` `message` | Bloques `on error` |
+| `error` | `code` `message` `messages` | Bloques `on error` |
 
 Usar uno fuera de su contexto es error de compilación.
 

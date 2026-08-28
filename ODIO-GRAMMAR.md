@@ -37,7 +37,7 @@ Existen sin declararse, solo dentro del contexto que los define.
 | `jwt` | handlers bajo una guarda `jwt` |
 | `sse` | handlers `sse` |
 | `ws` | handlers `ws` |
-| `error` | bloques `on error` |
+| `error` | bloques `on error` (`code`, `message`, `messages`) |
 | `log` | en todas partes |
 | `this` | métodos y constructores |
 

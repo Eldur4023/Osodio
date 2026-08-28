@@ -716,6 +716,8 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
     }
 
     if (!messages.empty()) {
+        // Se dejan a mano del manejador `on error 422` de esta misma peticion.
+        last_validation_messages() = messages;
         res.status(422).json({{"error", "Validacion fallida"}, {"mensajes", messages}});
         return false;
     }
@@ -741,6 +743,9 @@ Value make_file_value(const osodio::MultipartPart& part, size_t index) {
 bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                   osodio::Request& req, osodio::Response& res,
                   NativeCtx& ctx, std::vector<Value>& out) {
+    // Se limpian al empezar: un 422 que el handler escriba a mano no debe
+    // heredar los mensajes de una validacion anterior en este hilo.
+    last_validation_messages().clear();
     out.reserve(binds.size());
     for (const auto& b : binds) {
         if (b.kind == BindKind::File || b.kind == BindKind::FileList) {
