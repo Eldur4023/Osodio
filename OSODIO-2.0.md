@@ -249,8 +249,10 @@ plantillas.
    a builtins, tope de pasos contra bucles infinitos, y errores de ejecucion con
    `fichero:linea:columna`. Tambien `class` con campos, campos opcionales y bloque
    `validate:` compilado a bytecode, con el cuerpo de la peticion enlazado como
-   parametro tipado y 422 automatico. Falta `await`, `for`, `try/catch`, los
-   constructores y los metodos.
+   parametro tipado y 422 automatico. Y **`await`**: el VM se detiene y se reanuda
+   conservando pila y locales, mientras el `co_await` real lo hace el handler en
+   C++. Falta `for`, `try/catch`, los constructores, los metodos, y las rutas
+   `sse`/`ws` que se apoyan en esta maquinaria.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`.

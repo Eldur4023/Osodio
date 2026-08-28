@@ -28,8 +28,13 @@ struct NativeDef {
     const char* name;
     int         min_args;
     int         max_args;    // -1 = sin limite
-    NativeFn    fn;
+    NativeFn    fn;          // nulo si es asincrono
+    bool        is_async = false;
 };
+
+// Builtins que suspenden.  El VM no los ejecuta: los devuelve al driver, que
+// es quien puede hacer un co_await de verdad sobre el motor.  El identificador
+// es el mismo indice de la tabla, asi que se consulta por nombre una sola vez.
 
 // Indice estable del builtin en la tabla, o -1 si no existe.  El emisor guarda
 // el indice en la instruccion, asi que el VM no busca por nombre en runtime.

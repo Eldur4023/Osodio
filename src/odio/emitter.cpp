@@ -282,12 +282,20 @@ void Emitter::emit_expr(const Expr& e) {
             break;
 
         case ExprKind::Call:
-            emit_call(e);
+            emit_call(e, /*awaited=*/false);
             break;
 
-        case ExprKind::Await:
-            error(e.loc, "'await' todavia no esta implementado");
+        // `await` solo tiene sentido sobre una llamada a un builtin que
+        // suspende.  Cualquier otra cosa se rechaza aqui, no en runtime.
+        case ExprKind::Await: {
+            if (!e.lhs || e.lhs->kind != ExprKind::Call) {
+                error(e.loc, "'await' solo se aplica a una llamada asincrona "
+                             "(de momento: sleep)");
+                return;
+            }
+            emit_call(*e.lhs, /*awaited=*/true);
             break;
+        }
 
         case ExprKind::This:
             error(e.loc, "'this' solo tiene sentido dentro de una clase, que "
@@ -296,7 +304,7 @@ void Emitter::emit_expr(const Expr& e) {
     }
 }
 
-void Emitter::emit_call(const Expr& e) {
+void Emitter::emit_call(const Expr& e, bool awaited) {
     if (!e.object || e.object->kind != ExprKind::Ident) {
         error(e.loc, "de momento solo se pueden llamar builtins por su nombre");
         return;
@@ -309,6 +317,19 @@ void Emitter::emit_call(const Expr& e) {
         return;
     }
     const NativeDef& def = native_at(id);
+
+    // Un builtin que suspende obliga a esperarlo, y uno que no, no admite
+    // await: asi la firma de la llamada dice siempre si el handler se puede
+    // detener ahi, sin tener que mirar la tabla de builtins.
+    if (def.is_async && !awaited) {
+        error(e.loc, "'" + name + "()' es asincrono: hay que escribir "
+                     "'await " + name + "(...)'");
+        return;
+    }
+    if (!def.is_async && awaited) {
+        error(e.loc, "'" + name + "()' no es asincrono: sobra el 'await'");
+        return;
+    }
 
     size_t positional = 0, named = 0;
     for (const auto& a : e.args) (a.name.empty() ? positional : named)++;
@@ -346,7 +367,9 @@ void Emitter::emit_call(const Expr& e) {
     }
     if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
 
-    chunk_->emit(Op::CallNative, e.loc,
+    if (def.is_async) chunk_->has_await = true;
+
+    chunk_->emit(def.is_async ? Op::CallAsync : Op::CallNative, e.loc,
                  (static_cast<uint32_t>(id) << 8) | static_cast<uint32_t>(argc));
 }
 

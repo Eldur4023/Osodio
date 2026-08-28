@@ -34,6 +34,7 @@ enum class Op : uint8_t {
     GetMember,    // operand = indice de constante con el nombre
 
     CallNative,   // operand = (id << 8) | argc
+    CallAsync,    // idem, pero suspende: el driver hace el co_await real
     Return,       // devuelve la cima
     ReturnNull,
 };
@@ -47,6 +48,9 @@ struct Instr {
 // El codigo de un handler, ya compilado.
 struct Chunk {
     std::vector<Instr> code;
+    // Si es false, el handler no puede detenerse y se puede ejecutar sobre un
+    // VM reutilizado por hilo en vez de uno por peticion.
+    bool               has_await = false;
     std::vector<Value> constants;
     int                num_locals = 0;
 

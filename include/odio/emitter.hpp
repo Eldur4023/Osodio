@@ -52,7 +52,7 @@ private:
     void emit_block(const Block& body);
     void emit_stmt(const Stmt& s);
     void emit_expr(const Expr& e);
-    void emit_call(const Expr& e);
+    void emit_call(const Expr& e, bool awaited);
 };
 
 } // namespace odio

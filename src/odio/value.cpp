@@ -133,6 +133,7 @@ const char* op_name(Op op) {
         case Op::GetIndex:         return "GET_INDEX";
         case Op::GetMember:        return "GET_MEMBER";
         case Op::CallNative:       return "CALL_NATIVE";
+        case Op::CallAsync:        return "CALL_ASYNC";
         case Op::Return:           return "RETURN";
         case Op::ReturnNull:       return "RETURN_NULL";
     }

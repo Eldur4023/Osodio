@@ -255,6 +255,13 @@ const std::vector<std::string>& scalar_types() {
     return v;
 }
 
+// El identificador de un builtin asincrono es su indice en la tabla; se
+// consulta una vez para no depender del orden.
+int async_sleep_id() {
+    static const int id = native_id("sleep");
+    return id;
+}
+
 bool is_scalar(const std::string& t) {
     const auto& v = scalar_types();
     return std::find(v.begin(), v.end(), t) != v.end();
@@ -522,8 +529,8 @@ bool bind_body(const ClassInfo& ci, osodio::Request& req, osodio::Response& res,
     if (messages.empty()) {
         thread_local VM rule_vm;
         for (const auto& rule : ci.rules) {
-            VM::Result r = rule_vm.run(*rule.chunk, ordered, ctx);
-            if (!r.ok) {
+            VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx);
+            if (r.status != VM::Status::Done) {
                 osodio::log().error("validate de " + ci.name + ": " + r.error);
                 res.status(500).json({{"error", r.error}});
                 return false;
@@ -626,12 +633,36 @@ void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) 
                 std::vector<Value> args;
                 if (!prepare_args(binds, req, res, ctx, args)) co_return;
 
-                // Un VM por hilo de event loop: ni la pila ni el heap se
-                // comparten, asi que no hay nada que sincronizar entre cores.
-                thread_local VM vm;
-                VM::Result result = vm.run(*chunk, std::move(args), ctx);
+                // El VM vive en el marco de esta corrutina, no en el hilo: dos
+                // handlers suspendidos a la vez sobre el mismo core tienen cada
+                // uno su pila y sus locales.  Los que no pueden suspenderse
+                // reutilizan uno por hilo y se ahorran las dos reservas.
+                thread_local VM shared_vm;
+                VM  own_vm;
+                VM& vm = chunk->has_await ? own_vm : shared_vm;
 
-                if (!result.ok) {
+                VM::Result result = vm.start(*chunk, std::move(args), ctx);
+
+                // El VM no sabe esperar: cada vez que se detiene, el co_await
+                // de verdad ocurre aqui, sobre el motor, y se le devuelve el
+                // resultado.
+                while (result.status == VM::Status::Suspended) {
+                    Value produced = Value::null();
+
+                    if (result.await_id == async_sleep_id()) {
+                        long long ms = result.await_args.empty()
+                                     ? 0 : result.await_args[0].as_int();
+                        if (ms < 0) ms = 0;
+                        co_await osodio::sleep(static_cast<int>(ms));
+                        // sleep() despierta antes si el cliente se desconecta;
+                        // en ese caso no tiene sentido seguir ejecutando.
+                        if (req.is_cancelled()) co_return;
+                    }
+
+                    result = vm.resume(std::move(produced), ctx);
+                }
+
+                if (result.status == VM::Status::Error) {
                     std::string at = result.error_loc.file
                         ? *result.error_loc.file + ":" +
                           std::to_string(result.error_loc.line) + ":" +

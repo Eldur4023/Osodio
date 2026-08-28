@@ -8,7 +8,7 @@ namespace {
 // un .odio tiene que ser tan legible como uno de compilacion.
 VM::Result fail(std::string msg, SourceLoc loc) {
     VM::Result r;
-    r.ok        = false;
+    r.status    = VM::Status::Error;
     r.error     = std::move(msg);
     r.error_loc = loc;
     return r;
@@ -54,7 +54,9 @@ bool compare(const Value& a, const Value& b, Op op, bool& ok) {
 
 } // namespace
 
-VM::Result VM::run(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx) {
+VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx) {
+    chunk_ = &chunk;
+    pc_    = 0;
     stack_.clear();
     stack_.reserve(32);
 
@@ -62,15 +64,28 @@ VM::Result VM::run(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx
     for (size_t i = 0; i < params.size() && i < locals_.size(); ++i)
         locals_[i] = std::move(params[i]);
 
-    size_t    pc    = 0;
+    return execute(ctx);
+}
+
+VM::Result VM::resume(Value awaited, NativeCtx& ctx) {
+    // El valor esperado ocupa el hueco que dejo la expresion `await`.
+    push(std::move(awaited));
+    return execute(ctx);
+}
+
+VM::Result VM::execute(NativeCtx& ctx) {
+    const Chunk& chunk = *chunk_;
+
+    // El contador se reinicia en cada tramo: un bucle de SSE legitimo puede
+    // estar horas vivo, pero entre dos suspensiones no debe dar mas de kStepLimit.
     long long steps = 0;
 
-    while (pc < chunk.code.size()) {
+    while (pc_ < chunk.code.size()) {
         if (++steps > kStepLimit)
             return fail("el handler supero el limite de pasos: bucle infinito?",
-                        chunk.code[pc].loc);
+                        chunk.code[pc_].loc);
 
-        const Instr& in = chunk.code[pc++];
+        const Instr& in = chunk.code[pc_++];
 
         switch (in.op) {
             case Op::Const:
@@ -177,19 +192,19 @@ VM::Result VM::run(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx
                 break;
 
             case Op::Jump:
-                pc = in.operand;
+                pc_ = in.operand;
                 break;
 
             case Op::JumpIfFalse:
-                if (!pop().truthy()) pc = in.operand;
+                if (!pop().truthy()) pc_ = in.operand;
                 break;
 
             case Op::JumpIfFalsePeek:
-                if (!stack_.back().truthy()) pc = in.operand; else pop();
+                if (!stack_.back().truthy()) pc_ = in.operand; else pop();
                 break;
 
             case Op::JumpIfTruePeek:
-                if (stack_.back().truthy()) pc = in.operand; else pop();
+                if (stack_.back().truthy()) pc_ = in.operand; else pop();
                 break;
 
             case Op::MakeList: {
@@ -268,15 +283,34 @@ VM::Result VM::run(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx
                 break;
             }
 
-            case Op::Return:
-                return Result{true, pop(), {}, {}};
+            // El VM no sabe esperar: recoge los argumentos, se detiene, y deja
+            // que el driver haga el co_await de verdad sobre el motor.  Al
+            // volver, resume() apila el resultado y sigue desde pc_.
+            case Op::CallAsync: {
+                int id   = static_cast<int>(in.operand >> 8);
+                int argc = static_cast<int>(in.operand & 0xFF);
+
+                Result r;
+                r.status     = Status::Suspended;
+                r.await_id   = id;
+                r.await_args.resize(static_cast<size_t>(argc));
+                for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
+                return r;
+            }
+
+            case Op::Return: {
+                Result r;
+                r.status = Status::Done;
+                r.value  = pop();
+                return r;
+            }
 
             case Op::ReturnNull:
-                return Result{true, Value::null(), {}, {}};
+                return Result{};
         }
     }
 
-    return Result{true, Value::null(), {}, {}};
+    return Result{};
 }
 
 } // namespace odio

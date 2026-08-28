@@ -128,7 +128,7 @@ Value fn_query(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
     return Value::str(it->second);
 }
 
-const std::array<NativeDef, 13> kNatives = {{
+const std::array<NativeDef, 14> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -144,6 +144,8 @@ const std::array<NativeDef, 13> kNatives = {{
     // Peticion
     {"header",    1, 2,  fn_header},
     {"query",     1, 2,  fn_query},
+    // Asincronos: sin fn, los resuelve el driver del handler.
+    {"sleep",     1, 1,  nullptr, true},
     // Marcador final para que native_count() no dependa del orden.
     {nullptr,     0, 0,  nullptr},
 }};
