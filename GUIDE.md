@@ -90,6 +90,20 @@ imprime con fichero, línea y columna.
 
 ---
 
+### Pruebas del propio Osodio
+
+```bash
+cd build && ctest --output-on-failure
+# o directamente:
+tests/run_tests.sh ~/osodio-build/osodio
+```
+
+60 pruebas que levantan el binario contra ficheros `.odio` reales y comprueban las
+respuestas por el socket. La suite no enlaza nada del proyecto: prueba lo que se despliega,
+no una versión instrumentada de ello.
+
+---
+
 ## 2. Estructura de un proyecto
 
 ```

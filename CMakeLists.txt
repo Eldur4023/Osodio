@@ -188,6 +188,16 @@ target_link_libraries(dump_tokens PRIVATE odio)
 add_executable(crypto_check src/odio/tools/crypto_check.cpp)
 target_link_libraries(crypto_check PRIVATE odio)
 
+# ── Pruebas ───────────────────────────────────────────────────────────────────
+# La suite es un script que ejerce el binario por el socket, tal y como se usa.
+# No enlaza nada del proyecto, asi que prueba lo que se despliega y no una
+# version instrumentada de ello.
+enable_testing()
+add_test(NAME regresion
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:osodio-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(regresion PROPERTIES TIMEOUT 300)
+
 # ── Ejemplos ──────────────────────────────────────────────────────────────────
 if(OSODIO_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
     file(GLOB OSODIO_EXAMPLE_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp)

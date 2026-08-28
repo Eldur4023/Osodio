@@ -1387,6 +1387,17 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             continue;
         }
 
+        // El patron se comprueba SIEMPRE, antes del atajo declarativo: una ruta
+        // sin logica tambien puede declarar ':id' y no recogerlo, y esa promesa
+        // del compilador no puede depender de por que camino vaya la ruta.
+        for (const auto& seg : pattern_params(r.pattern)) {
+            bool recogido = false;
+            for (const auto& p : r.params) if (p.name == seg) recogido = true;
+            if (!recogido)
+                diags.error(r.pattern_loc, "el patron declara ':" + seg +
+                                           "' pero ningun parametro lo recoge");
+        }
+
         // Nivel 1: ruta declarativa → accion nativa, cero bytecode.
         if (Action a = try_declarative(r)) {
             ++mod.declarative_routes;

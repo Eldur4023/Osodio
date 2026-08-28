@@ -393,6 +393,8 @@ concatenación desde Odio.
 
 ## 11. Decisiones pendientes
 
-- **Historia de tests.** ¿Odio tiene forma de testear endpoints en proceso (heredando
-  `TestClient`), o los tests son externos vía HTTP? Si es lo primero, la gramática crece.
+- (resuelto) **Historia de tests.** Dos niveles, y ninguno necesita sintaxis nueva:
+  `--autotest` hace que el binario recorra sus propios endpoints tras cada recarga, y
+  `tests/run_tests.sh` es la suite de regresión del proyecto, que ejerce el binario por el
+  socket.
 - (resuelto) `elif` y `else if` se admiten los dos.
