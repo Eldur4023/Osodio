@@ -127,6 +127,7 @@ add_library(odio STATIC
     src/odio/natives.cpp
     src/odio/emitter.cpp
     src/odio/vm.cpp
+    src/odio/autotest.cpp
     src/odio/project.cpp
 )
 target_include_directories(odio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

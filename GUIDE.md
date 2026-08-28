@@ -53,6 +53,36 @@ El argumento decide qué se compila, sin sorpresas:
 | `--check` | Compila y sale, sin arrancar |
 | `--port N` | Sobrescribe el puerto del bloque `app:` |
 | `--no-watch` | No vigila cambios |
+| `--autotest` | Al arrancar y en cada recarga, recorre los endpoints |
+| `--autotest=all` | Incluye también POST/PUT/PATCH/DELETE |
+
+### Auto-prueba
+
+Con `--autotest`, tras arrancar y tras **cada recarga con éxito**, Osodio se pega a sí mismo
+por HTTP y recorre las rutas del módulo:
+
+```
+cambios detectados: recompilando
+recargado: 11 ruta(s) — 4 declarativa(s), 7 con logica
+autotest: probando 11 ruta(s)
+  ok        GET    /usuarios/1                       200  0ms
+  ERROR     GET    /rota                             500  0ms
+  rechazada GET    /admin/panel                      403  0ms
+  flujo     GET    /eventos                          200  0ms
+  omitida   WS     /chat   (necesita handshake de WebSocket)
+autotest: 8 ok, 2 rechazadas, 1 con error, 1 omitidas
+```
+
+No comprueba lógica de negocio: busca **que ningún handler se rompa** después de un cambio.
+Por eso un `5xx` es lo único que cuenta como error — un `4xx` puede ser el comportamiento
+correcto de una guarda o de una validación.
+
+Los parámetros de ruta se rellenan por tipo (`:id` de tipo `int` → `1`), y con
+`--autotest=all` el cuerpo se sintetiza a partir de la clase que la ruta espera.
+
+**Sobre los efectos secundarios:** probar un endpoint *ejecuta su handler*. Un `DELETE`
+haría su trabajo de verdad en cada recarga, así que por defecto solo se recorren `GET`,
+`HEAD` y `SSE`. Incluir el resto es una decisión de quien lanza el binario, no del binario.
 
 El watcher vigila exactamente el conjunto que se compiló. Al guardar, recompila y sustituye
 el módulo. **Si el fichero nuevo no compila, se sigue sirviendo el anterior** y el error se

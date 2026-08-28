@@ -1,6 +1,7 @@
 // El binario de Osodio 2.0: lee ficheros .odio y sirve.
 #include <odio/project.hpp>
 #include <odio/vm.hpp>
+#include <odio/autotest.hpp>
 
 #include <osodio/app.hpp>
 #include <osodio/middleware.hpp>
@@ -23,6 +24,14 @@ namespace {
 std::shared_ptr<odio::Module> g_module;
 std::mutex                    g_module_mutex;
 std::atomic<bool>             g_stop{false};
+odio::AutotestOptions         g_autotest;
+
+// La sonda habla por el socket, asi que no puede correr en el hilo que acaba de
+// recargar: se lanza aparte y se le deja terminar sola.
+void lanzar_autotest(std::shared_ptr<odio::Module> mod) {
+    if (!g_autotest.enabled || !mod) return;
+    std::thread([mod] { odio::run_autotest(*mod, g_autotest); }).detach();
+}
 
 std::shared_ptr<odio::Module> current_module() {
     std::lock_guard<std::mutex> lk(g_module_mutex);
@@ -67,6 +76,8 @@ void watch_loop(std::vector<fs::path> inputs) {
         }
         if (!changed) continue;
 
+        osodio::log().info("cambios detectados: recompilando");
+
         // Margen para que el editor termine de escribir el fichero.
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
 
@@ -89,7 +100,10 @@ void watch_loop(std::vector<fs::path> inputs) {
 
         publish_module(next);
         osodio::log().info("recargado: " + std::to_string(next->program.routes.size()) +
-                           " rutas");
+                           " ruta(s) — " + std::to_string(next->declarative_routes) +
+                           " declarativa(s), " + std::to_string(next->vm_routes) +
+                           " con logica");
+        lanzar_autotest(next);
     }
 }
 
@@ -104,6 +118,8 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if      (a == "--check")    check_only = true;
         else if (a == "--no-watch") watch = false;
+        else if (a == "--autotest")     g_autotest.enabled = true;
+        else if (a == "--autotest=all") { g_autotest.enabled = true; g_autotest.unsafe = true; }
         else if (a == "--help" || a == "-h") { usage(); return 0; }
         else if (a == "--port") {
             if (i + 1 >= argc) { std::cerr << "--port necesita un numero\n"; return 2; }
@@ -219,6 +235,16 @@ int main(int argc, char** argv) {
 
     std::thread watcher;
     if (watch) watcher = std::thread(watch_loop, inputs);
+
+    // La primera pasada espera a que el servidor este escuchando.
+    if (g_autotest.enabled) {
+        g_autotest.port = port_override ? static_cast<uint16_t>(port_override)
+                                        : static_cast<uint16_t>(cfg.port);
+        std::thread([mod] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            odio::run_autotest(*mod, g_autotest);
+        }).detach();
+    }
 
     app.run(port_override ? static_cast<uint16_t>(port_override)
                           : static_cast<uint16_t>(cfg.port));

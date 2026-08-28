@@ -1,0 +1,46 @@
+app:
+    name "Demo del autotest"
+    port 8068
+    templates "./templates"
+
+class Alta:
+    string nombre
+    int    edad
+
+    validate:
+        edad >= 18   "edad: tienes que ser mayor de edad"
+
+get endpoint("/"):
+    return { "ok": true }
+
+get endpoint("/usuarios/:id", int id):
+    return { "id": id }
+
+get endpoint("/buscar", string q, int page = 1):
+    return { "q": q, "page": page }
+
+get endpoint("/plantilla"):
+    return render("index.html", titulo="T", nota="N")
+
+# Esta se rompe a proposito: el autotest tiene que cazarla.
+get endpoint("/rota"):
+    return { "malo": 1 + "texto" }
+
+# Guarda: responde 403, que no es un fallo.
+group("/admin"):
+    require query("k", "") == "abre" else status(403)
+
+    get endpoint("/panel"):
+        return { "panel": true }
+
+post endpoint("/alta", Alta a):
+    return { "creado": a.nombre }
+
+delete endpoint("/usuarios/:id", int id):
+    return status(204)
+
+sse endpoint("/eventos"):
+    sse.send("hola")
+
+ws endpoint("/chat") origins("http://127.0.0.1"):
+    ws.send("hola")
