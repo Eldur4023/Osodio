@@ -1,0 +1,60 @@
+import postgres
+
+app:
+    port 8076
+
+    postgres:
+        host     "127.0.0.1"
+        port     5433
+        database "pruebaodio"
+        user     "odio"
+        pool     4
+
+class Articulo:
+    string titulo
+    int    vistas
+
+    validate:
+        titulo != ""   "titulo: obligatorio"
+        vistas >= 0    "vistas: no puede ser negativo"
+
+get endpoint("/crear"):
+    await postgres.exec("drop table if exists articulos")
+    await postgres.exec("create table articulos (id serial primary key, titulo text not null, vistas integer, ratio double precision, activo boolean, creado timestamp default now())")
+    return { "ok": true }
+
+post endpoint("/articulos", Articulo a):
+    int filas = await postgres.exec(
+        "insert into articulos (titulo, vistas, ratio, activo) values ($1, $2, $3, $4)",
+        a.titulo, a.vistas, 1.5, true)
+    return { "insertadas": filas }.status(201)
+
+get endpoint("/articulos"):
+    return await postgres.query("select id, titulo, vistas, ratio, activo from articulos order by id")
+
+get endpoint("/articulos/:id", int id):
+    List<Json> filas = await postgres.query(
+        "select id, titulo, vistas, ratio, activo from articulos where id = $1", id)
+    if len(filas) == 0:
+        return status(404)
+    return filas[0]
+
+# Tipos: entero, decimal, booleano y null tienen que llegar como tales.
+get endpoint("/tipos"):
+    return await postgres.query("select 42 as entero, 2.5::float8 as decimal, true as si, false as no, null::text as nada, 'texto' as cadena")
+
+get endpoint("/busca", string q):
+    List<Json> filas = await postgres.query("select id from articulos where titulo = $1", q)
+    return { "encontrados": len(filas) }
+
+put endpoint("/articulos/:id", int id):
+    int filas = await postgres.exec("update articulos set vistas = vistas + 1 where id = $1", id)
+    return { "actualizadas": filas }
+
+delete endpoint("/articulos/:id", int id):
+    int filas = await postgres.exec("delete from articulos where id = $1", id)
+    return filas == 0 ? status(404) : status(204)
+
+get endpoint("/malo"):
+    Json r = await postgres.query("select * from no_existe")
+    return { "resultado": r }

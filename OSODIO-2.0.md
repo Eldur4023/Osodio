@@ -359,8 +359,21 @@ loop clavaría ese core entero, así que una consulta **suspende el handler** ig
 `await sleep` y el trabajo ocurre en un pool propio del módulo. Cada worker es dueño de una
 conexión, así que no hay reparto ni sincronización entre hilos.
 
-Verificado: una consulta de 356 ms con cuatro en vuelo deja una ruta sin base de datos
-respondiendo en 10 ms.
+Verificado contra un PostgreSQL 18 real, con `pool 4` y consultas de 1 s:
+
+| Concurrentes | Tiempo |
+|---|---|
+| 1 | 1016 ms |
+| 2 | 1015 ms |
+| 4 | 1039 ms |
+| 8 | 2015 ms (dos tandas) |
+| 16 | 4018 ms (cuatro tandas) |
+
+Satura en el tamaño del pool, encola el resto y drena por oleadas, sin perder ninguna
+petición. Y una ruta sin base de datos responde en 10 ms con el pool saturado.
+
+También verificado que si el servidor cae, la consulta devuelve un error como valor, y al
+volver el servidor las conexiones se reabren solas.
 
 **Inyección de SQL.** Los parámetros van siempre por *bind* —`sqlite3_bind`, `PQexecParams`,
 sentencias preparadas de MySQL— y nunca concatenados. No hay forma de construir SQL por
