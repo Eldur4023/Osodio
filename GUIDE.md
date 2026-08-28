@@ -22,11 +22,11 @@
 14. [Estado compartido](#14-estado-compartido)
 15. [Subida de ficheros](#15-subida-de-ficheros)
 16. [Manejadores de error](#16-manejadores-de-error)
-16b. [Funciones](#16b-funciones)
-17. [El lenguaje](#17-el-lenguaje)
-18. [Referencia de builtins](#18-referencia-de-builtins)
-19. [Errores frecuentes](#19-errores-frecuentes)
-20. [Cómo funciona por dentro](#20-cómo-funciona-por-dentro)
+17. [Funciones](#17-funciones)
+18. [El lenguaje](#18-el-lenguaje)
+19. [Referencia de builtins](#19-referencia-de-builtins)
+20. [Errores frecuentes](#20-errores-frecuentes)
+21. [Cómo funciona por dentro](#21-cómo-funciona-por-dentro)
 
 ---
 
@@ -489,7 +489,7 @@ defecto.
 
 ---
 
-## 16b. Funciones
+## 17. Funciones
 
 ```odio
 fn int doble(int x):
@@ -537,7 +537,7 @@ Declarar una función con el nombre de un builtin es un error de compilación.
 
 ---
 
-## 17. El lenguaje
+## 18. El lenguaje
 
 ### Tipos
 
@@ -613,7 +613,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 
 ---
 
-## 18. Referencia de builtins
+## 19. Referencia de builtins
 
 ### Funciones
 
@@ -657,7 +657,7 @@ Usar uno fuera de su contexto es error de compilación.
 
 ---
 
-## 19. Errores frecuentes
+## 20. Errores frecuentes
 
 | Mensaje | Qué pasa |
 |---|---|
@@ -674,7 +674,7 @@ Todos salen con fichero, línea, columna y un cursor bajo la posición exacta.
 
 ---
 
-## 20. Cómo funciona por dentro
+## 21. Cómo funciona por dentro
 
 ```
 osodio ./app  →  lex → parse → check → emitir
