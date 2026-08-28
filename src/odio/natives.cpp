@@ -2,6 +2,7 @@
 
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
+#include <osodio/sse.hpp>
 
 #include <array>
 
@@ -128,7 +129,44 @@ Value fn_query(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
     return Value::str(it->second);
 }
 
-const std::array<NativeDef, 14> kNatives = {{
+// ─── sse.* ───────────────────────────────────────────────────────────────────
+// El objeto `sse` solo existe dentro de una ruta sse; fuera, ctx.sse es nulo y
+// el builtin lo dice en vez de reventar.
+
+bool need_sse(NativeCtx& ctx, std::string& error, const char* what) {
+    if (ctx.sse) return true;
+    error = std::string("'sse.") + what + "' solo existe dentro de una ruta sse";
+    return false;
+}
+
+// sse.send(datos)
+// sse.send(evento, datos)
+// sse.send(evento, datos, id)     ← el id permite al navegador reconectar
+Value fn_sse_send(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!need_sse(ctx, error, "send")) return Value::null();
+
+    if (args.size() == 1) return Value::boolean(ctx.sse->send(args[0].to_string()));
+
+    if (!args[0].is_str()) {
+        error = "el nombre del evento tiene que ser string";
+        return Value::null();
+    }
+    std::string id = args.size() > 2 ? args[2].to_string() : std::string();
+    return Value::boolean(ctx.sse->send_event(args[0].as_str(),
+                                              args[1].to_string(), id));
+}
+
+Value fn_sse_ping(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!need_sse(ctx, error, "ping")) return Value::null();
+    return Value::boolean(ctx.sse->ping(args.empty() ? "" : args[0].to_string()));
+}
+
+Value fn_sse_open(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
+    if (!need_sse(ctx, error, "open")) return Value::null();
+    return Value::boolean(ctx.sse->is_open());
+}
+
+const std::array<NativeDef, 17> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -144,6 +182,10 @@ const std::array<NativeDef, 14> kNatives = {{
     // Peticion
     {"header",    1, 2,  fn_header},
     {"query",     1, 2,  fn_query},
+    // sse.* — no se escriben asi en Odio: se llega por member_native_id().
+    {"__sse_send", 1, 3,  fn_sse_send},
+    {"__sse_ping", 0, 1,  fn_sse_ping},
+    {"__sse_open", 0, 0,  fn_sse_open},
     // Asincronos: sin fn, los resuelve el driver del handler.
     {"sleep",     1, 1,  nullptr, true},
     // Marcador final para que native_count() no dependa del orden.
@@ -161,5 +203,26 @@ int native_id(const std::string& name) {
 const NativeDef& native_at(int id) { return kNatives[static_cast<size_t>(id)]; }
 
 int native_count() { return static_cast<int>(kNatives.size()) - 1; }
+
+namespace {
+struct MemberMap { const char* object; const char* member; const char* native; };
+
+const std::array<MemberMap, 3> kMembers = {{
+    {"sse", "send", "__sse_send"},
+    {"sse", "ping", "__sse_ping"},
+    {"sse", "open", "__sse_open"},
+}};
+} // namespace
+
+int member_native_id(const std::string& object, const std::string& member) {
+    for (const auto& m : kMembers)
+        if (object == m.object && member == m.member) return native_id(m.native);
+    return -1;
+}
+
+bool is_reserved_object(const std::string& name) {
+    for (const auto& m : kMembers) if (name == m.object) return true;
+    return false;
+}
 
 } // namespace odio

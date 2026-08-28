@@ -7,6 +7,7 @@
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
 #include <osodio/task.hpp>
+#include <osodio/sse.hpp>
 #include <osodio/logger.hpp>
 
 #include <algorithm>
@@ -596,13 +597,72 @@ bool prepare_args(const std::vector<ParamBind>& binds,
 
 void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) {
     for (const auto& r : mod.program.routes) {
-        if (r.method == "SSE" || r.method == "WS") {
-            diags.error(r.loc, "las rutas " + r.method + " necesitan await, que "
-                               "todavia no esta implementado");
+        if (r.method == "WS") {
+            diags.error(r.loc, "las rutas ws todavia no estan implementadas");
             continue;
         }
         if (!r.origins.empty() && r.method != "WS")
             diags.error(r.loc, "origins() solo es valido en rutas ws");
+
+        // ── Rutas sse ────────────────────────────────────────────────────────
+        // El flujo se abre antes de arrancar el VM y se cierra al terminar el
+        // handler; no hay respuesta final que escribir.
+        if (r.method == "SSE") {
+            std::vector<ParamBind> sse_binds;
+            if (!bind_params(r, classes, sse_binds, diags)) continue;
+            for (const auto& b : sse_binds) {
+                if (b.kind == BindKind::Body) {
+                    diags.error(r.loc, "una ruta sse no lleva cuerpo");
+                    break;
+                }
+            }
+
+            auto    sse_chunk = std::make_shared<Chunk>();
+            Emitter sse_emitter(diags);
+            if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
+
+            ++mod.vm_routes;
+            std::string sse_where = "SSE " + r.pattern;
+            mod.router.add_internal("GET", r.pattern,
+                [sse_chunk, sse_binds, sse_where](osodio::Request& req,
+                                                  osodio::Response& res)
+                    -> osodio::Task<void> {
+                    NativeCtx ctx{req, res};
+
+                    std::vector<Value> args;
+                    if (!prepare_args(sse_binds, req, res, ctx, args)) co_return;
+
+                    // make_sse escribe ya las cabeceras del flujo, asi que la
+                    // respuesta cuenta como emitida desde este momento.
+                    auto writer = osodio::make_sse(res, req);
+                    ctx.sse             = &writer;
+                    ctx.response_written = true;
+
+                    VM         vm;
+                    VM::Result result = vm.start(*sse_chunk, std::move(args), ctx);
+
+                    while (result.status == VM::Status::Suspended) {
+                        if (result.await_id == async_sleep_id()) {
+                            long long ms = result.await_args.empty()
+                                         ? 0 : result.await_args[0].as_int();
+                            if (ms < 0) ms = 0;
+                            co_await osodio::sleep(static_cast<int>(ms));
+                            if (req.is_cancelled()) co_return;
+                        }
+                        result = vm.resume(Value::null(), ctx);
+                    }
+
+                    if (result.status == VM::Status::Error) {
+                        std::string at = result.error_loc.file
+                            ? *result.error_loc.file + ":" +
+                              std::to_string(result.error_loc.line) + ":" +
+                              std::to_string(result.error_loc.col)
+                            : sse_where;
+                        osodio::log().error(at + ": " + result.error);
+                    }
+                });
+            continue;
+        }
 
         // Nivel 1: ruta declarativa → accion nativa, cero bytecode.
         if (Action a = try_declarative(r)) {
@@ -628,7 +688,7 @@ void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) 
         mod.router.add_internal(r.method, r.pattern,
             [chunk, binds, where](osodio::Request& req, osodio::Response& res)
                 -> osodio::Task<void> {
-                NativeCtx ctx{req, res, false};
+                NativeCtx ctx{req, res};
 
                 std::vector<Value> args;
                 if (!prepare_args(binds, req, res, ctx, args)) co_return;

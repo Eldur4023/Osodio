@@ -40,8 +40,9 @@ void Emitter::end_scope() {
 }
 
 bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
-    chunk_  = &out;
-    failed_ = false;
+    chunk_        = &out;
+    route_method_ = route.method;
+    failed_       = false;
     locals_.clear();
     loops_.clear();
     scope_depth_ = 0;
@@ -58,8 +59,9 @@ bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
 
 bool Emitter::emit_condition(const Expr& e, const std::vector<std::string>& names,
                              Chunk& out) {
-    chunk_  = &out;
-    failed_ = false;
+    chunk_        = &out;
+    route_method_ = {};
+    failed_       = false;
     locals_.clear();
     loops_.clear();
     scope_depth_ = 0;
@@ -275,11 +277,37 @@ void Emitter::emit_expr(const Expr& e) {
             chunk_->emit(Op::GetIndex, e.loc);
             break;
 
-        case ExprKind::Member:
+        // `sse.open` no es un campo de un diccionario: es un objeto reservado,
+        // y se resuelve al builtin que lo implementa.
+        case ExprKind::Member: {
+            if (e.object->kind == ExprKind::Ident &&
+                resolve_local(e.object->text) < 0 &&
+                is_reserved_object(e.object->text)) {
+
+                int id = member_native_id(e.object->text, e.text);
+                if (id < 0) {
+                    error(e.loc, "'" + e.object->text + "' no tiene un miembro '" +
+                                 e.text + "'");
+                    return;
+                }
+                if (native_at(id).min_args > 0) {
+                    error(e.loc, "'" + e.object->text + "." + e.text +
+                                 "' es una operacion: hay que llamarla con ()");
+                    return;
+                }
+                if (e.object->text == "sse" && route_method_ != "SSE") {
+                    error(e.loc, "'sse' solo existe dentro de una ruta sse");
+                    return;
+                }
+                chunk_->emit(Op::CallNative, e.loc,
+                             static_cast<uint32_t>(id) << 8);
+                return;
+            }
             emit_expr(*e.object);
             chunk_->emit(Op::GetMember, e.loc,
                          chunk_->add_constant(Value::str(e.text)));
             break;
+        }
 
         case ExprKind::Call:
             emit_call(e, /*awaited=*/false);
@@ -305,17 +333,42 @@ void Emitter::emit_expr(const Expr& e) {
 }
 
 void Emitter::emit_call(const Expr& e, bool awaited) {
-    if (!e.object || e.object->kind != ExprKind::Ident) {
+    if (!e.object) { error(e.loc, "llamada sin destino"); return; }
+
+    std::string name;
+    int         id = -1;
+
+    // sse.send(...) — miembro de un objeto reservado.
+    if (e.object->kind == ExprKind::Member &&
+        e.object->object->kind == ExprKind::Ident &&
+        resolve_local(e.object->object->text) < 0 &&
+        is_reserved_object(e.object->object->text)) {
+
+        name = e.object->object->text + "." + e.object->text;
+        id   = member_native_id(e.object->object->text, e.object->text);
+        if (id < 0) {
+            error(e.object->loc, "'" + e.object->object->text +
+                                 "' no tiene un miembro '" + e.object->text + "'");
+            return;
+        }
+        if (e.object->object->text == "sse" && route_method_ != "SSE") {
+            error(e.object->loc, "'sse' solo existe dentro de una ruta sse");
+            return;
+        }
+    }
+    else if (e.object->kind == ExprKind::Ident) {
+        name = e.object->text;
+        id   = native_id(name);
+        if (id < 0) {
+            error(e.object->loc, "funcion desconocida: '" + name + "'");
+            return;
+        }
+    }
+    else {
         error(e.loc, "de momento solo se pueden llamar builtins por su nombre");
         return;
     }
-    const std::string& name = e.object->text;
 
-    int id = native_id(name);
-    if (id < 0) {
-        error(e.object->loc, "funcion desconocida: '" + name + "'");
-        return;
-    }
     const NativeDef& def = native_at(id);
 
     // Un builtin que suspende obliga a esperarlo, y uno que no, no admite

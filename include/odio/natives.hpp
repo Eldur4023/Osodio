@@ -4,7 +4,7 @@
 
 #include "value.hpp"
 
-namespace osodio { class Request; class Response; }
+namespace osodio { class Request; class Response; class SSEWriter; }
 
 namespace odio {
 
@@ -13,6 +13,10 @@ namespace odio {
 struct NativeCtx {
     osodio::Request&  req;
     osodio::Response& res;
+
+    // Solo en rutas sse: el escritor del flujo, creado por el driver antes de
+    // arrancar el VM.  Nulo en el resto, y los builtins de sse lo comprueban.
+    osodio::SSEWriter* sse = nullptr;
 
     // Lo pone cualquier builtin que escriba la respuesta (text, render,
     // redirect...).  Si al terminar el handler sigue en false, el valor
@@ -39,6 +43,12 @@ struct NativeDef {
 // Indice estable del builtin en la tabla, o -1 si no existe.  El emisor guarda
 // el indice en la instruccion, asi que el VM no busca por nombre en runtime.
 int              native_id(const std::string& name);
+
+// Resuelve `objeto.miembro` de un objeto reservado (sse.send, sse.open...) al
+// builtin que lo implementa, o -1 si esa combinacion no existe.  El mapeo vive
+// junto a la tabla para que anadir un miembro sea tocar un sitio.
+int              member_native_id(const std::string& object, const std::string& member);
+bool             is_reserved_object(const std::string& name);
 const NativeDef& native_at(int id);
 int              native_count();
 

@@ -31,6 +31,10 @@ private:
     Chunk*         chunk_ = nullptr;
     bool           failed_ = false;
 
+    // Metodo de la ruta que se esta compilando: permite rechazar `sse.*` fuera
+    // de una ruta sse al compilar, en vez de dejarlo para runtime.
+    std::string route_method_;
+
     struct Local { std::string name; int depth; };
     std::vector<Local> locals_;
     int                scope_depth_ = 0;
