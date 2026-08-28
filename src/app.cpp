@@ -331,17 +331,26 @@ Task<void> App::handle_request(Request& req, Response& res) {
     // Async handlers take precedence over sync handlers for the same code.
     if (res.status_code() >= 400) {
         int code = res.status_code();
+
+        // El cuerpo por defecto ya esta escrito y marcado como comprometido.
+        // Un manejador de error existe precisamente para sustituirlo, asi que
+        // se descarta antes de darle el control; sin esto, su res.json() o
+        // res.render() se ignoraria en silencio.
+        auto with_reset = [&res](auto&& fn) { res.reset_body(); fn(); };
+
         auto ait = async_error_handlers_.find(code);
         if (ait != async_error_handlers_.end()) {
+            res.reset_body();
             co_await ait->second(code, req, res);
         } else if (catchall_async_error_handler_) {
+            res.reset_body();
             co_await catchall_async_error_handler_(code, req, res);
         } else {
             auto it = error_handlers_.find(code);
             if (it != error_handlers_.end()) {
-                it->second(code, req, res);
+                with_reset([&] { it->second(code, req, res); });
             } else if (catchall_error_handler_) {
-                catchall_error_handler_(code, req, res);
+                with_reset([&] { catchall_error_handler_(code, req, res); });
             }
         }
     }

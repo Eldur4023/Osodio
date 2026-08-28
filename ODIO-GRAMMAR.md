@@ -196,7 +196,12 @@ Los grupos anidan y las guardas se acumulan.
 ```
 error_decl    ::= "on" "error" [ INT ] ":" block
 ```
-Sin código, es el handler global.
+Sin código, es el handler global. El código, si se da, tiene que estar entre **400 y 599**:
+con un 2xx el handler de la ruta ya ha escrito la respuesta, y sustituirla sería un filtro
+de respuesta — es decir, middleware, que es justo lo que Osodio 2.0 delega al proxy.
+
+Dentro del bloque existe el objeto reservado `error` (`error.code`, `error.message`), y el
+manejador puede sustituir el cuerpo por defecto. El código de estado se conserva.
 
 ---
 

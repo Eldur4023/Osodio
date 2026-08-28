@@ -1,5 +1,6 @@
 // El binario de Osodio 2.0: lee ficheros .odio y sirve.
 #include <odio/project.hpp>
+#include <odio/vm.hpp>
 
 #include <osodio/app.hpp>
 #include <osodio/middleware.hpp>
@@ -170,6 +171,36 @@ int main(int argc, char** argv) {
     };
     app.any("/",  dispatch);
     app.any("/*", dispatch);
+
+    // Manejadores de `on error`: se registra uno solo en el motor y el reparto
+    // por codigo lo hace el modulo vivo, igual que con las rutas, para que la
+    // recarga en caliente tambien los alcance.
+    app.on_error([](int code, osodio::Request& req, osodio::Response& res) {
+        auto mod = current_module();
+        if (!mod) return;
+
+        auto it = mod->error_handlers.find(code);
+        if (it == mod->error_handlers.end()) it = mod->error_handlers.find(0);
+        if (it == mod->error_handlers.end()) return;   // sin manejador: se deja lo que haya
+
+        odio::NativeCtx ctx{req, res};
+        ctx.error_code    = code;
+        ctx.error_message = res.status_code() >= 500 ? "error interno" : "peticion no valida";
+
+        odio::VM  vm;
+        auto result = vm.start(*it->second, {}, ctx);
+        if (result.status == odio::VM::Status::Error) {
+            osodio::log().error("on error " + std::to_string(code) + ": " + result.error);
+            return;
+        }
+        if (result.status != odio::VM::Status::Done) return;   // no puede suspenderse
+
+        if (!ctx.response_written && !result.value.is_null())
+            res.json(result.value.to_json());
+
+        // El manejador describe el fallo; no puede convertirlo en un exito.
+        res.status(code);
+    });
 
     std::thread watcher;
     if (watch) watcher = std::thread(watch_loop, inputs);

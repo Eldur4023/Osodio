@@ -54,6 +54,23 @@ public:
         return *this;
     }
 
+    // Descarta el cuerpo ya escrito para que pueda escribirse otro.
+    //
+    // Existe para los manejadores de error: cuando uno se dispara, el cuerpo
+    // por defecto ya esta comprometido, asi que sin esto cualquier res.json()
+    // o res.render() del manejador se descartaria en silencio.
+    //
+    // No toca el codigo de estado ni las cabeceras, y es un no-op sobre una
+    // respuesta en modo SSE o WebSocket, donde ya se enviaron bytes al socket.
+    Response& reset_body() {
+        if (state_->sse_started || state_->ws_started) return *this;
+        state_->body.clear();
+        state_->sendfile_path.clear();
+        state_->sendfile_size = 0;
+        state_->body_committed = false;
+        return *this;
+    }
+
     Response& header(std::string key, std::string value) {
         // Strip CR/LF from both key and value to prevent HTTP response splitting.
         auto strip_crlf = [](std::string& s) {

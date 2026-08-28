@@ -232,7 +232,29 @@ Value fn_jwt_claims(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return *ctx.jwt_claims;
 }
 
-const std::array<NativeDef, 26> kNatives = {{
+// ─── error.* / request.* ─────────────────────────────────────────────────────
+
+Value fn_error_code(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::integer(ctx.error_code);
+}
+
+Value fn_error_message(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(ctx.error_message);
+}
+
+Value fn_req_path(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(ctx.req.path);
+}
+
+Value fn_req_method(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(ctx.req.method);
+}
+
+Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(ctx.req.remote_ip);
+}
+
+const std::array<NativeDef, 31> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -263,6 +285,11 @@ const std::array<NativeDef, 26> kNatives = {{
     {"__session_clear", 0, 0,  fn_session_clear},
     {"__jwt_valid",     0, 0,  fn_jwt_valid},
     {"__jwt_claims",    0, 0,  fn_jwt_claims},
+    {"__error_code",    0, 0,  fn_error_code},
+    {"__error_message", 0, 0,  fn_error_message},
+    {"__req_path",      0, 0,  fn_req_path},
+    {"__req_method",    0, 0,  fn_req_method},
+    {"__req_ip",        0, 0,  fn_req_ip},
     // Asincronos: sin fn, los resuelve el driver del handler.
     {"sleep",     1, 1,  nullptr, true},
     {"__ws_recv", 0, 0,  nullptr, true},
@@ -285,7 +312,7 @@ int native_count() { return static_cast<int>(kNatives.size()) - 1; }
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 10> kMembers = {{
+const std::array<MemberMap, 15> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -296,6 +323,11 @@ const std::array<MemberMap, 10> kMembers = {{
     {"session", "clear",  "__session_clear"},
     {"jwt",     "valid",  "__jwt_valid"},
     {"jwt",     "claims", "__jwt_claims"},
+    {"error",   "code",    "__error_code"},
+    {"error",   "message", "__error_message"},
+    {"request", "path",    "__req_path"},
+    {"request", "method",  "__req_method"},
+    {"request", "ip",      "__req_ip"},
 }};
 } // namespace
 

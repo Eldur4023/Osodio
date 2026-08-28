@@ -253,8 +253,8 @@ plantillas.
    conservando pila y locales, mientras el `co_await` real lo hace el handler en
    C++. Sobre eso van las rutas **`sse`** y **`ws`**, con `sse` y `ws` como objetos
    reservados. Tambien `group` con prefijos anidados y guardas acumuladas, y los
-   objetos `session` y `jwt`. Falta `for`, `try/catch`, `on error`, multipart, los
-   constructores y los metodos.
+   objetos `session` y `jwt`, mas `on error` con `error` y `request` como objetos
+   reservados. Falta `for`, `try/catch`, multipart, los constructores y los metodos.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`, `sleep` (asincrono) y los

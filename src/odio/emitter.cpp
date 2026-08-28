@@ -88,6 +88,19 @@ bool Emitter::emit_condition(const Expr& e, const std::vector<std::string>& name
     return !failed_;
 }
 
+bool Emitter::emit_error_handler(const ErrorDecl& decl, Chunk& out) {
+    chunk_        = &out;
+    route_method_ = "ERROR";
+    failed_       = false;
+    locals_.clear();
+    loops_.clear();
+    scope_depth_ = 0;
+
+    emit_block(decl.body);
+    out.emit(Op::ReturnNull, decl.loc);
+    return !failed_;
+}
+
 void Emitter::emit_block(const Block& body) {
     begin_scope();
     for (const auto& s : body) emit_stmt(*s);
@@ -347,6 +360,10 @@ void Emitter::emit_expr(const Expr& e) {
                                  "una ruta " + e.object->text);
                     return;
                 }
+                if (e.object->text == "error" && route_method_ != "ERROR") {
+                    error(e.loc, "'error' solo existe dentro de un 'on error'");
+                    return;
+                }
                 chunk_->emit(Op::CallNative, e.loc,
                              static_cast<uint32_t>(id) << 8);
                 return;
@@ -403,6 +420,10 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
         if ((obj == "sse" && route_method_ != "SSE") ||
             (obj == "ws"  && route_method_ != "WS")) {
             error(e.object->loc, "'" + obj + "' solo existe dentro de una ruta " + obj);
+            return;
+        }
+        if (obj == "error" && route_method_ != "ERROR") {
+            error(e.object->loc, "'error' solo existe dentro de un 'on error'");
             return;
         }
     }

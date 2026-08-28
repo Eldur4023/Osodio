@@ -742,6 +742,15 @@ bool prepare_args(const std::vector<ParamBind>& binds,
     return true;
 }
 
+void build_error_handlers(Module& mod, DiagnosticBag& diags) {
+    for (const auto& e : mod.program.errors) {
+        auto    chunk = std::make_shared<Chunk>();
+        Emitter emitter(diags);
+        if (!emitter.emit_error_handler(e, *chunk)) continue;
+        mod.error_handlers[e.code] = std::move(chunk);
+    }
+}
+
 void build_routes(Module& mod, const ClassTable& classes,
                   const AuthConfig& auth, DiagnosticBag& diags) {
     for (const auto& r : mod.program.routes) {
@@ -1024,6 +1033,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
 
         if (diags.empty()) build_routes(*mod, classes, auth, diags);
+        if (diags.empty()) build_error_handlers(*mod, diags);
     }
 
     // Se devuelve siempre: el llamante mira diags.empty() para saber si

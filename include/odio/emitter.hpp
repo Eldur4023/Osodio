@@ -26,6 +26,9 @@ public:
     bool emit_condition(const Expr& e, const std::vector<std::string>& names,
                         Chunk& out);
 
+    // Cuerpo de un `on error`: sin parametros, con el objeto `error` disponible.
+    bool emit_error_handler(const ErrorDecl& decl, Chunk& out);
+
 private:
     DiagnosticBag& diags_;
     Chunk*         chunk_ = nullptr;

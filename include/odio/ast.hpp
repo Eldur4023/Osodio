@@ -140,6 +140,14 @@ struct RouteDecl {
     SourceLoc                pattern_loc;
 };
 
+// `on error 404:` / `on error:` — que servir cuando el motor produce un codigo
+// de error.  code == 0 es el manejador global.
+struct ErrorDecl {
+    int       code = 0;
+    Block     body;
+    SourceLoc loc;
+};
+
 struct StaticMount {
     std::string url_prefix;
     std::string fs_root;
@@ -170,6 +178,7 @@ struct AppDecl {
 struct Program {
     std::vector<ClassDecl> classes;
     std::vector<RouteDecl> routes;
+    std::vector<ErrorDecl> errors;
     AppDecl                app;
 };
 

@@ -33,6 +33,10 @@ struct NativeCtx {
     // en el primer acceso y solo se reescribe si el handler la modifica.
     SessionState* session = nullptr;
 
+    // Solo en un manejador `on error`: el codigo y el motivo.
+    int         error_code    = 0;
+    std::string error_message;
+
     // Claims del JWT del Authorization: Bearer, ya verificados por el driver.
     const Value* jwt_claims = nullptr;
     bool         jwt_ok     = false;

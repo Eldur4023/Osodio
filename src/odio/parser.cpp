@@ -105,12 +105,15 @@ void Parser::parse_declaration(Program& out) {
         case Tok::KwClass:
             parse_class(out);
             return;
+        case Tok::KwOn:
+            parse_error(out);
+            return;
 
         // Declaraciones que la gramatica define pero que todavia no se compilan.
         // Se reportan explicitamente en vez de fallar con un error de sintaxis
         // confuso.
         case Tok::KwFn:
-        case Tok::KwImport: case Tok::KwOn:
+        case Tok::KwImport:
             error_here(std::string("'") + tok_name(peek().kind) +
                        "' todavia no esta implementado");
             advance();
@@ -199,6 +202,41 @@ Param Parser::parse_param() {
     else                   error_here("se esperaba el nombre del parametro");
     if (match(Tok::Assign)) p.default_value = parse_expr();
     return p;
+}
+
+// ─── Manejadores de error ────────────────────────────────────────────────────
+
+void Parser::parse_error(Program& out) {
+    ErrorDecl e;
+    e.loc = advance().loc;                          // 'on'
+
+    if (!expect(Tok::KwError, "tras 'on'")) { synchronize(); return; }
+
+    if (check(Tok::Int)) {
+        long v = std::strtol(advance().text.c_str(), nullptr, 10);
+        // Solo tiene sentido para lo que genera el motor: con un 2xx el handler
+        // ya escribio el cuerpo, y sobrescribirlo seria un filtro de respuesta.
+        if (v < 400 || v > 599) {
+            diags_.error(prev().loc, "'on error' solo cubre codigos 400-599; con un "
+                                     "2xx el handler ya ha escrito la respuesta");
+            synchronize();
+            return;
+        }
+        e.code = static_cast<int>(v);
+    }
+
+    for (const auto& prev_decl : out.errors) {
+        if (prev_decl.code == e.code) {
+            diags_.error(e.loc, e.code ? "ya hay un manejador para el codigo " +
+                                         std::to_string(e.code)
+                                       : std::string("ya hay un manejador global de error"));
+            break;
+        }
+    }
+
+    if (!expect(Tok::Colon, "al abrir el manejador de error")) { synchronize(); return; }
+    e.body = parse_block();
+    out.errors.push_back(std::move(e));
 }
 
 // ─── Grupos ──────────────────────────────────────────────────────────────────

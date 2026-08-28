@@ -45,6 +45,7 @@ private:
     // Resuelve un valor de configuracion: cadena, numero, booleano o env("VAR").
     bool config_value(std::string& text, long long& number, bool& flag, int& kind);
     void parse_class(Program& out);
+    void parse_error(Program& out);
 
     // ── Sentencias ───────────────────────────────────────────────────────────
     Block   parse_block();

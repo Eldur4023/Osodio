@@ -4,7 +4,10 @@
 #include <string>
 #include <vector>
 
+#include <map>
+
 #include <osodio/router.hpp>
+#include "bytecode.hpp"
 #include "ast.hpp"
 #include "diagnostic.hpp"
 
@@ -19,6 +22,9 @@ struct Module {
     std::vector<std::unique_ptr<SourceFile>> files;
     Program        program;
     osodio::Router router;
+
+    // Manejadores de `on error`, por codigo.  La clave 0 es el global.
+    std::map<int, std::shared_ptr<Chunk>> error_handlers;
 
     // Reparto entre los dos niveles de ruta (ver OSODIO-2.0.md, seccion 2):
     // las declarativas no ejecutan ni un paso de bytecode.
