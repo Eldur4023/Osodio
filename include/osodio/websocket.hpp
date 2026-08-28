@@ -137,8 +137,7 @@ struct WSState {
     core::EventLoop* loop = nullptr;
 
     // All outbound frames go through send_fn:
-    //   • HTTP/1.1: set to call Request::_raw_write (TLS-aware ::write or SSL_write).
-    //   • HTTP/2:   set to enqueue an nghttp2 DATA chunk via H2WSContext.
+    //   • Set to call Request::_raw_write.
     std::function<void(std::string)> send_fn;
 
     // Per-message size limits (DoS protection).

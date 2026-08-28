@@ -77,22 +77,6 @@ public:
         return *this;
     }
 
-#ifdef OSODIO_HAS_TLS
-    // ── TLS ──────────────────────────────────────────────────────────────────
-    //
-    // Enable HTTPS.  Must be called before run().
-    //
-    //   app.tls("server.crt", "server.key").run(443);
-    //
-    // cert_path and key_path are PEM files.
-    // Throws std::runtime_error if the files can't be loaded or OpenSSL fails.
-    //
-    App& tls(std::string cert_path, std::string key_path) {
-        ssl_cert_ = std::move(cert_path);
-        ssl_key_  = std::move(key_path);
-        return *this;
-    }
-#endif
 
     // ── OpenAPI / Swagger UI ─────────────────────────────────────────────────
     //
@@ -201,29 +185,7 @@ public:
                 }
             }
 
-            // ── HTTP/2 path (RFC 8441 — CONNECT + :protocol: websocket) ──────
-            if (req._h2_ws_ctx) {
-                auto ws_state = std::make_shared<detail::WSState>();
-                ws_state->token   = req.cancel_token;
-                ws_state->loop    = req.loop;
-                // Outgoing WS frames are sent as nghttp2 DATA chunks.
-                ws_state->send_fn = [ctx = req._h2_ws_ctx](std::string frame) {
-                    ctx->push(std::move(frame));
-                };
-                // begin() sends 200 HEADERS and wires incoming DATA → feed()
-                req._h2_ws_ctx->begin([ws_state](const uint8_t* data, size_t len) {
-                    ws_state->feed(data, len);
-                });
-                res.mark_ws_started();
-
-                WSConnection ws_conn(ws_state);
-                co_await fn(std::move(ws_conn));
-
-                req._h2_ws_ctx->close_stream();
-                co_return;
-            }
-
-            // ── HTTP/1.1 path (RFC 6455 — 101 Switching Protocols) ───────────
+            // ── RFC 6455 — 101 Switching Protocols ───────────────────────────
             auto upgrade = req.header("upgrade");
             auto key     = req.header("sec-websocket-key");
 
@@ -402,11 +364,6 @@ private:
 
     int                                       max_connections_ = 10'000;
 
-#ifdef OSODIO_HAS_TLS
-    // TLS — empty means plain HTTP
-    std::string                               ssl_cert_;
-    std::string                               ssl_key_;
-#endif
 
     // Set to true by prepare() so docs routes are only registered once.
     bool                                      prepared_ = false;

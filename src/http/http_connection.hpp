@@ -7,22 +7,13 @@
 #include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
 #include "../../include/osodio/cancel.hpp"
-#ifdef OSODIO_HAS_TLS
-#  include <openssl/ssl.h>
-#else
-   struct ssl_ctx_st; typedef struct ssl_ctx_st SSL_CTX;  // incomplete forward decls
-   struct ssl_st;     typedef struct ssl_st     SSL;
-#endif
 
 namespace osodio::http {
 
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
-    // ssl_ctx: when non-null, the connection performs a TLS handshake before
-    // parsing HTTP.  ssl_ctx is not owned; its lifetime must exceed this object.
     HttpConnection(int fd, core::EventLoop& loop, osodio::DispatchFn dispatch,
-                   std::shared_ptr<std::atomic<int>> conn_count = nullptr,
-                   SSL_CTX* ssl_ctx = nullptr);
+                   std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~HttpConnection();
 
     void start();
@@ -36,13 +27,6 @@ private:
     std::shared_ptr<osodio::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_         = false;
-
-    // ── TLS state ─────────────────────────────────────────────────────────────
-    // ssl_ is non-null only when app.tls() was configured.
-    // tls_handshaking_ is true from start() until SSL_accept() returns 1.
-    // During that window, on_event() routes all events to do_tls_handshake().
-    SSL* ssl_              = nullptr;
-    bool tls_handshaking_  = false;
 
     // Weak reference to the current request — used in WebSocket mode to route
     // do_read() bytes into the WS frame parser instead of the HTTP parser.
@@ -94,7 +78,6 @@ private:
     void do_read();
     void do_write();
     void do_sendfile();
-    void do_tls_handshake();
     void on_write_complete();
 
     // Begin writing `data`; buffers any unsent remainder and arms EPOLLOUT.
