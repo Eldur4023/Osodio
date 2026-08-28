@@ -549,6 +549,67 @@ void Emitter::emit_expr(const Expr& e) {
 
         // `await` solo tiene sentido sobre una llamada a un builtin que
         // suspende.  Cualquier otra cosa se rechaza aqui, no en runtime.
+        // ++x / x++ sobre una variable: se lee dos veces, que es mas barato que
+        // duplicar en la pila y no necesita opcode nuevo.
+        //
+        // Sobre un campo, el receptor se guarda en una ranura auxiliar: `o.f++`
+        // no puede evaluar `o` dos veces, porque `o` puede tener efectos.
+        case ExprKind::PreStep:
+        case ExprKind::PostStep: {
+            bool post = (e.kind == ExprKind::PostStep);
+            Op   op   = (e.text == "+") ? Op::Add : Op::Sub;
+            const Expr& tgt = *e.lhs;
+
+            auto one = [&] {
+                chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::integer(1)));
+            };
+
+            if (tgt.kind == ExprKind::Ident) {
+                int slot = resolve_local(tgt.text);
+                if (slot < 0) { error(tgt.loc, "'" + tgt.text + "' no esta declarada"); return; }
+                uint32_t u = static_cast<uint32_t>(slot);
+
+                if (post) chunk_->emit(Op::LoadLocal, e.loc, u);   // valor anterior
+                chunk_->emit(Op::LoadLocal, e.loc, u);
+                one();
+                chunk_->emit(op, e.loc);
+                chunk_->emit(Op::StoreLocal, e.loc, u);
+                if (!post) chunk_->emit(Op::LoadLocal, e.loc, u);  // valor nuevo
+                break;
+            }
+
+            if (tgt.kind == ExprKind::Member) {
+                begin_scope();
+                uint32_t name_k = chunk_->add_constant(Value::str(tgt.text));
+
+                emit_expr(*tgt.object);
+                int obj = declare_local(" recep", e.loc);
+                chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(obj));
+
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(obj));
+                chunk_->emit(Op::GetMember, e.loc, name_k);
+                int prev = declare_local(" previo", e.loc);
+                chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(prev));
+
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(obj));
+                chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(prev));
+                one();
+                chunk_->emit(op, e.loc);
+                chunk_->emit(Op::SetMember, e.loc, name_k);
+
+                // SetMember deja el valor nuevo en la cima.
+                if (post) {
+                    chunk_->emit(Op::Pop, e.loc);
+                    chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(prev));
+                }
+                end_scope();
+                break;
+            }
+
+            error(e.loc, "'++' y '--' solo se aplican a una variable o a un campo");
+            break;
+        }
+
         case ExprKind::Await: {
             if (!e.lhs || e.lhs->kind != ExprKind::Call) {
                 error(e.loc, "'await' solo se aplica a una llamada asincrona "

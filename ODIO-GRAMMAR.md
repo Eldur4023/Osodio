@@ -224,8 +224,7 @@ statement     ::= var_decl
 
 var_decl      ::= type IDENT [ "=" expr ] NEWLINE
 assign_stmt   ::= lvalue ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr NEWLINE
-step_stmt     ::= ( "++" | "--" ) lvalue NEWLINE
-                | lvalue ( "++" | "--" ) NEWLINE
+
 lvalue        ::= IDENT { "." IDENT | "[" expr "]" }
 
 if_stmt       ::= "if" expr ":" block
@@ -241,9 +240,11 @@ require_stmt  ::= "require" expr "else" expr NEWLINE
 try_stmt      ::= "try" ":" block "catch" [ IDENT ] ":" block
 ```
 
-`x += e` es azúcar de `x = x + e`, y `x++` de `x = x + 1`. Las formas previa y posterior de
-`++` son equivalentes porque **solo valen como sentencia**: dentro de una expresión darían
-valores distintos y se presta a confusión, así que ahí es un error de compilación.
+`x += e` es azúcar de `x = x + e`.
+
+`++` y `--` son **expresiones**, y por tanto valen en cualquier posición: `++x` incrementa y
+da el valor nuevo; `x++` da el anterior. Se aplican a una variable o a un campo. Como
+sentencia, su valor simplemente se descarta.
 
 `require X else Y` es azúcar de `if not X: return Y`. No es un constructo de middleware: es
 un retorno anticipado, y por eso funciona en cualquier posición, bucles incluidos.
@@ -262,8 +263,9 @@ equality      ::= comparison { ( "==" | "!=" ) comparison }
 comparison    ::= sum { ( "<" | "<=" | ">" | ">=" ) sum }
 sum           ::= product { ( "+" | "-" ) product }
 product       ::= unary { ( "*" | "/" | "%" ) unary }
-unary         ::= [ "-" ] postfix
-postfix       ::= primary { "." IDENT | "(" [ args ] ")" | "[" expr "]" }
+unary         ::= [ "-" | "++" | "--" ] postfix
+postfix       ::= primary { "." IDENT | "(" [ args ] ")" | "[" expr "]"
+                          | "++" | "--" }
 
 primary       ::= INT | FLOAT | STRING | BOOL | NULL
                 | IDENT

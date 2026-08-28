@@ -29,6 +29,7 @@ enum class ExprKind {
     StringLit, IntLit, FloatLit, BoolLit, NullLit,
     Ident, This, Member, Index, Call,
     Unary, Binary, Ternary, Await,
+    PreStep, PostStep,      // ++x / --x  y  x++ / x--
     ListLit, DictLit,
 };
 
