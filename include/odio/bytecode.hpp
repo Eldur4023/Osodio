@@ -1,0 +1,75 @@
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "token.hpp"
+#include "value.hpp"
+
+namespace odio {
+
+// Instrucciones del VM.
+//
+// Pila de operandos propia, no la de C++: es lo que permitira suspender un
+// handler a mitad de `await` sin perder el estado.  El `await` en si llega
+// despues; el diseno de la pila ya lo contempla.
+enum class Op : uint8_t {
+    Const,        // operand = indice en el pool de constantes
+    LoadLocal,    // operand = ranura
+    StoreLocal,   // operand = ranura
+    Pop,
+
+    Add, Sub, Mul, Div, Mod, Neg,
+    Eq, Ne, Lt, Le, Gt, Ge,
+    Not,
+
+    Jump,         // operand = destino absoluto
+    JumpIfFalse,  // idem; consume la cima
+    JumpIfFalsePeek,  // idem, pero deja la cima (cortocircuito de and/or)
+    JumpIfTruePeek,
+
+    MakeList,     // operand = numero de elementos
+    MakeDict,     // operand = numero de pares
+    GetIndex,
+    GetMember,    // operand = indice de constante con el nombre
+
+    CallNative,   // operand = (id << 8) | argc
+    Return,       // devuelve la cima
+    ReturnNull,
+};
+
+struct Instr {
+    Op        op;
+    uint32_t  operand = 0;
+    SourceLoc loc;      // para poder situar un error de ejecucion
+};
+
+// El codigo de un handler, ya compilado.
+struct Chunk {
+    std::vector<Instr> code;
+    std::vector<Value> constants;
+    int                num_locals = 0;
+
+    // Nombres de las ranuras, solo para mensajes de error.
+    std::vector<std::string> local_names;
+
+    uint32_t add_constant(Value v) {
+        constants.push_back(std::move(v));
+        return static_cast<uint32_t>(constants.size() - 1);
+    }
+
+    size_t emit(Op op, SourceLoc loc, uint32_t operand = 0) {
+        code.push_back(Instr{op, operand, loc});
+        return code.size() - 1;
+    }
+
+    // Los saltos se emiten sin destino y se rellenan al cerrar el bloque.
+    void patch(size_t at, size_t target) {
+        code[at].operand = static_cast<uint32_t>(target);
+    }
+    size_t here() const { return code.size(); }
+};
+
+const char* op_name(Op op);
+
+} // namespace odio

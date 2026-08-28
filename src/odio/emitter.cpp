@@ -1,0 +1,338 @@
+#include <odio/emitter.hpp>
+#include <odio/natives.hpp>
+
+namespace odio {
+
+void Emitter::error(SourceLoc loc, std::string msg) {
+    diags_.error(loc, std::move(msg));
+    failed_ = true;
+}
+
+int Emitter::declare_local(const std::string& name, SourceLoc loc) {
+    for (auto it = locals_.rbegin(); it != locals_.rend(); ++it) {
+        if (it->depth < scope_depth_) break;
+        if (it->name == name) {
+            error(loc, "'" + name + "' ya esta declarada en este ambito");
+            return static_cast<int>(std::distance(locals_.begin(), it.base()) - 1);
+        }
+    }
+    locals_.push_back({name, scope_depth_});
+    int slot = static_cast<int>(locals_.size()) - 1;
+    if (slot + 1 > chunk_->num_locals) chunk_->num_locals = slot + 1;
+    chunk_->local_names.push_back(name);
+    return slot;
+}
+
+int Emitter::resolve_local(const std::string& name) const {
+    for (int i = static_cast<int>(locals_.size()) - 1; i >= 0; --i)
+        if (locals_[static_cast<size_t>(i)].name == name) return i;
+    return -1;
+}
+
+void Emitter::begin_scope() { ++scope_depth_; }
+
+void Emitter::end_scope() {
+    --scope_depth_;
+    // Las ranuras no se reciclan: el coste es una entrada mas en el vector de
+    // locales y a cambio los indices son estables, lo que simplifica el VM.
+    while (!locals_.empty() && locals_.back().depth > scope_depth_)
+        locals_.pop_back();
+}
+
+bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
+    chunk_  = &out;
+    failed_ = false;
+    locals_.clear();
+    loops_.clear();
+    scope_depth_ = 0;
+
+    for (const auto& p : route.params) declare_local(p.name, p.loc);
+
+    emit_block(route.body);
+
+    // Un handler que se cae por el final no devuelve nada: el motor respondera
+    // con lo que haya escrito un builtin, o 204 si no escribio nada.
+    out.emit(Op::ReturnNull, route.loc);
+    return !failed_;
+}
+
+void Emitter::emit_block(const Block& body) {
+    begin_scope();
+    for (const auto& s : body) emit_stmt(*s);
+    end_scope();
+}
+
+void Emitter::emit_stmt(const Stmt& s) {
+    switch (s.kind) {
+        case StmtKind::Return:
+            if (s.value) { emit_expr(*s.value); chunk_->emit(Op::Return, s.loc); }
+            else         { chunk_->emit(Op::ReturnNull, s.loc); }
+            break;
+
+        case StmtKind::ExprStmt:
+            emit_expr(*s.value);
+            chunk_->emit(Op::Pop, s.loc);
+            break;
+
+        case StmtKind::VarDecl: {
+            if (s.value) emit_expr(*s.value);
+            else         chunk_->emit(Op::Const, s.loc, chunk_->add_constant(Value::null()));
+            int slot = declare_local(s.name, s.loc);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(slot));
+            break;
+        }
+
+        case StmtKind::Assign: {
+            if (s.target->kind != ExprKind::Ident) {
+                error(s.loc, "de momento solo se puede asignar a una variable simple");
+                return;
+            }
+            int slot = resolve_local(s.target->text);
+            if (slot < 0) {
+                error(s.target->loc, "'" + s.target->text + "' no esta declarada");
+                return;
+            }
+            emit_expr(*s.value);
+            chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(slot));
+            break;
+        }
+
+        case StmtKind::If: {
+            emit_expr(*s.value);
+            size_t to_else = chunk_->emit(Op::JumpIfFalse, s.loc);
+            emit_block(s.body);
+
+            if (!s.orelse.empty()) {
+                size_t to_end = chunk_->emit(Op::Jump, s.loc);
+                chunk_->patch(to_else, chunk_->here());
+                emit_block(s.orelse);
+                chunk_->patch(to_end, chunk_->here());
+            } else {
+                chunk_->patch(to_else, chunk_->here());
+            }
+            break;
+        }
+
+        case StmtKind::While: {
+            size_t start = chunk_->here();
+            emit_expr(*s.value);
+            size_t to_end = chunk_->emit(Op::JumpIfFalse, s.loc);
+
+            loops_.push_back({start, {}});
+            emit_block(s.body);
+            chunk_->emit(Op::Jump, s.loc, static_cast<uint32_t>(start));
+            chunk_->patch(to_end, chunk_->here());
+
+            for (size_t j : loops_.back().breaks) chunk_->patch(j, chunk_->here());
+            loops_.pop_back();
+            break;
+        }
+
+        // `require X else Y` es azucar de `if not X: return Y`.  Se emite tal
+        // cual: no hay opcode propio ni concepto de middleware en el VM.
+        case StmtKind::Require: {
+            emit_expr(*s.value);
+            size_t to_ok = chunk_->emit(Op::JumpIfFalse, s.loc);
+            size_t skip  = chunk_->emit(Op::Jump, s.loc);
+            chunk_->patch(to_ok, chunk_->here());
+            emit_expr(*s.target);
+            chunk_->emit(Op::Return, s.loc);
+            chunk_->patch(skip, chunk_->here());
+            break;
+        }
+
+        case StmtKind::Break:
+            if (loops_.empty()) { error(s.loc, "'break' fuera de un bucle"); return; }
+            loops_.back().breaks.push_back(chunk_->emit(Op::Jump, s.loc));
+            break;
+
+        case StmtKind::Continue:
+            if (loops_.empty()) { error(s.loc, "'continue' fuera de un bucle"); return; }
+            chunk_->emit(Op::Jump, s.loc,
+                         static_cast<uint32_t>(loops_.back().continue_target));
+            break;
+
+        case StmtKind::For:
+            error(s.loc, "'for' todavia no esta implementado");
+            break;
+
+        case StmtKind::Try:
+            error(s.loc, "'try/catch' todavia no esta implementado");
+            break;
+    }
+}
+
+void Emitter::emit_expr(const Expr& e) {
+    switch (e.kind) {
+        case ExprKind::StringLit:
+            chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::str(e.text)));
+            break;
+        case ExprKind::IntLit:
+            chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::integer(e.int_value)));
+            break;
+        case ExprKind::FloatLit:
+            chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::real(e.float_value)));
+            break;
+        case ExprKind::BoolLit:
+            chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::boolean(e.bool_value)));
+            break;
+        case ExprKind::NullLit:
+            chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::null()));
+            break;
+
+        case ExprKind::Ident: {
+            int slot = resolve_local(e.text);
+            if (slot < 0) {
+                if (native_id(e.text) >= 0)
+                    error(e.loc, "'" + e.text + "' es un builtin: hay que llamarlo, "
+                                 "no usarlo como valor");
+                else
+                    error(e.loc, "'" + e.text + "' no esta declarada");
+                return;
+            }
+            chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(slot));
+            break;
+        }
+
+        case ExprKind::Unary:
+            emit_expr(*e.lhs);
+            chunk_->emit(e.text == "not" ? Op::Not : Op::Neg, e.loc);
+            break;
+
+        // and/or cortocircuitan: se mira la cima sin consumirla y se salta con
+        // ella puesta, que es justo el valor del resultado.
+        case ExprKind::Binary: {
+            if (e.text == "and" || e.text == "or") {
+                emit_expr(*e.lhs);
+                size_t j = chunk_->emit(e.text == "and" ? Op::JumpIfFalsePeek
+                                                        : Op::JumpIfTruePeek, e.loc);
+                emit_expr(*e.rhs);
+                chunk_->patch(j, chunk_->here());
+                break;
+            }
+
+            emit_expr(*e.lhs);
+            emit_expr(*e.rhs);
+            Op op = Op::Add;
+            if      (e.text == "+")  op = Op::Add;
+            else if (e.text == "-")  op = Op::Sub;
+            else if (e.text == "*")  op = Op::Mul;
+            else if (e.text == "/")  op = Op::Div;
+            else if (e.text == "%")  op = Op::Mod;
+            else if (e.text == "==") op = Op::Eq;
+            else if (e.text == "!=") op = Op::Ne;
+            else if (e.text == "<")  op = Op::Lt;
+            else if (e.text == "<=") op = Op::Le;
+            else if (e.text == ">")  op = Op::Gt;
+            else if (e.text == ">=") op = Op::Ge;
+            else { error(e.loc, "operador no soportado: " + e.text); return; }
+            chunk_->emit(op, e.loc);
+            break;
+        }
+
+        case ExprKind::Ternary: {
+            emit_expr(*e.object);
+            size_t to_else = chunk_->emit(Op::JumpIfFalse, e.loc);
+            emit_expr(*e.lhs);
+            size_t to_end = chunk_->emit(Op::Jump, e.loc);
+            chunk_->patch(to_else, chunk_->here());
+            emit_expr(*e.rhs);
+            chunk_->patch(to_end, chunk_->here());
+            break;
+        }
+
+        case ExprKind::ListLit:
+            for (const auto& item : e.items) emit_expr(*item);
+            chunk_->emit(Op::MakeList, e.loc, static_cast<uint32_t>(e.items.size()));
+            break;
+
+        case ExprKind::DictLit:
+            for (const auto& entry : e.entries) {
+                emit_expr(*entry.key);
+                emit_expr(*entry.value);
+            }
+            chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(e.entries.size()));
+            break;
+
+        case ExprKind::Index:
+            emit_expr(*e.object);
+            emit_expr(*e.lhs);
+            chunk_->emit(Op::GetIndex, e.loc);
+            break;
+
+        case ExprKind::Member:
+            emit_expr(*e.object);
+            chunk_->emit(Op::GetMember, e.loc,
+                         chunk_->add_constant(Value::str(e.text)));
+            break;
+
+        case ExprKind::Call:
+            emit_call(e);
+            break;
+
+        case ExprKind::Await:
+            error(e.loc, "'await' todavia no esta implementado");
+            break;
+
+        case ExprKind::This:
+            error(e.loc, "'this' solo tiene sentido dentro de una clase, que "
+                         "todavia no esta implementada");
+            break;
+    }
+}
+
+void Emitter::emit_call(const Expr& e) {
+    if (!e.object || e.object->kind != ExprKind::Ident) {
+        error(e.loc, "de momento solo se pueden llamar builtins por su nombre");
+        return;
+    }
+    const std::string& name = e.object->text;
+
+    int id = native_id(name);
+    if (id < 0) {
+        error(e.object->loc, "funcion desconocida: '" + name + "'");
+        return;
+    }
+    const NativeDef& def = native_at(id);
+
+    size_t positional = 0, named = 0;
+    for (const auto& a : e.args) (a.name.empty() ? positional : named)++;
+
+    // Los argumentos con nombre son las variables de plantilla: se agrupan en
+    // un Dict que ocupa el ultimo hueco posicional.
+    if (named > 0 && name != "render") {
+        error(e.loc, "'" + name + "()' no admite argumentos con nombre");
+        return;
+    }
+
+    for (const auto& a : e.args)
+        if (a.name.empty()) emit_expr(*a.value);
+
+    size_t argc = positional;
+    if (named > 0) {
+        for (const auto& a : e.args) {
+            if (a.name.empty()) continue;
+            chunk_->emit(Op::Const, a.loc, chunk_->add_constant(Value::str(a.name)));
+            emit_expr(*a.value);
+        }
+        chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(named));
+        ++argc;
+    }
+
+    if (static_cast<int>(argc) < def.min_args ||
+        (def.max_args >= 0 && static_cast<int>(argc) > def.max_args)) {
+        std::string expected = std::to_string(def.min_args);
+        if (def.max_args != def.min_args)
+            expected += def.max_args < 0 ? " o mas"
+                                         : "-" + std::to_string(def.max_args);
+        error(e.loc, "'" + name + "()' espera " + expected +
+                     " argumento(s), pero recibe " + std::to_string(argc));
+        return;
+    }
+    if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
+
+    chunk_->emit(Op::CallNative, e.loc,
+                 (static_cast<uint32_t>(id) << 8) | static_cast<uint32_t>(argc));
+}
+
+} // namespace odio

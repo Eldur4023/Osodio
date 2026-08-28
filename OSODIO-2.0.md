@@ -244,7 +244,13 @@ plantillas.
    *Hecho en el hito 1:* lexer con INDENT/DEDENT, parser completo de expresiones y
    sentencias, rutas y bloque `app:`. Falta `class`, `fn`, `group`, `on error`, `import`.
 2. **VM** — pila propia, suspendible en `await`, una instancia por hilo.
+   *Hecho en el hito 2:* pila y locales propios, aritmetica, comparaciones,
+   cortocircuito, `if`/`while`/`require`, ternario, listas y diccionarios, llamada
+   a builtins, tope de pasos contra bucles infinitos, y errores de ejecucion con
+   `fichero:linea:columna`. Falta `await`, `for`, `try/catch` y `class`.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
+   *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
+   `send_file`, `len`, `str`, `int`, `header`, `query`.
 4. ~~**Watcher + hot swap**~~ — hecho en el hito 1: sondeo de mtimes, swap de un
    `shared_ptr`, y si la nueva versión no compila se sigue sirviendo la anterior.
 5. ~~**Diagnósticos**~~ — hecho en el hito 1: `fichero:línea:columna`, línea de código y

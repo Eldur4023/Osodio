@@ -1,10 +1,13 @@
 #include <odio/project.hpp>
 #include <odio/lexer.hpp>
 #include <odio/parser.hpp>
+#include <odio/emitter.hpp>
+#include <odio/vm.hpp>
 
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
 #include <osodio/task.hpp>
+#include <osodio/logger.hpp>
 
 #include <algorithm>
 #include <fstream>
@@ -229,64 +232,218 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
     return {};
 }
 
-// Comprueba que cada :nombre del patron tiene un parametro que lo recoge.
-void check_pattern_params(const RouteDecl& r, DiagnosticBag& diags) {
-    std::vector<std::string> in_pattern;
+// Extrae los nombres :param / {param} del patron de ruta.
+std::vector<std::string> pattern_params(const std::string& pattern) {
+    std::vector<std::string> out;
     size_t i = 0;
-    while (i < r.pattern.size()) {
-        if (r.pattern[i] == ':' || r.pattern[i] == '{') {
-            char close = (r.pattern[i] == '{') ? '}' : '/';
+    while (i < pattern.size()) {
+        if (pattern[i] == ':' || pattern[i] == '{') {
+            char close = (pattern[i] == '{') ? '}' : '/';
             size_t j = i + 1;
-            while (j < r.pattern.size() && r.pattern[j] != close) ++j;
-            in_pattern.push_back(r.pattern.substr(i + 1, j - i - 1));
+            while (j < pattern.size() && pattern[j] != close) ++j;
+            out.push_back(pattern.substr(i + 1, j - i - 1));
             i = j;
         } else ++i;
     }
+    return out;
+}
+
+// Como se rellena una ranura local antes de ejecutar el handler.
+struct ParamBind {
+    std::string name;
+    std::string type;          // int, long, float, double, bool, string
+    bool        from_path   = false;
+    bool        has_default = false;
+    std::string default_text;
+};
+
+// Convierte el texto crudo de la URL al tipo declarado.  Un valor mal formado
+// es un 400: lo mando mal el cliente, no es un fallo del servidor.
+bool coerce(const std::string& text, const std::string& type, Value& out) {
+    try {
+        if (type == "string")                    { out = Value::str(text); return true; }
+        if (type == "int" || type == "long")     { out = Value::integer(std::stoll(text)); return true; }
+        if (type == "float" || type == "double") { out = Value::real(std::stod(text)); return true; }
+        if (type == "bool") {
+            if (text == "true"  || text == "1") { out = Value::boolean(true);  return true; }
+            if (text == "false" || text == "0") { out = Value::boolean(false); return true; }
+            return false;
+        }
+    } catch (...) { return false; }
+    return false;
+}
+
+// Valida los parametros contra el patron y produce el plan de enlace.
+bool bind_params(const RouteDecl& r, std::vector<ParamBind>& out, DiagnosticBag& diags) {
+    static const std::vector<std::string> kScalars =
+        {"int", "long", "float", "double", "bool", "string"};
+
+    auto in_pattern = pattern_params(r.pattern);
+    bool ok = true;
 
     for (const auto& seg : in_pattern) {
         bool found = false;
         for (const auto& p : r.params) if (p.name == seg) { found = true; break; }
-        if (!found)
+        if (!found) {
             diags.error(r.pattern_loc,
                         "el patron declara ':" + seg + "' pero ningun parametro lo recoge");
-    }
-    for (const auto& p : r.params) {
-        bool in_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
-                       != in_pattern.end();
-        if (!in_path && !p.default_value) {
-            // Query sin valor por defecto: valido, pero el hito 1 no lo enlaza.
-            diags.error(p.loc, "el parametro '" + p.name + "' no aparece en el "
-                               "patron; enlazar query y body requiere el VM");
+            ok = false;
         }
     }
+
+    for (const auto& p : r.params) {
+        ParamBind b;
+        b.name = p.name;
+        b.type = p.type.name;
+
+        if (std::find(kScalars.begin(), kScalars.end(), p.type.name) == kScalars.end()) {
+            diags.error(p.loc, "el tipo '" + p.type.str() + "' como parametro de ruta "
+                               "todavia no esta implementado; de momento solo "
+                               "int, long, float, double, bool y string");
+            ok = false;
+            continue;
+        }
+        if (p.type.optional) {
+            diags.error(p.loc, "los parametros opcionales todavia no estan implementados");
+            ok = false;
+            continue;
+        }
+
+        b.from_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
+                      != in_pattern.end();
+
+        if (b.from_path && p.default_value) {
+            diags.error(p.loc, "un parametro de ruta no puede tener valor por defecto");
+            ok = false;
+            continue;
+        }
+        if (!b.from_path && p.default_value) {
+            const Expr& d = *p.default_value;
+            if      (d.kind == ExprKind::StringLit) b.default_text = d.text;
+            else if (d.kind == ExprKind::IntLit)    b.default_text = std::to_string(d.int_value);
+            else if (d.kind == ExprKind::BoolLit)   b.default_text = d.bool_value ? "true" : "false";
+            else {
+                diags.error(p.loc, "el valor por defecto tiene que ser una constante");
+                ok = false;
+                continue;
+            }
+            b.has_default = true;
+        }
+
+        out.push_back(std::move(b));
+    }
+    return ok;
+}
+
+// Reconoce la forma puramente declarativa: un unico `return` que se resuelve
+// entero en compilacion.  Estas rutas no ejecutan ni un paso de bytecode.
+Action try_declarative(const RouteDecl& r) {
+    if (!r.params.empty())                                     return {};
+    if (r.body.size() != 1)                                    return {};
+    if (r.body[0]->kind != StmtKind::Return || !r.body[0]->value) return {};
+
+    DiagnosticBag scratch;
+    Action a = compile_return(*r.body[0]->value, scratch);
+    return scratch.empty() ? a : Action{};
+}
+
+// Rellena las ranuras de los parametros a partir de la peticion.
+// Devuelve false, con la respuesta 400 ya escrita, si algun valor no encaja.
+bool prepare_args(const std::vector<ParamBind>& binds,
+                  osodio::Request& req, osodio::Response& res,
+                  std::vector<Value>& out) {
+    out.reserve(binds.size());
+    for (const auto& b : binds) {
+        std::string raw;
+        bool present = false;
+
+        if (b.from_path) {
+            auto it = req.params.find(b.name);
+            if (it != req.params.end()) { raw = it->second; present = true; }
+        } else {
+            auto it = req.query.find(b.name);
+            if (it != req.query.end())  { raw = it->second; present = true; }
+            else if (b.has_default)     { raw = b.default_text; present = true; }
+        }
+
+        Value v;
+        if (!present) {
+            if      (b.type == "string") v = Value::str("");
+            else if (b.type == "bool")   v = Value::boolean(false);
+            else if (b.type == "float" || b.type == "double") v = Value::real(0);
+            else                         v = Value::integer(0);
+        } else if (!coerce(raw, b.type, v)) {
+            res.status(400).json({
+                {"error",     "parametro invalido"},
+                {"param",     b.name},
+                {"esperado",  b.type},
+                {"recibido",  raw},
+            });
+            return false;
+        }
+        out.push_back(std::move(v));
+    }
+    return true;
 }
 
 void build_routes(Module& mod, DiagnosticBag& diags) {
     for (const auto& r : mod.program.routes) {
         if (r.method == "SSE" || r.method == "WS") {
-            diags.error(r.loc, "las rutas " + r.method +
-                               " requieren el VM, que todavia no esta implementado");
+            diags.error(r.loc, "las rutas " + r.method + " necesitan await, que "
+                               "todavia no esta implementado");
             continue;
         }
         if (!r.origins.empty() && r.method != "WS")
             diags.error(r.loc, "origins() solo es valido en rutas ws");
 
-        check_pattern_params(r, diags);
-
-        if (r.body.size() != 1 || r.body[0]->kind != StmtKind::Return ||
-            !r.body[0]->value) {
-            diags.error(r.loc, "en el hito 1 el cuerpo de una ruta tiene que ser "
-                               "un unico 'return <valor constante>'");
+        // Nivel 1: ruta declarativa → accion nativa, cero bytecode.
+        if (Action a = try_declarative(r)) {
+            ++mod.declarative_routes;
+            mod.router.add_internal(r.method, r.pattern,
+                [a](osodio::Request& req, osodio::Response& res) -> osodio::Task<void> {
+                    a(req, res);
+                    co_return;
+                });
             continue;
         }
 
-        Action action = compile_return(*r.body[0]->value, diags);
-        if (!action) continue;
+        // Nivel 2: ruta con logica → bytecode sobre el VM.
+        std::vector<ParamBind> binds;
+        if (!bind_params(r, binds, diags)) continue;
 
+        auto    chunk = std::make_shared<Chunk>();
+        Emitter emitter(diags);
+        if (!emitter.emit_route(r, *chunk)) continue;
+
+        ++mod.vm_routes;
+        std::string where = r.method + " " + r.pattern;
         mod.router.add_internal(r.method, r.pattern,
-            [action](osodio::Request& req, osodio::Response& res) -> osodio::Task<void> {
-                action(req, res);
-                co_return;
+            [chunk, binds, where](osodio::Request& req, osodio::Response& res)
+                -> osodio::Task<void> {
+                std::vector<Value> args;
+                if (!prepare_args(binds, req, res, args)) co_return;
+
+                NativeCtx ctx{req, res, false};
+
+                // Un VM por hilo de event loop: ni la pila ni el heap se
+                // comparten, asi que no hay nada que sincronizar entre cores.
+                thread_local VM vm;
+                VM::Result result = vm.run(*chunk, std::move(args), ctx);
+
+                if (!result.ok) {
+                    std::string at = result.error_loc.file
+                        ? *result.error_loc.file + ":" +
+                          std::to_string(result.error_loc.line) + ":" +
+                          std::to_string(result.error_loc.col)
+                        : where;
+                    osodio::log().error(at + ": " + result.error);
+                    res.status(500).json({{"error", result.error}, {"en", at}});
+                    co_return;
+                }
+
+                if (ctx.response_written) co_return;
+                if (result.value.is_null()) { res.status(204).send(""); co_return; }
+                res.json(result.value.to_json());
             });
     }
 }

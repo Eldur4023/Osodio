@@ -20,6 +20,11 @@ struct Module {
     Program        program;
     osodio::Router router;
 
+    // Reparto entre los dos niveles de ruta (ver OSODIO-2.0.md, seccion 2):
+    // las declarativas no ejecutan ni un paso de bytecode.
+    int declarative_routes = 0;
+    int vm_routes          = 0;
+
     // mtimes de los ficheros compilados, para detectar cambios.
     std::vector<std::pair<std::filesystem::path,
                           std::filesystem::file_time_type>> stamps;

@@ -133,7 +133,9 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "osodio: " << inputs.size() << " fichero(s), "
-              << mod->program.routes.size() << " ruta(s)\n";
+              << mod->program.routes.size() << " ruta(s) — "
+              << mod->declarative_routes << " declarativa(s), "
+              << mod->vm_routes << " con logica\n";
     if (check_only) return 0;
 
     publish_module(mod);
