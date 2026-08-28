@@ -91,10 +91,18 @@ VM::Result VM::run(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx
 
             case Op::Add: {
                 Value b = pop(), a = pop();
-                // '+' concatena si alguno es cadena; en Odio no hay coercion
-                // silenciosa de otros tipos, asi que el resto es error.
-                if (a.is_str() || b.is_str()) {
-                    push(Value::str(a.to_string() + b.to_string()));
+                // '+' exige que AMBOS lados sean del mismo tipo. Dos cadenas
+                // concatenan, dos numeros suman, dos listas se unen.
+                //
+                // 1 + "1" es un error, no "11": operar entre tipos distintos es
+                // justo lo que Odio no quiere heredar de JavaScript. Para unir
+                // un numero a una cadena hay que decirlo: "n = " + str(n).
+                if (a.is_str() && b.is_str()) {
+                    push(Value::str(a.as_str() + b.as_str()));
+                } else if (a.is_str() || b.is_str()) {
+                    return fail(std::string("no se puede sumar ") + a.type_name() +
+                                " y " + b.type_name() +
+                                "; para concatenar usa str(): \"...\" + str(x)", in.loc);
                 } else if (numeric_pair(a, b)) {
                     if (a.is_int() && b.is_int())
                         push(Value::integer(a.as_int() + b.as_int()));
