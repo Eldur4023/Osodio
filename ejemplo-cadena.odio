@@ -1,0 +1,17 @@
+app:
+    port 8083
+
+post endpoint("/creado"):
+    return { "ok": true }.status(201)
+
+get endpoint("/cabecera"):
+    return { "a": 1 }.header("X-Prueba", "valor")
+
+get endpoint("/galleta"):
+    return { "ok": true }.cookie("tema", "oscuro", max_age=3600, http_only=false)
+
+get endpoint("/todo"):
+    return { "n": 1 }.status(202).header("X-Uno", "1").header("X-Dos", "2")
+
+get endpoint("/con_plantilla"):
+    return render("index.html", titulo="T", nota="N").status(203)

@@ -444,6 +444,58 @@ std::string safe_name(const std::string& raw) {
 
 Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                   std::vector<Value>& args, std::string& error) {
+    // ── Modificadores de respuesta ───────────────────────────────────────────
+    // Se encadenan sobre lo que se devuelve —`return {...}.status(201)`— y
+    // dejan pasar el valor, para no reintroducir un objeto `response` mutable.
+    if (name == "status") {
+        if (args.size() != 1 || !args[0].is_int()) {
+            error = "status() espera un codigo entero";
+            return Value::null();
+        }
+        ctx.res.status(static_cast<int>(args[0].as_int()));
+        return recv;
+    }
+    if (name == "header") {
+        if (args.size() != 2 || !args[0].is_str()) {
+            error = "header() espera nombre y valor";
+            return Value::null();
+        }
+        ctx.res.header(args[0].as_str(), args[1].to_string());
+        return recv;
+    }
+    if (name == "cookie") {
+        if (args.size() < 2 || !args[0].is_str()) {
+            error = "cookie() espera al menos nombre y valor";
+            return Value::null();
+        }
+        osodio::CookieOptions opts;
+        opts.path      = "/";
+        opts.http_only = true;
+        opts.same_site = osodio::SameSite::Lax;
+
+        // Tercer hueco: las opciones con nombre, agrupadas por el emisor.
+        if (args.size() > 2 && args[2].is_dict()) {
+            const auto& o = args[2].as_dict();
+            auto pick = [&o](const char* k) -> const Value* {
+                auto it = o.find(k);
+                return it == o.end() ? nullptr : &it->second;
+            };
+            if (auto* v = pick("max_age");   v && v->is_int())  opts.max_age   = (int)v->as_int();
+            if (auto* v = pick("path");      v && v->is_str())  opts.path      = v->as_str();
+            if (auto* v = pick("domain");    v && v->is_str())  opts.domain    = v->as_str();
+            if (auto* v = pick("secure");    v && v->is_bool()) opts.secure    = v->as_bool();
+            if (auto* v = pick("http_only"); v && v->is_bool()) opts.http_only = v->as_bool();
+            if (auto* v = pick("same_site"); v && v->is_str()) {
+                const std::string& ss = v->as_str();
+                if      (ss == "strict") opts.same_site = osodio::SameSite::Strict;
+                else if (ss == "none")   opts.same_site = osodio::SameSite::None;
+                else                     opts.same_site = osodio::SameSite::Lax;
+            }
+        }
+        ctx.res.cookie(args[0].as_str(), args[1].to_string(), std::move(opts));
+        return recv;
+    }
+
     // ── string ───────────────────────────────────────────────────────────────
     if (recv.is_str()) {
         const std::string& s = recv.as_str();

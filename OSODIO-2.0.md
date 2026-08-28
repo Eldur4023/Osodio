@@ -276,16 +276,13 @@ plantillas.
 
 ## 8. Estado de la documentación
 
-- `README.md` — la tesis actual ("los intérpretes son lentos, por eso pierden Node y
-  Python") se vuelve contra el proyecto y hay que reescribirla. La versión que sí se
-  sostiene: el stack de I/O sigue siendo nativo y multicore, sin GIL ni pausas de GC
-  globales, y el bytecode solo ejecuta pegamento, aislado por hilo.
-- `GUIDE.md` — documenta la API de C++ que deja de ser pública. Se reescribe sobre Odio.
-- **Discrepancia detectada en el hito 0:** README y GUIDE dicen que las plantillas son inja
-  y que está vendorizado en `third_party/`. Es falso desde la migración a Jinja2Cpp: no
-  estaba vendorizado, no había `CMakeLists.txt`, y **el repo no compilaba**. Al reescribir
-  ambos documentos hay que corregir también la lista de dependencias vendorizadas y la
-  promesa de "sin red durante cmake".
+- `README.md` — **reescrito.** La tesis vieja ("los intérpretes son lentos") se volvía
+  contra el proyecto; la nueva distingue lo que se interpreta de lo que no, y separa la
+  crítica que sí se sostiene —operar entre tipos distintos— de la que no.
+- `GUIDE.md` — **reescrito** sobre Odio.
+- La discrepancia detectada en el hito 0 (README y GUIDE afirmaban que las plantillas eran
+  inja y que estaba vendorizado; era falso desde la migración a Jinja2Cpp) queda corregida
+  en la reescritura, incluida la promesa de "sin red durante cmake".
 - `plan.md` — **obsoleto.** Planificaba migrar `SCHEMA` a reflexión estática C++26; el
   problema desaparece al declararse los structs en Odio.
 

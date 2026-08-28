@@ -513,13 +513,21 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
     // apila y el despacho por tipo lo hace el VM.
     else if (e.object->kind == ExprKind::Member) {
         emit_expr(*e.object->object);
-        size_t argc = 0;
+        size_t argc = 0, named = 0;
         for (const auto& a : e.args) {
-            if (!a.name.empty()) {
-                error(a.loc, "un metodo no admite argumentos con nombre");
-                return;
-            }
+            if (!a.name.empty()) { ++named; continue; }
             emit_expr(*a.value);
+            ++argc;
+        }
+        // Los argumentos con nombre se agrupan en un Dict que ocupa el ultimo
+        // hueco posicional, igual que en render().
+        if (named > 0) {
+            for (const auto& a : e.args) {
+                if (a.name.empty()) continue;
+                chunk_->emit(Op::Const, a.loc, chunk_->add_constant(Value::str(a.name)));
+                emit_expr(*a.value);
+            }
+            chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(named));
             ++argc;
         }
         if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
