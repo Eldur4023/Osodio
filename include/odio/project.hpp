@@ -23,6 +23,9 @@ struct Module {
     Program        program;
     osodio::Router router;
 
+    // Funciones de usuario compiladas, indexadas por orden de declaracion.
+    FunctionTable functions;
+
     // Especificacion OpenAPI generada desde el AST al compilar.
     nlohmann::json openapi;
 

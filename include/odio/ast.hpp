@@ -112,6 +112,14 @@ struct ValidateRule {
     SourceLoc   loc;
 };
 
+struct FnDecl {
+    TypeRef            return_type;
+    std::string        name;
+    std::vector<Param> params;
+    Block              body;
+    SourceLoc          loc;
+};
+
 struct ClassDecl {
     std::string               name;
     std::vector<Field>        fields;
@@ -177,6 +185,7 @@ struct AppDecl {
 
 struct Program {
     std::vector<ClassDecl> classes;
+    std::vector<FnDecl>    functions;
     std::vector<RouteDecl> routes;
     std::vector<ErrorDecl> errors;
     AppDecl                app;

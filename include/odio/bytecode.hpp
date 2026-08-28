@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ enum class Op : uint8_t {
     IterList,     // convierte la cima en la lista que se va a recorrer
     GetMember,    // operand = indice de constante con el nombre
 
+    CallFunction, // operand = (indice-de-funcion << 8) | argc
     CallMethod,   // operand = (indice-de-constante-con-el-nombre << 8) | argc
     CallNative,   // operand = (id << 8) | argc
     CallAsync,    // idem, pero suspende: el driver hace el co_await real
@@ -87,6 +89,10 @@ struct Chunk {
     }
     size_t here() const { return code.size(); }
 };
+
+// Las funciones de usuario compiladas, indexadas por el orden de declaracion.
+// El emisor resuelve el nombre a indice, asi que el VM no busca por nombre.
+using FunctionTable = std::vector<std::shared_ptr<Chunk>>;
 
 const char* op_name(Op op);
 

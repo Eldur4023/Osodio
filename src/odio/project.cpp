@@ -302,7 +302,8 @@ struct ClassInfo {
 
 using ClassTable = std::map<std::string, std::shared_ptr<ClassInfo>>;
 
-void build_classes(const Program& program, ClassTable& out, DiagnosticBag& diags) {
+void build_classes(const Program& program, const FunctionSigs& fns,
+                   ClassTable& out, DiagnosticBag& diags) {
     for (const auto& c : program.classes) {
         if (out.count(c.name)) {
             diags.error(c.loc, "la clase '" + c.name + "' ya esta declarada");
@@ -332,7 +333,7 @@ void build_classes(const Program& program, ClassTable& out, DiagnosticBag& diags
         // nombre que no existe, el error sale aqui y no en produccion.
         for (const auto& r : c.rules) {
             auto    chunk = std::make_shared<Chunk>();
-            Emitter emitter(diags);
+            Emitter emitter(diags, &fns);
             if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
             info->rules.push_back({chunk, r.message});
         }
@@ -662,7 +663,8 @@ Action try_declarative(const RouteDecl& r) {
 // Faltar un campo obligatorio, o traerlo con el tipo equivocado, o incumplir
 // una regla de validate, es 422 con la lista completa de motivos: se reportan
 // todos de una vez, no el primero.  El handler no llega a ejecutarse.
-bool bind_body(const ClassInfo& ci, osodio::Request& req, osodio::Response& res,
+bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
+               osodio::Request& req, osodio::Response& res,
                NativeCtx& ctx, Value& out) {
     auto body = nlohmann::json::parse(req.body, nullptr, false);
     if (body.is_discarded()) {
@@ -703,7 +705,7 @@ bool bind_body(const ClassInfo& ci, osodio::Request& req, osodio::Response& res,
     if (messages.empty()) {
         thread_local VM rule_vm;
         for (const auto& rule : ci.rules) {
-            VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx);
+            VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx, fns);
             if (r.status != VM::Status::Done) {
                 osodio::log().error("validate de " + ci.name + ": " + r.error);
                 res.status(500).json({{"error", r.error}});
@@ -736,7 +738,7 @@ Value make_file_value(const osodio::MultipartPart& part, size_t index) {
     return Value::dict(std::move(d));
 }
 
-bool prepare_args(const std::vector<ParamBind>& binds,
+bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                   osodio::Request& req, osodio::Response& res,
                   NativeCtx& ctx, std::vector<Value>& out) {
     out.reserve(binds.size());
@@ -768,7 +770,7 @@ bool prepare_args(const std::vector<ParamBind>& binds,
 
         if (b.kind == BindKind::Body) {
             Value v;
-            if (!bind_body(*b.cls, req, res, ctx, v)) return false;
+            if (!bind_body(*b.cls, fns, req, res, ctx, v)) return false;
             out.push_back(std::move(v));
             continue;
         }
@@ -950,17 +952,61 @@ nlohmann::json build_openapi(const Program& program, const ClassTable& classes) 
     return doc;
 }
 
-void build_error_handlers(Module& mod, DiagnosticBag& diags) {
+// Las funciones se compilan antes que rutas y manejadores, y todas ven la
+// tabla completa: asi pueden llamarse entre si sin importar el orden en que se
+// declararon ni el fichero en que estan.
+FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
+    FunctionSigs index;
+
+    for (const auto& f : mod.program.functions) {
+        if (native_id(f.name) >= 0) {
+            diags.error(f.loc, "'" + f.name + "' es un builtin: elige otro nombre");
+            continue;
+        }
+        if (index.count(f.name)) continue;   // el parser ya reporto el duplicado
+
+        FnSig sig;
+        sig.index = mod.functions.size();
+        bool seen_default = false;
+        for (const auto& p : f.params) {
+            sig.defaults.push_back(p.default_value.get());
+            if (p.default_value) seen_default = true;
+            else {
+                if (seen_default)
+                    diags.error(p.loc, "un parametro sin valor por defecto no puede "
+                                       "ir despues de uno que lo tiene");
+                ++sig.required;
+            }
+        }
+        index[f.name] = std::move(sig);
+        mod.functions.push_back(std::make_shared<Chunk>());
+    }
+
+    for (const auto& f : mod.program.functions) {
+        auto it = index.find(f.name);
+        if (it == index.end()) continue;
+        Emitter emitter(diags, &index);
+        emitter.emit_function(f, *mod.functions[it->second.index]);
+    }
+    return index;
+}
+
+void build_error_handlers(Module& mod, const FunctionSigs& fns,
+                          DiagnosticBag& diags) {
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags);
+        Emitter emitter(diags, &fns);
         if (!emitter.emit_error_handler(e, *chunk)) continue;
         mod.error_handlers[e.code] = std::move(chunk);
     }
 }
 
-void build_routes(Module& mod, const ClassTable& classes,
-                  const AuthConfig& auth, DiagnosticBag& diags) {
+void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth,
+                  const FunctionSigs& fns, DiagnosticBag& diags) {
+    // El Module posee la tabla y sobrevive a cualquier peticion en vuelo: el
+    // dispatcher mantiene vivo su shared_ptr mientras el handler se ejecuta.
+    const FunctionTable* fn_table = &mod.functions;
+
     for (const auto& r : mod.program.routes) {
         if (!r.origins.empty() && r.method != "WS")
             diags.error(r.loc, "origins() solo es valido en rutas ws");
@@ -987,7 +1033,7 @@ void build_routes(Module& mod, const ClassTable& classes,
             }
 
             auto    ws_chunk = std::make_shared<Chunk>();
-            Emitter ws_emitter(diags);
+            Emitter ws_emitter(diags, &fns);
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
 
             ++mod.vm_routes;
@@ -997,7 +1043,7 @@ void build_routes(Module& mod, const ClassTable& classes,
 
             mod.router.add_internal("GET", r.pattern,
                 osodio::App::make_ws_handler(
-                    [ws_chunk, ws_binds, ws_where, auth]
+                    [ws_chunk, ws_binds, ws_where, auth, fn_table]
                     (osodio::WSConnection conn, osodio::Request& req,
                      osodio::Response& res) -> osodio::Task<void> {
                         NativeCtx    ctx{req, res};
@@ -1008,10 +1054,10 @@ void build_routes(Module& mod, const ClassTable& classes,
                         ctx.response_written = true;   // el upgrade ya respondio
 
                         std::vector<Value> args;
-                        if (!prepare_args(ws_binds, req, res, ctx, args)) co_return;
+                        if (!prepare_args(ws_binds, fn_table, req, res, ctx, args)) co_return;
 
                         VM         vm;
-                        VM::Result result = vm.start(*ws_chunk, std::move(args), ctx);
+                        VM::Result result = vm.start(*ws_chunk, std::move(args), ctx, fn_table);
 
                         while (result.status == VM::Status::Suspended) {
                             Value produced = Value::null();
@@ -1062,13 +1108,13 @@ void build_routes(Module& mod, const ClassTable& classes,
             }
 
             auto    sse_chunk = std::make_shared<Chunk>();
-            Emitter sse_emitter(diags);
+            Emitter sse_emitter(diags, &fns);
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
 
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
             mod.router.add_internal("GET", r.pattern,
-                [sse_chunk, sse_binds, sse_where, auth](osodio::Request& req,
+                [sse_chunk, sse_binds, sse_where, auth, fn_table](osodio::Request& req,
                                                         osodio::Response& res)
                     -> osodio::Task<void> {
                     NativeCtx    ctx{req, res};
@@ -1077,7 +1123,7 @@ void build_routes(Module& mod, const ClassTable& classes,
                     begin_auth(auth, req, session, claims, ctx);
 
                     std::vector<Value> args;
-                    if (!prepare_args(sse_binds, req, res, ctx, args)) co_return;
+                    if (!prepare_args(sse_binds, fn_table, req, res, ctx, args)) co_return;
 
                     // make_sse escribe ya las cabeceras del flujo, asi que la
                     // respuesta cuenta como emitida desde este momento.
@@ -1086,7 +1132,7 @@ void build_routes(Module& mod, const ClassTable& classes,
                     ctx.response_written = true;
 
                     VM         vm;
-                    VM::Result result = vm.start(*sse_chunk, std::move(args), ctx);
+                    VM::Result result = vm.start(*sse_chunk, std::move(args), ctx, fn_table);
 
                     while (result.status == VM::Status::Suspended) {
                         if (result.await_id == async_sleep_id()) {
@@ -1127,7 +1173,7 @@ void build_routes(Module& mod, const ClassTable& classes,
         if (!bind_params(r, classes, binds, diags)) continue;
 
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags);
+        Emitter emitter(diags, &fns);
         if (!emitter.emit_route(r, *chunk)) continue;
 
         ++mod.vm_routes;
@@ -1138,7 +1184,7 @@ void build_routes(Module& mod, const ClassTable& classes,
 
         std::string where = r.method + " " + r.pattern;
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where, auth, needs_upload](osodio::Request& req, osodio::Response& res)
+            [chunk, binds, where, auth, needs_upload, fn_table](osodio::Request& req, osodio::Response& res)
                 -> osodio::Task<void> {
                 NativeCtx    ctx{req, res};
                 SessionState session;
@@ -1156,7 +1202,7 @@ void build_routes(Module& mod, const ClassTable& classes,
                 }
 
                 std::vector<Value> args;
-                if (!prepare_args(binds, req, res, ctx, args)) co_return;
+                if (!prepare_args(binds, fn_table, req, res, ctx, args)) co_return;
 
                 // El VM vive en el marco de esta corrutina, no en el hilo: dos
                 // handlers suspendidos a la vez sobre el mismo core tienen cada
@@ -1166,7 +1212,7 @@ void build_routes(Module& mod, const ClassTable& classes,
                 VM  own_vm;
                 VM& vm = chunk->has_await ? own_vm : shared_vm;
 
-                VM::Result result = vm.start(*chunk, std::move(args), ctx);
+                VM::Result result = vm.start(*chunk, std::move(args), ctx, fn_table);
 
                 // El VM no sabe esperar: cada vez que se detiene, el co_await
                 // de verdad ocurre aqui, sobre el motor, y se le devuelve el
@@ -1245,8 +1291,12 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     // primero porque las rutas se enlazan contra ellas; dentro de cada pasada el
     // orden de los ficheros es indiferente.
     if (diags.empty()) {
+        // Las funciones se construyen primero: las reglas de `validate` y los
+        // cuerpos de las rutas pueden llamarlas.
+        auto fns = build_functions(*mod, diags);
+
         ClassTable classes;
-        build_classes(mod->program, classes, diags);
+        build_classes(mod->program, fns, classes, diags);
 
         AuthConfig auth;
         auth.session_secret  = mod->program.app.session_secret;
@@ -1255,8 +1305,8 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
 
-        if (diags.empty()) build_routes(*mod, classes, auth, diags);
-        if (diags.empty()) build_error_handlers(*mod, diags);
+        if (diags.empty()) build_routes(*mod, classes, auth, fns, diags);
+        if (diags.empty()) build_error_handlers(*mod, fns, diags);
         if (diags.empty()) mod->openapi = build_openapi(mod->program, classes);
     }
 

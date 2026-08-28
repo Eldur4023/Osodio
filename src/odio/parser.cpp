@@ -108,11 +108,13 @@ void Parser::parse_declaration(Program& out) {
         case Tok::KwOn:
             parse_error(out);
             return;
+        case Tok::KwFn:
+            parse_fn(out);
+            return;
 
         // Declaraciones que la gramatica define pero que todavia no se compilan.
         // Se reportan explicitamente en vez de fallar con un error de sintaxis
         // confuso.
-        case Tok::KwFn:
         case Tok::KwImport:
             error_here(std::string("'") + tok_name(peek().kind) +
                        "' todavia no esta implementado");
@@ -202,6 +204,35 @@ Param Parser::parse_param() {
     else                   error_here("se esperaba el nombre del parametro");
     if (match(Tok::Assign)) p.default_value = parse_expr();
     return p;
+}
+
+// ─── Funciones ───────────────────────────────────────────────────────────────
+
+void Parser::parse_fn(Program& out) {
+    FnDecl f;
+    f.loc = advance().loc;                            // 'fn'
+
+    f.return_type = parse_type();
+    if (check(Tok::Ident)) f.name = advance().text;
+    else { error_here("se esperaba el nombre de la funcion"); synchronize(); return; }
+
+    for (const auto& prev_fn : out.functions) {
+        if (prev_fn.name == f.name) {
+            diags_.error(f.loc, "la funcion '" + f.name + "' ya esta declarada");
+            break;
+        }
+    }
+
+    if (!expect(Tok::LParen, "tras el nombre de la funcion")) { synchronize(); return; }
+    while (!check(Tok::RParen) && !check(Tok::EndOfFile)) {
+        f.params.push_back(parse_param());
+        if (!match(Tok::Comma)) break;
+    }
+    if (!expect(Tok::RParen, "al cerrar los parametros")) { synchronize(); return; }
+    if (!expect(Tok::Colon, "al abrir el cuerpo de la funcion")) { synchronize(); return; }
+
+    f.body = parse_block();
+    out.functions.push_back(std::move(f));
 }
 
 // ─── Manejadores de error ────────────────────────────────────────────────────

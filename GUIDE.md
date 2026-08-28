@@ -22,6 +22,7 @@
 14. [Estado compartido](#14-estado-compartido)
 15. [Subida de ficheros](#15-subida-de-ficheros)
 16. [Manejadores de error](#16-manejadores-de-error)
+16b. [Funciones](#16b-funciones)
 17. [El lenguaje](#17-el-lenguaje)
 18. [Referencia de builtins](#18-referencia-de-builtins)
 19. [Errores frecuentes](#19-errores-frecuentes)
@@ -485,6 +486,54 @@ middleware, que Osodio 2.0 delega al proxy a propósito.
 
 El código de estado se conserva. Si el manejador no escribe nada, se mantiene el cuerpo por
 defecto.
+
+---
+
+## 16b. Funciones
+
+```odio
+fn int doble(int x):
+    return x * 2
+
+fn string saluda(string nombre, string tratamiento = "hola"):
+    return tratamiento + ", " + nombre
+
+fn bool es_correo(string s):
+    return s.contains("@") and s.contains(".")
+```
+
+El orden de declaración no importa: una función puede llamar a otra declarada más abajo, o
+en otro fichero. La recursión funciona, con un tope de 200 llamadas anidadas — pasarse da
+un error del lenguaje, no agota la memoria del proceso.
+
+Los parámetros admiten valor por defecto, y los que faltan se rellenan en la llamada. Un
+parámetro sin defecto no puede ir después de uno que lo tiene.
+
+Una función sin `return` devuelve `null`. Un error dentro de ella **lo puede capturar quien
+la llama**:
+
+```odio
+fn int divide(int a, int b):
+    return a / b
+
+get endpoint("/x"):
+    try:
+        return { "r": divide(1, 0) }
+    catch e:
+        return { "fallo": e.message }
+```
+
+También se pueden usar dentro de un bloque `validate:`:
+
+```odio
+class Registro:
+    string correo
+
+    validate:
+        es_correo(correo)   "correo: formato invalido"
+```
+
+Declarar una función con el nombre de un builtin es un error de compilación.
 
 ---
 

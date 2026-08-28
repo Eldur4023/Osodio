@@ -72,6 +72,21 @@ bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
     return !failed_;
 }
 
+bool Emitter::emit_function(const FnDecl& fn, Chunk& out) {
+    chunk_        = &out;
+    route_method_ = "FN";
+    failed_       = false;
+    locals_.clear();
+    loops_.clear();
+    scope_depth_ = 0;
+
+    for (const auto& p : fn.params) declare_local(p.name, p.loc);
+
+    emit_block(fn.body);
+    out.emit(Op::ReturnNull, fn.loc);
+    return !failed_;
+}
+
 bool Emitter::emit_condition(const Expr& e, const std::vector<std::string>& names,
                              Chunk& out) {
     chunk_        = &out;
@@ -504,7 +519,46 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
     else if (e.object->kind == ExprKind::Ident) {
         name = e.object->text;
         id   = native_id(name);
+
+        // Si no es builtin, puede ser una funcion de usuario.  Declarar una con
+        // el nombre de un builtin ya se rechaza al construir la tabla, asi que
+        // aqui no hay ambiguedad que resolver.
         if (id < 0) {
+            auto it = functions_ ? functions_->find(name) : FunctionSigs::const_iterator();
+            if (functions_ && it != functions_->end()) {
+                const FnSig& sig = it->second;
+                size_t given = 0;
+                for (const auto& a : e.args) {
+                    if (!a.name.empty()) {
+                        error(a.loc, "una funcion de usuario no admite argumentos "
+                                     "con nombre");
+                        return;
+                    }
+                    emit_expr(*a.value);
+                    ++given;
+                }
+
+                if (given < sig.required || given > sig.defaults.size()) {
+                    std::string esperado = std::to_string(sig.required);
+                    if (sig.defaults.size() != sig.required)
+                        esperado += " a " + std::to_string(sig.defaults.size());
+                    error(e.loc, "'" + name + "()' espera " + esperado +
+                                 " argumento(s), pero recibe " + std::to_string(given));
+                    return;
+                }
+
+                // Los que faltan se rellenan aqui con su valor por defecto: la
+                // funcion recibe siempre la lista completa.
+                for (size_t i = given; i < sig.defaults.size(); ++i)
+                    emit_expr(*sig.defaults[i]);
+
+                size_t argc = sig.defaults.size();
+                if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
+                chunk_->emit(Op::CallFunction, e.loc,
+                             (static_cast<uint32_t>(sig.index) << 8) |
+                             static_cast<uint32_t>(argc));
+                return;
+            }
             error(e.object->loc, "funcion desconocida: '" + name + "'");
             return;
         }

@@ -54,9 +54,10 @@ bool compare(const Value& a, const Value& b, Op op, bool& ok) {
 
 } // namespace
 
-VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx) {
-    chunk_ = &chunk;
-    pc_    = 0;
+VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx,
+                     const FunctionTable* functions) {
+    functions_ = functions;
+    frames_.clear();
     stack_.clear();
     stack_.reserve(32);
 
@@ -64,6 +65,7 @@ VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& c
     for (size_t i = 0; i < params.size() && i < locals_.size(); ++i)
         locals_[i] = std::move(params[i]);
 
+    frames_.push_back(Frame{&chunk, 0, 0, 0});
     return execute(ctx);
 }
 
@@ -98,35 +100,57 @@ Value error_value(const std::string& message) {
 VM::Result VM::execute(NativeCtx& ctx) {
     Result r = run_until_error(ctx);
     while (r.status == Status::Error) {
-        // pc_ ya apunta a la siguiente instruccion, asi que la que fallo es la
+        // El pc del marco ya apunta a la siguiente instruccion, asi que la que fallo
         // anterior.
-        const TryRange* h = find_handler(*chunk_, pc_ - 1);
+        // Un error sube por los marcos hasta encontrar un try que lo cubra: si
+        // la funcion llamada no lo maneja, puede manejarlo quien la llamo.
+        const TryRange* h = nullptr;
+        while (!frames_.empty()) {
+            Frame& f = frames_.back();
+            h = find_handler(*f.chunk, f.pc - 1);
+            if (h) break;
+            stack_.resize(f.stack_base);
+            locals_.resize(f.locals_base);
+            frames_.pop_back();
+        }
         if (!h) return r;
 
         // En un limite de sentencia la pila de operandos esta vacia, que es
         // donde puede empezar un try; limpiarla deja el estado consistente sin
         // tener que anotar profundidades.
-        stack_.clear();
+        stack_.resize(frames_.back().stack_base);
         push(error_value(r.error));
-        pc_ = h->catch_pc;
+        frames_.back().pc = h->catch_pc;
         r = run_until_error(ctx);
     }
     return r;
 }
 
 VM::Result VM::run_until_error(NativeCtx& ctx) {
-    const Chunk& chunk = *chunk_;
-
     // El contador se reinicia en cada tramo: un bucle de SSE legitimo puede
     // estar horas vivo, pero entre dos suspensiones no debe dar mas de kStepLimit.
     long long steps = 0;
 
-    while (pc_ < chunk.code.size()) {
+    while (!frames_.empty()) {
+        Frame&       frame = frames_.back();
+        const Chunk& chunk = *frame.chunk;
+
+        // Una funcion que se acaba sin `return` devuelve null a quien la llamo.
+        if (frame.pc >= chunk.code.size()) {
+            size_t lbase = frame.locals_base, sbase = frame.stack_base;
+            frames_.pop_back();
+            if (frames_.empty()) return Result{};
+            stack_.resize(sbase);
+            locals_.resize(lbase);
+            push(Value::null());
+            continue;
+        }
+
         if (++steps > kStepLimit)
             return fail("el handler supero el limite de pasos: bucle infinito?",
-                        chunk.code[pc_].loc);
+                        chunk.code[frame.pc].loc);
 
-        const Instr& in = chunk.code[pc_++];
+        const Instr& in = chunk.code[frame.pc++];
 
         switch (in.op) {
             case Op::Const:
@@ -134,11 +158,11 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
 
             case Op::LoadLocal:
-                push(locals_[in.operand]);
+                push(locals_[frame.locals_base + in.operand]);
                 break;
 
             case Op::StoreLocal:
-                locals_[in.operand] = pop();
+                locals_[frame.locals_base + in.operand] = pop();
                 break;
 
             case Op::Pop:
@@ -233,19 +257,19 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
 
             case Op::Jump:
-                pc_ = in.operand;
+                frame.pc = in.operand;
                 break;
 
             case Op::JumpIfFalse:
-                if (!pop().truthy()) pc_ = in.operand;
+                if (!pop().truthy()) frame.pc = in.operand;
                 break;
 
             case Op::JumpIfFalsePeek:
-                if (!stack_.back().truthy()) pc_ = in.operand; else pop();
+                if (!stack_.back().truthy()) frame.pc = in.operand; else pop();
                 break;
 
             case Op::JumpIfTruePeek:
-                if (stack_.back().truthy()) pc_ = in.operand; else pop();
+                if (stack_.back().truthy()) frame.pc = in.operand; else pop();
                 break;
 
             case Op::MakeList: {
@@ -358,7 +382,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
 
             // El VM no sabe esperar: recoge los argumentos, se detiene, y deja
             // que el driver haga el co_await de verdad sobre el motor.  Al
-            // volver, resume() apila el resultado y sigue desde pc_.
+            // volver, resume() apila el resultado y el marco sigue donde estaba.
             case Op::CallAsync: {
                 int id   = static_cast<int>(in.operand >> 8);
                 int argc = static_cast<int>(in.operand & 0xFF);
@@ -371,15 +395,62 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 return r;
             }
 
-            case Op::Return: {
-                Result r;
-                r.status = Status::Done;
-                r.value  = pop();
-                return r;
+            case Op::CallFunction: {
+                size_t index = in.operand >> 8;
+                int    argc  = static_cast<int>(in.operand & 0xFF);
+
+                if (!functions_ || index >= functions_->size())
+                    return fail("funcion no encontrada", in.loc);
+                if (frames_.size() >= kMaxFrames)
+                    return fail("demasiada recursion: mas de " +
+                                std::to_string(kMaxFrames) + " llamadas anidadas",
+                                in.loc);
+
+                const Chunk& callee = *(*functions_)[index];
+
+                std::vector<Value> args(static_cast<size_t>(argc));
+                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+
+                Frame nf;
+                nf.chunk       = &callee;
+                nf.pc          = 0;
+                nf.locals_base = locals_.size();
+                nf.stack_base  = stack_.size();
+
+                locals_.resize(locals_.size() +
+                               static_cast<size_t>(callee.num_locals), Value::null());
+                for (size_t i = 0; i < args.size(); ++i)
+                    locals_[nf.locals_base + i] = std::move(args[i]);
+
+                frames_.push_back(nf);
+                break;
             }
 
-            case Op::ReturnNull:
-                return Result{};
+            case Op::Return: {
+                Value  v     = pop();
+                size_t lbase = frame.locals_base, sbase = frame.stack_base;
+                frames_.pop_back();
+                if (frames_.empty()) {
+                    Result r;
+                    r.status = Status::Done;
+                    r.value  = std::move(v);
+                    return r;
+                }
+                stack_.resize(sbase);
+                locals_.resize(lbase);
+                push(std::move(v));
+                break;
+            }
+
+            case Op::ReturnNull: {
+                size_t lbase = frame.locals_base, sbase = frame.stack_base;
+                frames_.pop_back();
+                if (frames_.empty()) return Result{};
+                stack_.resize(sbase);
+                locals_.resize(lbase);
+                push(Value::null());
+                break;
+            }
         }
     }
 

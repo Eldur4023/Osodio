@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <string>
 #include <vector>
 
@@ -12,13 +13,28 @@ namespace odio {
 //
 // Resuelve los nombres a ranuras locales en tiempo de compilacion, asi que el
 // VM nunca busca una variable por nombre: LoadLocal es un indice directo.
+// Lo que el emisor necesita saber de una funcion de usuario para poder
+// llamarla: donde esta y que argumentos admite.
+struct FnSig {
+    size_t index    = 0;
+    size_t required = 0;                    // parametros sin valor por defecto
+    std::vector<const Expr*> defaults;      // uno por parametro; nulo si no tiene
+};
+using FunctionSigs = std::map<std::string, FnSig>;
+
 class Emitter {
 public:
-    explicit Emitter(DiagnosticBag& diags) : diags_(diags) {}
+    // `functions` mapea nombre de funcion de usuario a su indice en la tabla
+    // del modulo.  Se resuelve al emitir, asi que el VM no busca por nombre.
+    explicit Emitter(DiagnosticBag& diags, const FunctionSigs* functions = nullptr)
+        : diags_(diags), functions_(functions) {}
 
     // Los parametros de la ruta ocupan las primeras ranuras, en orden.
     // Devuelve false si algo del cuerpo no se puede compilar todavia.
     bool emit_route(const RouteDecl& route, Chunk& out);
+
+    // Cuerpo de una funcion de usuario.
+    bool emit_function(const FnDecl& fn, Chunk& out);
 
     // Compila una expresion suelta con `names` ya declarados como locales, en
     // ese orden.  Lo usan las reglas de `validate`: cada una se convierte en un
@@ -30,7 +46,8 @@ public:
     bool emit_error_handler(const ErrorDecl& decl, Chunk& out);
 
 private:
-    DiagnosticBag& diags_;
+    DiagnosticBag&                       diags_;
+    const FunctionSigs*                  functions_ = nullptr;
     Chunk*         chunk_ = nullptr;
     bool           failed_ = false;
 

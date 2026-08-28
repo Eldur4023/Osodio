@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
         ctx.error_message = res.status_code() >= 500 ? "error interno" : "peticion no valida";
 
         odio::VM  vm;
-        auto result = vm.start(*it->second, {}, ctx);
+        auto result = vm.start(*it->second, {}, ctx, &mod->functions);
         if (result.status == odio::VM::Status::Error) {
             osodio::log().error("on error " + std::to_string(code) + ": " + result.error);
             return;
