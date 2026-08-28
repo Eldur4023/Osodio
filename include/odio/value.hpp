@@ -60,13 +60,24 @@ public:
     List&              as_list()  const { return *l_; }
     Dict&              as_dict()  const { return *m_; }
 
-    // Verdad de Odio: null y false son falsos; el resto, incluidos 0 y "",
-    // son verdaderos.  Se elige asi a proposito para no repetir el desastre
-    // de coercion de JavaScript que motivo el proyecto.
+    // Verdad de Odio, al estilo Python: son falsos null, false, 0, 0.0, la
+    // cadena vacia y los contenedores vacios.
+    //
+    // Esto NO es la coercion de JavaScript que critica el README: aquello es
+    // convertir tipos dentro de '==' a espaldas de quien escribe. Aqui no hay
+    // conversion, solo una lectura en contexto booleano — la misma que hacen
+    // Python y C++, los dos idiomas de los que sale Odio.
     bool truthy() const {
-        if (type_ == Type::Null) return false;
-        if (type_ == Type::Bool) return b_;
-        return true;
+        switch (type_) {
+            case Type::Null:  return false;
+            case Type::Bool:  return b_;
+            case Type::Int:   return i_ != 0;
+            case Type::Float: return d_ != 0;
+            case Type::Str:   return !s_->empty();
+            case Type::List:  return !l_->empty();
+            case Type::Dict:  return !m_->empty();
+        }
+        return false;
     }
 
     const char* type_name() const;

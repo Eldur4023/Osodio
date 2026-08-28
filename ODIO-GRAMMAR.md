@@ -286,6 +286,19 @@ Los argumentos con nombre van después de los posicionales.
 10. .  ()  []             (postfijo)
 ```
 
+### Veracidad
+
+En contexto booleano (`if`, `while`, `require`, `and`, `or`, `not`, ternario) son
+**falsos**: `null`, `false`, `0`, `0.0`, la cadena vacia, y la lista y el diccionario
+vacios. Todo lo demas es verdadero. Es la regla de Python, que es de donde viene la gente
+que va a escribir Odio.
+
+No es coercion: no hay conversion de tipos dentro de los operadores. `0 == "0"` es **falso**
+en Odio, y `"1" + 1` es un error, no `"11"`.
+
+**Cuidado con una trampa heredada de Python:** con un valor opcional, `if x:` no distingue
+"vale cero" de "no venia". Para preguntar por presencia hay que escribir `x == null`.
+
 ### await
 `await` solo es válido dentro de un handler, sobre una expresión suspendible. En 2.0 son
 `sleep(ms)` y `ws.recv()`. Es el motivo de que el VM tenga pila propia: un intérprete que
