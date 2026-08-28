@@ -385,5 +385,4 @@ concatenación desde Odio.
 
 - **Historia de tests.** ¿Odio tiene forma de testear endpoints en proceso (heredando
   `TestClient`), o los tests son externos vía HTTP? Si es lo primero, la gramática crece.
-- **`else if` frente a `elif`.** La gramática recoge `else if`. Con bloques por indentación
-  lo natural sería `elif`; con tipos de aire C, `else if`. Cambio de una línea.
+- (resuelto) `elif` y `else if` se admiten los dos.

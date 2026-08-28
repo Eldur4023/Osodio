@@ -173,14 +173,31 @@ void Lexer::lex_token() {
         case ':': push(Tok::Colon, loc);    return;
         case '.': push(Tok::Dot, loc);      return;
         case '?': push(Tok::Question, loc); return;
-        case '+': push(Tok::Plus, loc);     return;
-        case '*': push(Tok::Star, loc);     return;
-        case '/': push(Tok::Slash, loc);    return;
-        case '%': push(Tok::Percent, loc);  return;
+
+        case '+':
+            if (peek() == '+')      { advance(); push(Tok::PlusPlus, loc); }
+            else if (peek() == '=') { advance(); push(Tok::PlusEq, loc); }
+            else                    { push(Tok::Plus, loc); }
+            return;
+        case '*':
+            if (peek() == '=') { advance(); push(Tok::StarEq, loc); }
+            else               { push(Tok::Star, loc); }
+            return;
+        case '/':
+            if (peek() == '=') { advance(); push(Tok::SlashEq, loc); }
+            else               { push(Tok::Slash, loc); }
+            return;
+        case '%':
+            if (peek() == '=') { advance(); push(Tok::PercentEq, loc); }
+            else               { push(Tok::Percent, loc); }
+            return;
 
         case '-':
-            if (peek() == '>') { advance(); push(Tok::Arrow, loc); }
-            else               { push(Tok::Minus, loc); }
+            // '->' del montaje estatico, '--' y '-=' antes que el menos suelto.
+            if (peek() == '>')      { advance(); push(Tok::Arrow, loc); }
+            else if (peek() == '-') { advance(); push(Tok::MinusMinus, loc); }
+            else if (peek() == '=') { advance(); push(Tok::MinusEq, loc); }
+            else                    { push(Tok::Minus, loc); }
             return;
         case '=':
             if (peek() == '=') { advance(); push(Tok::Eq, loc); }

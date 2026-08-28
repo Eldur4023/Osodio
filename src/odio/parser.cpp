@@ -679,9 +679,62 @@ StmtPtr Parser::parse_statement() {
         return s;
     }
 
+    // ++x / --x en posicion de sentencia.
+    if (check(Tok::PlusPlus) || check(Tok::MinusMinus)) {
+        bool      up  = peek().is(Tok::PlusPlus);
+        SourceLoc loc = advance().loc;
+        allow_step_ = true;
+        ExprPtr tgt = parse_postfix();
+        allow_step_ = false;
+        return make_step(std::move(tgt), up, loc);
+    }
+
+    // x++ / x.y++ : la linea entera es el incremento, y se reconoce mirando su
+    // ultimo token.  Asi el parser de expresiones puede rechazar `++` sin
+    // ambiguedad, con un mensaje que explica por que.
+    if (line_ends_with_step()) {
+        SourceLoc loc = peek().loc;
+        allow_step_ = true;
+        ExprPtr tgt = parse_postfix();
+        allow_step_ = false;
+        bool up = peek().is(Tok::PlusPlus);
+        advance();
+        return make_step(std::move(tgt), up, loc);
+    }
+
     // Asignacion o expresion suelta.
     SourceLoc loc = peek().loc;
     ExprPtr   e   = parse_expr();
+
+    // x += e  →  x = x + e, y asi con los cinco.
+    if (check(Tok::PlusEq) || check(Tok::MinusEq) || check(Tok::StarEq) ||
+        check(Tok::SlashEq) || check(Tok::PercentEq)) {
+        const char* op = nullptr;
+        switch (peek().kind) {
+            case Tok::PlusEq:    op = "+"; break;
+            case Tok::MinusEq:   op = "-"; break;
+            case Tok::StarEq:    op = "*"; break;
+            case Tok::SlashEq:   op = "/"; break;
+            default:             op = "%"; break;
+        }
+        SourceLoc oploc = advance().loc;
+        if (!assignable(*e)) {
+            diags_.error(loc, "solo se puede asignar a una variable o a un campo");
+            return nullptr;
+        }
+        auto bin  = make(ExprKind::Binary, oploc);
+        bin->text = op;
+        bin->lhs  = clone_target(*e);
+        bin->rhs  = parse_expr();
+
+        auto s    = std::make_unique<Stmt>();
+        s->kind   = StmtKind::Assign;
+        s->loc    = loc;
+        s->target = std::move(e);
+        s->value  = std::move(bin);
+        return s;
+    }
+
     if (match(Tok::Assign)) {
         auto s    = std::make_unique<Stmt>();
         s->kind   = StmtKind::Assign;
@@ -694,6 +747,58 @@ StmtPtr Parser::parse_statement() {
     s->kind = StmtKind::ExprStmt;
     s->loc  = loc;
     s->value = std::move(e);
+    return s;
+}
+
+// True si la linea logica que empieza aqui termina en '++' o '--'.
+bool Parser::line_ends_with_step() const {
+    int  depth = 0;
+    Tok  last  = Tok::Newline;
+    for (size_t j = 0; ; ++j) {
+        const Token& t = peek(j);
+        if (t.is(Tok::EndOfFile)) break;
+        if (depth == 0 && (t.is(Tok::Newline) || t.is(Tok::Dedent) ||
+                           t.is(Tok::Indent) || t.is(Tok::Colon))) break;
+        if (t.is(Tok::LParen) || t.is(Tok::LBracket) || t.is(Tok::LBrace)) ++depth;
+        if (t.is(Tok::RParen) || t.is(Tok::RBracket) || t.is(Tok::RBrace)) --depth;
+        last = t.kind;
+    }
+    return last == Tok::PlusPlus || last == Tok::MinusMinus;
+}
+
+// Solo una variable o un campo pueden estar a la izquierda de una asignacion.
+bool Parser::assignable(const Expr& e) {
+    return e.kind == ExprKind::Ident || e.kind == ExprKind::Member;
+}
+
+// Copia el lado izquierdo para poder leerlo y escribirlo en la misma sentencia.
+// Con Ident y Member basta una copia superficial del receptor.
+ExprPtr Parser::clone_target(const Expr& e) {
+    auto out  = make(e.kind, e.loc);
+    out->text = e.text;
+    if (e.kind == ExprKind::Member && e.object) out->object = clone_target(*e.object);
+    return out;
+}
+
+// x++ / ++x / x-- / --x  →  x = x + 1
+StmtPtr Parser::make_step(ExprPtr target, bool up, SourceLoc loc) {
+    if (!target || !assignable(*target)) {
+        diags_.error(loc, "'++' y '--' solo se aplican a una variable o a un campo");
+        return nullptr;
+    }
+    auto one = make(ExprKind::IntLit, loc);
+    one->int_value = 1;
+
+    auto bin  = make(ExprKind::Binary, loc);
+    bin->text = up ? "+" : "-";
+    bin->lhs  = clone_target(*target);
+    bin->rhs  = std::move(one);
+
+    auto s    = std::make_unique<Stmt>();
+    s->kind   = StmtKind::Assign;
+    s->loc    = loc;
+    s->target = std::move(target);
+    s->value  = std::move(bin);
     return s;
 }
 
@@ -715,12 +820,39 @@ StmtPtr Parser::parse_if() {
     s->body = parse_block();
 
     skip_newlines();
-    if (check(Tok::KwElse)) {
+    if (check(Tok::KwElif)) {
+        // `elif` encadena: el else contiene un If completo.  `else if` hace lo
+        // mismo, y se admiten los dos.
+        s->orelse.push_back(parse_if_from_elif());
+    }
+    else if (check(Tok::KwElse)) {
         advance();
         if (check(Tok::KwIf)) {
-            // `else if` encadena: el else contiene un If completo.
             s->orelse.push_back(parse_if());
         } else {
+            expect(Tok::Colon, "tras 'else'");
+            s->orelse = parse_block();
+        }
+    }
+    return s;
+}
+
+// Un `elif` es un `if` cuyo encabezado ya se consumio.
+StmtPtr Parser::parse_if_from_elif() {
+    auto s   = std::make_unique<Stmt>();
+    s->kind  = StmtKind::If;
+    s->loc   = advance().loc;                 // 'elif'
+    s->value = parse_expr();
+    expect(Tok::Colon, "tras la condicion del elif");
+    s->body = parse_block();
+
+    skip_newlines();
+    if (check(Tok::KwElif)) {
+        s->orelse.push_back(parse_if_from_elif());
+    } else if (check(Tok::KwElse)) {
+        advance();
+        if (check(Tok::KwIf)) s->orelse.push_back(parse_if());
+        else {
             expect(Tok::Colon, "tras 'else'");
             s->orelse = parse_block();
         }
@@ -927,6 +1059,13 @@ ExprPtr Parser::parse_product() {
 }
 
 ExprPtr Parser::parse_unary() {
+    if (check(Tok::PlusPlus) || check(Tok::MinusMinus)) {
+        error_here("'++' y '--' solo valen como sentencia, no dentro de una "
+                   "expresion: la forma previa y la posterior darian valores "
+                   "distintos y se presta a confusion");
+        advance();
+        return parse_unary();
+    }
     if (check(Tok::Minus)) {
         SourceLoc loc = advance().loc;
         auto e = make(ExprKind::Unary, loc);
@@ -940,6 +1079,16 @@ ExprPtr Parser::parse_postfix() {
     ExprPtr e = parse_primary();
 
     while (true) {
+        // El `++` de una sentencia lo consume parse_statement; aqui dentro solo
+        // puede aparecer en una expresion, donde no se admite.
+        if ((check(Tok::PlusPlus) || check(Tok::MinusMinus)) && !allow_step_) {
+            error_here("'++' y '--' solo valen como sentencia completa, no dentro "
+                       "de una expresion: la forma previa y la posterior darian "
+                       "valores distintos");
+            advance();
+            continue;
+        }
+        if (check(Tok::PlusPlus) || check(Tok::MinusMinus)) break;
         if (check(Tok::Dot)) {
             SourceLoc loc = advance().loc;
             auto m = make(ExprKind::Member, loc);

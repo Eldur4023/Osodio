@@ -38,6 +38,7 @@ const char* tok_name(Tok t) {
 
         case Tok::KwIf:       return "if";
         case Tok::KwElse:     return "else";
+        case Tok::KwElif:     return "elif";
         case Tok::KwWhile:    return "while";
         case Tok::KwFor:      return "for";
         case Tok::KwIn:       return "in";
@@ -81,6 +82,13 @@ const char* tok_name(Tok t) {
         case Tok::Star:     return "*";
         case Tok::Slash:    return "/";
         case Tok::Percent:  return "%";
+        case Tok::PlusPlus:   return "++";
+        case Tok::MinusMinus: return "--";
+        case Tok::PlusEq:     return "+=";
+        case Tok::MinusEq:    return "-=";
+        case Tok::StarEq:     return "*=";
+        case Tok::SlashEq:    return "/=";
+        case Tok::PercentEq:  return "%=";
     }
     return "?";
 }
@@ -96,7 +104,7 @@ Tok keyword_or_ident(std::string_view s) {
         {"patch", Tok::KwPatch}, {"delete", Tok::KwDelete}, {"any", Tok::KwAny},
         {"sse", Tok::KwSse}, {"ws", Tok::KwWs},
 
-        {"if", Tok::KwIf}, {"else", Tok::KwElse}, {"while", Tok::KwWhile},
+        {"if", Tok::KwIf}, {"else", Tok::KwElse}, {"elif", Tok::KwElif}, {"while", Tok::KwWhile},
         {"for", Tok::KwFor}, {"in", Tok::KwIn}, {"return", Tok::KwReturn},
         {"require", Tok::KwRequire}, {"try", Tok::KwTry}, {"catch", Tok::KwCatch},
         {"break", Tok::KwBreak}, {"continue", Tok::KwContinue},

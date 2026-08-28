@@ -27,7 +27,7 @@ enum class Tok {
     KwGet, KwPost, KwPut, KwPatch, KwDelete, KwAny, KwSse, KwWs,
 
     // Sentencias
-    KwIf, KwElse, KwWhile, KwFor, KwIn, KwReturn, KwRequire,
+    KwIf, KwElse, KwElif, KwWhile, KwFor, KwIn, KwReturn, KwRequire,
     KwTry, KwCatch, KwBreak, KwContinue,
 
     // Expresiones y tipos
@@ -38,6 +38,8 @@ enum class Tok {
     Comma, Colon, Dot, Question, Arrow, Assign,
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
     Plus, Minus, Star, Slash, Percent,
+    PlusPlus, MinusMinus,
+    PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
 };
 
 const char* tok_name(Tok t);

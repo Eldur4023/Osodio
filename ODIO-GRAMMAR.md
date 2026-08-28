@@ -22,7 +22,7 @@ mayor indentación que la línea del encabezado. Espacios, no tabuladores.
 ```
 import  class  fn  app  group  endpoint  on  error  origins
 get  post  put  patch  delete  any  sse  ws
-if  else  while  for  in  return  require  try  catch  break  continue
+if  else  elif  while  for  in  return  require  try  catch  break  continue
 validate  and  or  not  true  false  null  this  void  spa
 ```
 
@@ -223,11 +223,13 @@ statement     ::= var_decl
                 | expr NEWLINE
 
 var_decl      ::= type IDENT [ "=" expr ] NEWLINE
-assign_stmt   ::= lvalue "=" expr NEWLINE
+assign_stmt   ::= lvalue ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr NEWLINE
+step_stmt     ::= ( "++" | "--" ) lvalue NEWLINE
+                | lvalue ( "++" | "--" ) NEWLINE
 lvalue        ::= IDENT { "." IDENT | "[" expr "]" }
 
 if_stmt       ::= "if" expr ":" block
-                  { "else" "if" expr ":" block }
+                  { ( "elif" | "else" "if" ) expr ":" block }
                   [ "else" ":" block ]
 
 while_stmt    ::= "while" expr ":" block
@@ -238,6 +240,10 @@ require_stmt  ::= "require" expr "else" expr NEWLINE
 
 try_stmt      ::= "try" ":" block "catch" [ IDENT ] ":" block
 ```
+
+`x += e` es azúcar de `x = x + e`, y `x++` de `x = x + 1`. Las formas previa y posterior de
+`++` son equivalentes porque **solo valen como sentencia**: dentro de una expresión darían
+valores distintos y se presta a confusión, así que ahí es un error de compilación.
 
 `require X else Y` es azúcar de `if not X: return Y`. No es un constructo de middleware: es
 un retorno anticipado, y por eso funciona en cualquier posición, bucles incluidos.

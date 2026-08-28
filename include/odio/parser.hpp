@@ -23,6 +23,8 @@ private:
     std::vector<Token> toks_;
     DiagnosticBag&     diags_;
     size_t             i_ = 0;
+    // Solo cierto mientras se parsea el destino de un `++`/`--` de sentencia.
+    bool               allow_step_ = false;
 
     // ── Navegacion ───────────────────────────────────────────────────────────
     const Token& peek(size_t ahead = 0) const;
@@ -52,9 +54,14 @@ private:
     Block   parse_block();
     StmtPtr parse_statement();
     StmtPtr parse_if();
+    StmtPtr parse_if_from_elif();
     StmtPtr parse_while();
     StmtPtr parse_for();
     StmtPtr parse_return();
+    StmtPtr make_step(ExprPtr target, bool up, SourceLoc loc);
+    static bool assignable(const Expr& e);
+    bool line_ends_with_step() const;
+    ExprPtr clone_target(const Expr& e);
     StmtPtr parse_require();
     StmtPtr parse_try();
 
