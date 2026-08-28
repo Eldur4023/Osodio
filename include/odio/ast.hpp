@@ -119,11 +119,22 @@ struct ClassDecl {
     SourceLoc                 loc;
 };
 
+// Una guarda `require X else Y` declarada a nivel de grupo.  Se antepone al
+// cuerpo de cada ruta del grupo, en orden de fuera hacia dentro.
+// Se comparten en vez de copiarse: una guarda declarada una vez la usan todas
+// las rutas del grupo, y el emisor solo las lee.
+struct Guard {
+    std::shared_ptr<Expr> condition;
+    std::shared_ptr<Expr> otherwise;
+    SourceLoc             loc;
+};
+
 struct RouteDecl {
     std::string              method;    // "GET", "POST", ..., "SSE", "WS"
-    std::string              pattern;   // "/users/:id"
+    std::string              pattern;   // "/users/:id", ya con el prefijo del grupo
     std::vector<Param>       params;
     std::vector<std::string> origins;   // solo ws
+    std::vector<Guard>       guards;    // acumuladas de los grupos que la envuelven
     Block                    body;
     SourceLoc                loc;
     SourceLoc                pattern_loc;
@@ -143,6 +154,15 @@ struct AppDecl {
     std::string              templates_dir = "./templates";
     std::vector<StaticMount> statics;
     bool                     docs = false, health = false, metrics = false;
+
+    // session: y jwt: — los secretos se resuelven al compilar, normalmente con
+    // env(), para que no acaben escritos en el .odio.
+    std::string session_secret;
+    int         session_max_age = 86400;
+    bool        session_secure  = true;
+    std::string jwt_secret;
+    std::string jwt_issuer;
+
     SourceLoc                loc;
     bool                     present = false;
 };

@@ -37,8 +37,13 @@ private:
 
     // ── Declaraciones ────────────────────────────────────────────────────────
     void parse_declaration(Program& out);
-    void parse_route(Program& out, const Token& method_tok);
+    void parse_route(Program& out, const Token& method_tok,
+                     const std::string& prefix, const std::vector<Guard>& guards);
+    void parse_group(Program& out, const std::string& prefix,
+                     const std::vector<Guard>& guards);
     void parse_app(Program& out);
+    // Resuelve un valor de configuracion: cadena, numero, booleano o env("VAR").
+    bool config_value(std::string& text, long long& number, bool& flag, int& kind);
     void parse_class(Program& out);
 
     // ── Sentencias ───────────────────────────────────────────────────────────

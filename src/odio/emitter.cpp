@@ -49,6 +49,21 @@ bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
 
     for (const auto& p : route.params) declare_local(p.name, p.loc);
 
+    // Las guardas del grupo se emiten antes del cuerpo, de fuera hacia dentro:
+    // para llegar al handler hay que pasar primero la del grupo padre.  Cada
+    // una es el mismo `if not X: return Y` que `require`, asi que no hay
+    // concepto de middleware ni en el emisor ni en el VM.
+    for (const auto& g : route.guards) {
+        if (!g.condition || !g.otherwise) continue;
+        emit_expr(*g.condition);
+        size_t to_ok = chunk_->emit(Op::JumpIfFalse, g.loc);
+        size_t skip  = chunk_->emit(Op::Jump, g.loc);
+        chunk_->patch(to_ok, chunk_->here());
+        emit_expr(*g.otherwise);
+        chunk_->emit(Op::Return, g.loc);
+        chunk_->patch(skip, chunk_->here());
+    }
+
     emit_block(route.body);
 
     // Un handler que se cae por el final no devuelve nada: el motor respondera
@@ -100,8 +115,26 @@ void Emitter::emit_stmt(const Stmt& s) {
         }
 
         case StmtKind::Assign: {
+            // `session.x = v` → __session_set("x", v).  Es la unica asignacion
+            // a un miembro que existe; el resto de objetos reservados son de
+            // solo lectura.
+            if (s.target->kind == ExprKind::Member &&
+                s.target->object->kind == ExprKind::Ident &&
+                s.target->object->text == "session" &&
+                resolve_local("session") < 0) {
+
+                chunk_->emit(Op::Const, s.loc,
+                             chunk_->add_constant(Value::str(s.target->text)));
+                emit_expr(*s.value);
+                chunk_->emit(Op::CallNative, s.loc,
+                             (static_cast<uint32_t>(native_id("__session_set")) << 8) | 2u);
+                chunk_->emit(Op::Pop, s.loc);
+                return;
+            }
+
             if (s.target->kind != ExprKind::Ident) {
-                error(s.loc, "de momento solo se puede asignar a una variable simple");
+                error(s.loc, "solo se puede asignar a una variable simple o a "
+                             "un campo de 'session'");
                 return;
             }
             int slot = resolve_local(s.target->text);
@@ -280,6 +313,19 @@ void Emitter::emit_expr(const Expr& e) {
         // `sse.open` no es un campo de un diccionario: es un objeto reservado,
         // y se resuelve al builtin que lo implementa.
         case ExprKind::Member: {
+            // `session.x` admite cualquier nombre: es un almacen, no un
+            // objeto con miembros fijos.  Se traduce a __session_get("x").
+            if (e.object->kind == ExprKind::Ident &&
+                e.object->text == "session" &&
+                resolve_local("session") < 0 &&
+                member_native_id("session", e.text) < 0) {
+
+                chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::str(e.text)));
+                chunk_->emit(Op::CallNative, e.loc,
+                             (static_cast<uint32_t>(native_id("__session_get")) << 8) | 1u);
+                return;
+            }
+
             if (e.object->kind == ExprKind::Ident &&
                 resolve_local(e.object->text) < 0 &&
                 is_reserved_object(e.object->text)) {

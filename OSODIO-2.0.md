@@ -252,7 +252,9 @@ plantillas.
    parametro tipado y 422 automatico. Y **`await`**: el VM se detiene y se reanuda
    conservando pila y locales, mientras el `co_await` real lo hace el handler en
    C++. Sobre eso van las rutas **`sse`** y **`ws`**, con `sse` y `ws` como objetos
-   reservados. Falta `for`, `try/catch`, los constructores y los metodos.
+   reservados. Tambien `group` con prefijos anidados y guardas acumuladas, y los
+   objetos `session` y `jwt`. Falta `for`, `try/catch`, `on error`, multipart, los
+   constructores y los metodos.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`, `sleep` (asincrono) y los
@@ -261,7 +263,8 @@ plantillas.
    `shared_ptr`, y si la nueva versión no compila se sigue sirviendo la anterior.
 5. ~~**Diagnósticos**~~ — hecho en el hito 1: `fichero:línea:columna`, línea de código y
    cursor bajo la posición exacta.
-6. **HMAC-SHA256 vendorizado** — ~200 líneas, cero dependencias.
+6. ~~**HMAC-SHA256 vendorizado**~~ — hecho: SHA-256, HMAC, base64url y comparación
+   en tiempo constante, verificados contra los vectores del RFC y contra `openssl`.
 7. **Store de estado compartido** — nativo, atómico, entre hilos.
 8. ~~**`CMakeLists.txt`**~~ — hecho en el hito 0.
 

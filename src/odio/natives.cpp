@@ -192,7 +192,47 @@ Value fn_ws_close(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
     return Value::null();
 }
 
-const std::array<NativeDef, 21> kNatives = {{
+// ─── session.* / jwt.* ───────────────────────────────────────────────────────
+
+Value fn_session_get(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!ctx.session || ctx.session->secret.empty()) {
+        error = "la sesion no esta configurada: falta 'session: secret ...' en app:";
+        return Value::null();
+    }
+    auto it = ctx.session->data.find(args[0].as_str());
+    return it == ctx.session->data.end() ? Value::null() : it->second;
+}
+
+Value fn_session_set(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!ctx.session || ctx.session->secret.empty()) {
+        error = "la sesion no esta configurada: falta 'session: secret ...' en app:";
+        return Value::null();
+    }
+    ctx.session->data[args[0].as_str()] = args[1];
+    ctx.session->dirty = true;
+    return args[1];
+}
+
+Value fn_session_clear(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
+    if (!ctx.session || ctx.session->secret.empty()) {
+        error = "la sesion no esta configurada: falta 'session: secret ...' en app:";
+        return Value::null();
+    }
+    ctx.session->data.clear();
+    ctx.session->dirty = true;
+    return Value::null();
+}
+
+Value fn_jwt_valid(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::boolean(ctx.jwt_ok);
+}
+
+Value fn_jwt_claims(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    if (!ctx.jwt_ok || !ctx.jwt_claims) return Value::dict();
+    return *ctx.jwt_claims;
+}
+
+const std::array<NativeDef, 26> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -216,6 +256,13 @@ const std::array<NativeDef, 21> kNatives = {{
     {"__ws_send",  1, 1,  fn_ws_send},
     {"__ws_open",  0, 0,  fn_ws_open},
     {"__ws_close", 0, 0,  fn_ws_close},
+    // session.* / jwt.* — se llega por member_native_id() o, en el caso de
+    // session, por el acceso a un campo cualquiera.
+    {"__session_get",   1, 1,  fn_session_get},
+    {"__session_set",   2, 2,  fn_session_set},
+    {"__session_clear", 0, 0,  fn_session_clear},
+    {"__jwt_valid",     0, 0,  fn_jwt_valid},
+    {"__jwt_claims",    0, 0,  fn_jwt_claims},
     // Asincronos: sin fn, los resuelve el driver del handler.
     {"sleep",     1, 1,  nullptr, true},
     {"__ws_recv", 0, 0,  nullptr, true},
@@ -238,7 +285,7 @@ int native_count() { return static_cast<int>(kNatives.size()) - 1; }
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 7> kMembers = {{
+const std::array<MemberMap, 10> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -246,6 +293,9 @@ const std::array<MemberMap, 7> kMembers = {{
     {"ws",  "open",  "__ws_open"},
     {"ws",  "close", "__ws_close"},
     {"ws",  "recv",  "__ws_recv"},
+    {"session", "clear",  "__session_clear"},
+    {"jwt",     "valid",  "__jwt_valid"},
+    {"jwt",     "claims", "__jwt_claims"},
 }};
 } // namespace
 

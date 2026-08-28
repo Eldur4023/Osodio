@@ -10,6 +10,14 @@ namespace odio {
 
 // Contexto que el VM pasa a los builtins: es el puente de la capa 2, por donde
 // el bytecode alcanza el motor nativo.
+// Estado de la sesion durante una peticion.
+struct SessionState {
+    Value::Dict data;
+    bool        loaded = false;   // ya se intento leer la cookie
+    bool        dirty  = false;   // el handler la modifico: hay que reescribirla
+    std::string secret;           // vacio = sesiones no configuradas
+};
+
 struct NativeCtx {
     osodio::Request&  req;
     osodio::Response& res;
@@ -20,6 +28,14 @@ struct NativeCtx {
 
     // Solo en rutas ws: la conexion ya establecida.
     osodio::WSConnection* ws = nullptr;
+
+    // Sesion: cookie firmada, sin estado en servidor.  Se carga perezosamente
+    // en el primer acceso y solo se reescribe si el handler la modifica.
+    SessionState* session = nullptr;
+
+    // Claims del JWT del Authorization: Bearer, ya verificados por el driver.
+    const Value* jwt_claims = nullptr;
+    bool         jwt_ok     = false;
 
     // Lo pone cualquier builtin que escriba la respuesta (text, render,
     // redirect...).  Si al terminar el handler sigue en false, el valor

@@ -3,6 +3,7 @@
 #include <odio/parser.hpp>
 #include <odio/emitter.hpp>
 #include <odio/vm.hpp>
+#include <odio/crypto.hpp>
 
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
@@ -13,6 +14,7 @@
 #include <osodio/logger.hpp>
 
 #include <algorithm>
+#include <ctime>
 #include <map>
 #include <fstream>
 #include <sstream>
@@ -337,6 +339,141 @@ void build_classes(const Program& program, ClassTable& out, DiagnosticBag& diags
     }
 }
 
+// ─── Sesion firmada y JWT ────────────────────────────────────────────────────
+//
+// La sesion es una cookie firmada, como en Flask: sin estado en servidor, lo
+// que encaja con un VM por peticion y N event loops sin nada que sincronizar.
+//
+// Formato:  base64url(json) "." base64url(hmac_sha256(secreto, base64url(json)))
+//
+// El contenido va firmado pero NO cifrado: el usuario puede leerlo, solo no
+// puede falsificarlo.  No se guarda ahi nada que no pueda ver.
+
+constexpr const char* kSessionCookie = "osodio_session";
+
+std::string sign_session(const Value::Dict& data, const std::string& secret) {
+    std::string payload = crypto::base64url_encode(
+        Value::dict(data).to_json().dump());
+    std::string mac = crypto::base64url_encode(
+        crypto::hmac_sha256(secret, payload));
+    return payload + "." + mac;
+}
+
+// Devuelve false si la cookie falta, esta mal formada o la firma no cuadra.
+// En cualquiera de esos casos la sesion arranca vacia, nunca a medias.
+bool load_session(const std::string& cookie, const std::string& secret,
+                  Value::Dict& out) {
+    size_t dot = cookie.rfind('.');
+    if (dot == std::string::npos) return false;
+
+    std::string payload = cookie.substr(0, dot);
+    std::string given   = cookie.substr(dot + 1);
+
+    std::string expected = crypto::base64url_encode(
+        crypto::hmac_sha256(secret, payload));
+    if (!crypto::constant_time_equal(given, expected)) return false;
+
+    std::string json_text;
+    if (!crypto::base64url_decode(payload, json_text)) return false;
+
+    auto j = nlohmann::json::parse(json_text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return false;
+
+    Value v = Value::from_json(j);
+    out = v.as_dict();
+    return true;
+}
+
+// Verifica un JWT HS256 y devuelve los claims.
+//
+// Comprueba alg, firma y expiracion.  Un token con alg "none", o con RS256
+// cuando esperamos HS256, se rechaza: aceptar el alg que diga el token es la
+// vulnerabilidad clasica de las librerias de JWT.
+bool verify_jwt(const std::string& token, const std::string& secret,
+                const std::string& issuer, Value& claims_out) {
+    size_t p1 = token.find('.');
+    if (p1 == std::string::npos) return false;
+    size_t p2 = token.find('.', p1 + 1);
+    if (p2 == std::string::npos) return false;
+
+    std::string signing_input = token.substr(0, p2);
+    std::string given_sig     = token.substr(p2 + 1);
+
+    std::string expected = crypto::base64url_encode(
+        crypto::hmac_sha256(secret, signing_input));
+    if (!crypto::constant_time_equal(given_sig, expected)) return false;
+
+    std::string header_text, payload_text;
+    if (!crypto::base64url_decode(token.substr(0, p1), header_text)) return false;
+    if (!crypto::base64url_decode(token.substr(p1 + 1, p2 - p1 - 1), payload_text))
+        return false;
+
+    auto header = nlohmann::json::parse(header_text, nullptr, false);
+    if (header.is_discarded() || !header.is_object()) return false;
+    if (header.value("alg", "") != "HS256") return false;
+
+    auto payload = nlohmann::json::parse(payload_text, nullptr, false);
+    if (payload.is_discarded() || !payload.is_object()) return false;
+
+    if (payload.contains("exp") && payload["exp"].is_number()) {
+        long long now = static_cast<long long>(std::time(nullptr));
+        if (payload["exp"].get<long long>() < now) return false;
+    }
+    if (!issuer.empty() && payload.value("iss", issuer) != issuer) return false;
+
+    claims_out = Value::from_json(payload);
+    return true;
+}
+
+// Configuracion de autenticacion que cada handler necesita en runtime.
+struct AuthConfig {
+    std::string session_secret;
+    int         session_max_age = 86400;
+    bool        session_secure  = true;
+    std::string jwt_secret;
+    std::string jwt_issuer;
+};
+
+// Prepara sesion y claims antes de ejecutar el handler.
+void begin_auth(const AuthConfig& cfg, osodio::Request& req,
+                SessionState& session, Value& claims, NativeCtx& ctx) {
+    session.secret = cfg.session_secret;
+    if (!cfg.session_secret.empty()) {
+        auto cookie = req.cookie(kSessionCookie);
+        if (cookie) load_session(*cookie, cfg.session_secret, session.data);
+        session.loaded = true;
+    }
+    ctx.session = &session;
+
+    if (!cfg.jwt_secret.empty()) {
+        auto auth = req.header("authorization");
+        if (auth && auth->rfind("Bearer ", 0) == 0) {
+            ctx.jwt_ok = verify_jwt(auth->substr(7), cfg.jwt_secret,
+                                    cfg.jwt_issuer, claims);
+        }
+    }
+    ctx.jwt_claims = &claims;
+}
+
+// Reescribe la cookie solo si el handler toco la sesion.
+void end_auth(const AuthConfig& cfg, const SessionState& session,
+              osodio::Response& res) {
+    if (!session.dirty || cfg.session_secret.empty()) return;
+
+    osodio::CookieOptions opts;
+    opts.path      = "/";
+    opts.http_only = true;                 // JS no la puede leer
+    opts.secure    = cfg.session_secure;
+    opts.same_site = osodio::SameSite::Lax;
+
+    if (session.data.empty()) {
+        res.clear_cookie(kSessionCookie, opts);
+        return;
+    }
+    opts.max_age = cfg.session_max_age;
+    res.cookie(kSessionCookie, sign_session(session.data, cfg.session_secret), opts);
+}
+
 // ─── Enlace de parametros ────────────────────────────────────────────────────
 
 enum class BindKind { Path, Query, Body };
@@ -482,6 +619,9 @@ bool bind_params(const RouteDecl& r, const ClassTable& classes,
 // Reconoce la forma puramente declarativa: un unico `return` que se resuelve
 // entero en compilacion.  Estas rutas no ejecutan ni un paso de bytecode.
 Action try_declarative(const RouteDecl& r) {
+    // Una ruta con guardas NUNCA puede tomar la via declarativa: la accion
+    // nativa no las ejecuta, asi que se saltaria la proteccion del grupo.
+    if (!r.guards.empty())                                       return {};
     if (!r.params.empty())                                       return {};
     if (r.body.size() != 1)                                      return {};
     if (r.body[0]->kind != StmtKind::Return || !r.body[0]->value) return {};
@@ -602,7 +742,8 @@ bool prepare_args(const std::vector<ParamBind>& binds,
     return true;
 }
 
-void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) {
+void build_routes(Module& mod, const ClassTable& classes,
+                  const AuthConfig& auth, DiagnosticBag& diags) {
     for (const auto& r : mod.program.routes) {
         if (!r.origins.empty() && r.method != "WS")
             diags.error(r.loc, "origins() solo es valido en rutas ws");
@@ -639,10 +780,13 @@ void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) 
 
             mod.router.add_internal("GET", r.pattern,
                 osodio::App::make_ws_handler(
-                    [ws_chunk, ws_binds, ws_where]
+                    [ws_chunk, ws_binds, ws_where, auth]
                     (osodio::WSConnection conn, osodio::Request& req,
                      osodio::Response& res) -> osodio::Task<void> {
-                        NativeCtx ctx{req, res};
+                        NativeCtx    ctx{req, res};
+                        SessionState session;
+                        Value        claims = Value::dict();
+                        begin_auth(auth, req, session, claims, ctx);
                         ctx.ws              = &conn;
                         ctx.response_written = true;   // el upgrade ya respondio
 
@@ -707,10 +851,13 @@ void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) 
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
             mod.router.add_internal("GET", r.pattern,
-                [sse_chunk, sse_binds, sse_where](osodio::Request& req,
-                                                  osodio::Response& res)
+                [sse_chunk, sse_binds, sse_where, auth](osodio::Request& req,
+                                                        osodio::Response& res)
                     -> osodio::Task<void> {
-                    NativeCtx ctx{req, res};
+                    NativeCtx    ctx{req, res};
+                    SessionState session;
+                    Value        claims = Value::dict();
+                    begin_auth(auth, req, session, claims, ctx);
 
                     std::vector<Value> args;
                     if (!prepare_args(sse_binds, req, res, ctx, args)) co_return;
@@ -769,9 +916,12 @@ void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) 
         ++mod.vm_routes;
         std::string where = r.method + " " + r.pattern;
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where](osodio::Request& req, osodio::Response& res)
+            [chunk, binds, where, auth](osodio::Request& req, osodio::Response& res)
                 -> osodio::Task<void> {
-                NativeCtx ctx{req, res};
+                NativeCtx    ctx{req, res};
+                SessionState session;
+                Value        claims = Value::dict();
+                begin_auth(auth, req, session, claims, ctx);
 
                 std::vector<Value> args;
                 if (!prepare_args(binds, req, res, ctx, args)) co_return;
@@ -815,6 +965,8 @@ void build_routes(Module& mod, const ClassTable& classes, DiagnosticBag& diags) 
                     res.status(500).json({{"error", result.error}, {"en", at}});
                     co_return;
                 }
+
+                end_auth(auth, session, res);
 
                 if (ctx.response_written) co_return;
                 if (result.value.is_null()) { res.status(204).send(""); co_return; }
@@ -863,7 +1015,15 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     if (diags.empty()) {
         ClassTable classes;
         build_classes(mod->program, classes, diags);
-        if (diags.empty()) build_routes(*mod, classes, diags);
+
+        AuthConfig auth;
+        auth.session_secret  = mod->program.app.session_secret;
+        auth.session_max_age = mod->program.app.session_max_age;
+        auth.session_secure  = mod->program.app.session_secure;
+        auth.jwt_secret      = mod->program.app.jwt_secret;
+        auth.jwt_issuer      = mod->program.app.jwt_issuer;
+
+        if (diags.empty()) build_routes(*mod, classes, auth, diags);
     }
 
     // Se devuelve siempre: el llamante mira diags.empty() para saber si

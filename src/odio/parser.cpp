@@ -93,9 +93,12 @@ void Parser::parse_declaration(Program& out) {
         case Tok::KwPatch: case Tok::KwDelete: case Tok::KwAny:
         case Tok::KwSse: case Tok::KwWs: {
             const Token& m = advance();
-            parse_route(out, m);
+            parse_route(out, m, "", {});
             return;
         }
+        case Tok::KwGroup:
+            parse_group(out, "", {});
+            return;
         case Tok::KwApp:
             parse_app(out);
             return;
@@ -106,7 +109,7 @@ void Parser::parse_declaration(Program& out) {
         // Declaraciones que la gramatica define pero que todavia no se compilan.
         // Se reportan explicitamente en vez de fallar con un error de sintaxis
         // confuso.
-        case Tok::KwFn: case Tok::KwGroup:
+        case Tok::KwFn:
         case Tok::KwImport: case Tok::KwOn:
             error_here(std::string("'") + tok_name(peek().kind) +
                        "' todavia no esta implementado");
@@ -123,7 +126,9 @@ void Parser::parse_declaration(Program& out) {
 
 // ─── Rutas ───────────────────────────────────────────────────────────────────
 
-void Parser::parse_route(Program& out, const Token& method_tok) {
+void Parser::parse_route(Program& out, const Token& method_tok,
+                         const std::string& prefix,
+                         const std::vector<Guard>& guards) {
     RouteDecl r;
     r.loc = method_tok.loc;
     switch (method_tok.kind) {
@@ -148,6 +153,20 @@ void Parser::parse_route(Program& out, const Token& method_tok) {
     }
     r.pattern_loc = peek().loc;
     r.pattern     = advance().text;
+
+    // El prefijo del grupo se pega delante, evitando la doble barra de
+    // group("/api") + endpoint("/users").
+    if (!prefix.empty()) {
+        std::string p = prefix;
+        if (!p.empty() && p.back() == '/') p.pop_back();
+        if (r.pattern == "/")             r.pattern = p.empty() ? "/" : p;
+        else if (r.pattern.empty() || r.pattern[0] != '/') r.pattern = p + "/" + r.pattern;
+        else                              r.pattern = p + r.pattern;
+    }
+
+    // Cada ruta lleva la lista completa de guardas que la envuelven, de fuera
+    // hacia dentro.
+    r.guards = guards;
 
     while (match(Tok::Comma)) {
         if (check(Tok::RParen)) break;          // coma final tolerada
@@ -180,6 +199,80 @@ Param Parser::parse_param() {
     else                   error_here("se esperaba el nombre del parametro");
     if (match(Tok::Assign)) p.default_value = parse_expr();
     return p;
+}
+
+// ─── Grupos ──────────────────────────────────────────────────────────────────
+
+void Parser::parse_group(Program& out, const std::string& prefix,
+                         const std::vector<Guard>& outer_guards) {
+    SourceLoc loc = advance().loc;                    // 'group'
+
+    if (!expect(Tok::LParen, "tras 'group'")) { synchronize(); return; }
+    std::string own_prefix;
+    if (check(Tok::String)) own_prefix = advance().text;
+    else { error_here("group() espera el prefijo de URL entre comillas"); }
+    if (!expect(Tok::RParen, "al cerrar group()")) { synchronize(); return; }
+    if (!expect(Tok::Colon, "al abrir el cuerpo del grupo")) { synchronize(); return; }
+
+    std::string combined = prefix;
+    if (!combined.empty() && combined.back() == '/') combined.pop_back();
+    if (!own_prefix.empty() && own_prefix != "/") {
+        if (own_prefix[0] != '/') combined += "/";
+        combined += own_prefix;
+        if (!combined.empty() && combined.back() == '/') combined.pop_back();
+    }
+
+    skip_newlines();
+    if (!expect(Tok::Indent, "al abrir el bloque del grupo")) { synchronize(); return; }
+
+    // Las guardas se acumulan: una ruta anidada tiene que pasar las del padre
+    // y luego las propias, en ese orden.
+    std::vector<Guard> guards = outer_guards;
+
+    bool seen_route = false;
+    while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+        skip_newlines();
+        if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+        size_t before = i_;
+
+        if (check(Tok::KwRequire)) {
+            SourceLoc gloc = advance().loc;
+            if (seen_route)
+                diags_.error(gloc, "las guardas del grupo van antes que sus rutas");
+            Guard g;
+            g.loc       = gloc;
+            g.condition = std::shared_ptr<Expr>(parse_expr());
+            if (expect(Tok::KwElse, "en 'require ... else ...'"))
+                g.otherwise = std::shared_ptr<Expr>(parse_expr());
+            guards.push_back(std::move(g));
+        }
+        else if (check(Tok::KwGroup)) {
+            seen_route = true;
+            parse_group(out, combined, guards);
+        }
+        else {
+            switch (peek().kind) {
+                case Tok::KwGet: case Tok::KwPost: case Tok::KwPut:
+                case Tok::KwPatch: case Tok::KwDelete: case Tok::KwAny:
+                case Tok::KwSse: case Tok::KwWs: {
+                    seen_route = true;
+                    const Token& m = advance();
+                    parse_route(out, m, combined, guards);
+                    break;
+                }
+                default:
+                    error_here("dentro de un grupo solo caben 'require', rutas y "
+                               "otros grupos");
+                    while (!check(Tok::Newline) && !check(Tok::Dedent) &&
+                           !check(Tok::EndOfFile)) advance();
+            }
+        }
+
+        skip_newlines();
+        if (i_ == before) advance();
+    }
+    match(Tok::Dedent);
+    (void)loc;
 }
 
 // ─── Clases ──────────────────────────────────────────────────────────────────
@@ -268,6 +361,30 @@ void Parser::parse_class(Program& out) {
 
 // ─── Bloque app: ─────────────────────────────────────────────────────────────
 
+// kind: 0 cadena, 1 numero, 2 booleano.  env("VAR") se resuelve aqui mismo y
+// cuenta como cadena; si la variable no existe, queda vacia y el llamante
+// decide si eso es un error.
+bool Parser::config_value(std::string& text, long long& number, bool& flag, int& kind) {
+    if (check(Tok::String)) { text = advance().text; kind = 0; return true; }
+    if (check(Tok::Int))    { number = std::strtoll(advance().text.c_str(), nullptr, 10); kind = 1; return true; }
+    if (check(Tok::KwTrue) || check(Tok::KwFalse)) {
+        flag = advance().kind == Tok::KwTrue;
+        kind = 2;
+        return true;
+    }
+    if (check(Tok::Ident) && peek().text == "env" && peek(1).is(Tok::LParen)) {
+        advance(); advance();
+        if (!check(Tok::String)) { error_here("env() espera el nombre entre comillas"); return false; }
+        std::string name = advance().text;
+        expect(Tok::RParen, "al cerrar env()");
+        const char* v = std::getenv(name.c_str());
+        text = v ? v : "";
+        kind = 0;
+        return true;
+    }
+    return false;
+}
+
 void Parser::parse_app(Program& out) {
     SourceLoc loc = advance().loc;                    // 'app'
     if (out.app.present) {
@@ -319,6 +436,45 @@ void Parser::parse_app(Program& out) {
             } else if (k == "docs")    { out.app.docs    = true; }
             else if   (k == "health")  { out.app.health  = true; }
             else if   (k == "metrics") { out.app.metrics = true; }
+            // session: y jwt: son sub-bloques con sus propias claves.
+            else if (k == "session" || k == "jwt") {
+                bool is_session = (k == "session");
+                expect(Tok::Colon, "tras la clave del sub-bloque");
+                skip_newlines();
+                if (!expect(Tok::Indent, "al abrir el sub-bloque")) break;
+
+                while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+                    skip_newlines();
+                    if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+                    if (!check(Tok::Ident)) { error_here("se esperaba una clave"); advance(); continue; }
+
+                    const Token& sub = peek();
+                    std::string  sk  = advance().text;
+                    std::string  text; long long number = 0; bool flag = false; int kind = -1;
+                    if (!config_value(text, number, flag, kind)) {
+                        error_here("valor invalido: se esperaba una cadena, un numero, "
+                                   "true/false o env(\"VAR\")");
+                        while (!check(Tok::Newline) && !check(Tok::Dedent) &&
+                               !check(Tok::EndOfFile)) advance();
+                        continue;
+                    }
+
+                    if (is_session) {
+                        if      (sk == "secret"  && kind == 0) out.app.session_secret  = text;
+                        else if (sk == "max_age" && kind == 1) out.app.session_max_age = (int)number;
+                        else if (sk == "secure"  && kind == 2) out.app.session_secure  = flag;
+                        else diags_.error(sub.loc, "clave desconocida o de tipo equivocado "
+                                                   "en session: '" + sk + "'");
+                    } else {
+                        if      (sk == "secret" && kind == 0) out.app.jwt_secret = text;
+                        else if (sk == "issuer" && kind == 0) out.app.jwt_issuer = text;
+                        else diags_.error(sub.loc, "clave desconocida o de tipo equivocado "
+                                                   "en jwt: '" + sk + "'");
+                    }
+                    skip_newlines();
+                }
+                match(Tok::Dedent);
+            }
             else {
                 diags_.error(key.loc, "clave desconocida en el bloque app: '" + k + "'");
                 while (!check(Tok::Newline) && !check(Tok::Dedent) &&
