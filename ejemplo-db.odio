@@ -1,0 +1,57 @@
+import sqlite
+
+app:
+    port 8078
+
+    sqlite:
+        file "./prueba.db"
+        pool 4
+
+class Usuario:
+    string nombre
+    int    edad
+
+    validate:
+        nombre != ""   "nombre: obligatorio"
+        edad >= 0      "edad: no puede ser negativa"
+
+get endpoint("/crear"):
+    await sqlite.exec("create table if not exists usuarios (id integer primary key autoincrement, nombre text not null, edad integer)")
+    return { "ok": true }
+
+post endpoint("/usuarios", Usuario u):
+    int filas = await sqlite.exec("insert into usuarios (nombre, edad) values (?, ?)", u.nombre, u.edad)
+    return { "insertadas": filas }.status(201)
+
+get endpoint("/usuarios"):
+    List<Json> filas = await sqlite.query("select id, nombre, edad from usuarios order by id")
+    return { "total": len(filas), "usuarios": filas }
+
+get endpoint("/usuarios/:id", int id):
+    List<Json> filas = await sqlite.query("select id, nombre, edad from usuarios where id = ?", id)
+    if len(filas) == 0:
+        return status(404)
+    return filas[0]
+
+get endpoint("/mayores/:edad", int edad):
+    List<Json> filas = await sqlite.query("select nombre from usuarios where edad >= ? order by nombre", edad)
+    List<string> nombres = []
+    for Json f in filas:
+        nombres.add(f["nombre"])
+    return { "nombres": nombres }
+
+delete endpoint("/usuarios/:id", int id):
+    int borradas = await sqlite.exec("delete from usuarios where id = ?", id)
+    if borradas == 0:
+        return status(404)
+    return status(204)
+
+# Inyeccion: el parametro va por bind, nunca concatenado.
+get endpoint("/busca", string q):
+    List<Json> filas = await sqlite.query("select nombre from usuarios where nombre = ?", q)
+    return { "encontrados": len(filas) }
+
+# Un error del motor llega como valor, no revienta el handler.
+get endpoint("/malo"):
+    Json r = await sqlite.query("select * from tabla_que_no_existe")
+    return { "resultado": r }

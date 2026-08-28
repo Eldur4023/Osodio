@@ -5,8 +5,14 @@
 #                true / false en minúscula
 # ---------------------------------------------------------------
 
-import SQLite          # módulo — fuera del alcance de 2.0, aquí solo para
-                       # validar que el namespacing aguanta la sintaxis
+import sqlite
+
+app:
+    port 8080
+
+    sqlite:
+        file "./usuarios.db"
+        pool 4
 
 
 # --- Modelos ----------------------------------------------------
@@ -42,18 +48,8 @@ class Login:
 
 # --- Lógica de negocio ------------------------------------------
 
-fn User getuser(int id):
-    SQLite.query("select id, nombre, edad from users where id = ?", id)
-    return SQLite.fetchone()
-
-fn bool setuser(User user):
-    try:
-        SQLite.query("insert into users (id, nombre, edad) values (?, ?, ?)",
-                     user.id, user.nombre, user.edad)
-        return true
-    catch e:
-        log.error("insert falló: " + e.message)
-        return false
+# Las consultas suspenden el handler, asi que van dentro de la ruta y no de
+# una funcion suelta: `await` solo existe en un handler.
 
 fn bool checkpass(string nombre, string pass):
     return true                 # stub
@@ -96,15 +92,21 @@ get endpoint("/admin"):
 # El tipo del parámetro de ruta va en la firma, no dentro del string:
 # el compilador verifica que ":id" existe en la ruta y que alguien lo recoge.
 get endpoint("/user/:id", int id):
-    return getuser(id)          # struct → JSON automático
+    List<Json> filas = await sqlite.query(
+        "select id, nombre, edad from users where id = ?", id)
+    if len(filas) == 0:
+        return status(404)
+    return filas[0]
 
 # Query con valores por defecto.
 get endpoint("/users", int page = 1, int limit = 20):
-    SQLite.query("select id, nombre, edad from users limit ? offset ?",
-                 limit, (page - 1) * limit)
-    return SQLite.fetchall()
+    return await sqlite.query("select id, nombre, edad from users limit ? offset ?",
+                              limit, (page - 1) * limit)
 
 # El body es un parámetro tipado más. Si no parsea o no valida → 422
 # automático y este cuerpo no llega a ejecutarse nunca.
 post endpoint("/user", User user):
-    return setuser(user) ? status(201) : status(400)
+    int filas = await sqlite.exec(
+        "insert into users (id, nombre, edad) values (?, ?, ?)",
+        user.id, user.nombre, user.edad)
+    return filas > 0 ? status(201) : status(400)

@@ -334,7 +334,7 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 42> kNatives = {{
+const std::array<NativeDef, 44> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -384,6 +384,10 @@ const std::array<NativeDef, 42> kNatives = {{
     // Asincronos: sin fn, los resuelve el driver del handler.
     {"sleep",     1, 1,  nullptr, true},
     {"__ws_recv", 0, 0,  nullptr, true},
+    // Base de datos: el primer argumento es el nombre del modulo, que el
+    // emisor apila; asi un unico builtin sirve para los tres.
+    {"__db_query", 2, -1, nullptr, true},
+    {"__db_exec",  2, -1, nullptr, true},
     // Marcador final para que native_count() no dependa del orden.
     {nullptr,     0, 0,  nullptr},
 }};
@@ -607,7 +611,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 24> kMembers = {{
+const std::array<MemberMap, 30> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -621,6 +625,12 @@ const std::array<MemberMap, 24> kMembers = {{
     {"error",   "code",    "__error_code"},
     {"error",   "message",  "__error_message"},
     {"error",   "messages", "__error_messages"},
+    {"sqlite",   "query", "__db_query"},
+    {"sqlite",   "exec",  "__db_exec"},
+    {"postgres", "query", "__db_query"},
+    {"postgres", "exec",  "__db_exec"},
+    {"mysql",    "query", "__db_query"},
+    {"mysql",    "exec",  "__db_exec"},
     {"request", "path",    "__req_path"},
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},
@@ -644,6 +654,10 @@ int member_native_id(const std::string& object, const std::string& member) {
 bool is_reserved_object(const std::string& name) {
     for (const auto& m : kMembers) if (name == m.object) return true;
     return false;
+}
+
+bool is_db_module(const std::string& name) {
+    return name == "sqlite" || name == "postgres" || name == "mysql";
 }
 
 } // namespace odio

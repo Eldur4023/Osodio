@@ -109,6 +109,7 @@ int              member_native_id(const std::string& object, const std::string& 
 Value call_method(NativeCtx& ctx, Value& receiver, const std::string& name,
                   std::vector<Value>& args, std::string& error);
 bool             is_reserved_object(const std::string& name);
+bool             is_db_module(const std::string& name);
 
 // Mensajes de la ultima validacion fallida en este hilo.  Se rellenan al
 // construir el 422 y los lee el manejador `on error` de la misma peticion; no

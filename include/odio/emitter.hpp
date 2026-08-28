@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -36,8 +37,9 @@ public:
     // `functions` mapea nombre de funcion de usuario a su indice en la tabla
     // del modulo.  Se resuelve al emitir, asi que el VM no busca por nombre.
     explicit Emitter(DiagnosticBag& diags, const FunctionSigs* functions = nullptr,
-                     const ClassSigs* classes = nullptr)
-        : diags_(diags), functions_(functions), classes_(classes) {}
+                     const ClassSigs* classes = nullptr,
+                     const std::set<std::string>* imports = nullptr)
+        : diags_(diags), functions_(functions), classes_(classes), imports_(imports) {}
 
     // Los parametros de la ruta ocupan las primeras ranuras, en orden.
     // Devuelve false si algo del cuerpo no se puede compilar todavia.
@@ -65,6 +67,7 @@ private:
     DiagnosticBag&                       diags_;
     const FunctionSigs*                  functions_ = nullptr;
     const ClassSigs*                     classes_   = nullptr;
+    const std::set<std::string>*         imports_   = nullptr;
     Chunk*         chunk_ = nullptr;
     bool           failed_ = false;
 

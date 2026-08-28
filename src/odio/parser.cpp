@@ -115,12 +115,18 @@ void Parser::parse_declaration(Program& out) {
         // Declaraciones que la gramatica define pero que todavia no se compilan.
         // Se reportan explicitamente en vez de fallar con un error de sintaxis
         // confuso.
-        case Tok::KwImport:
-            error_here("los modulos todavia no existen: la persistencia (sqlite, "
-                       "postgres, mysql) es alcance posterior a 2.0");
-            advance();
-            synchronize();
+        case Tok::KwImport: {
+            SourceLoc loc = advance().loc;
+            if (!check(Tok::Ident)) {
+                error_here("se esperaba el nombre del modulo tras 'import'");
+                synchronize();
+                return;
+            }
+            std::string mod = advance().text;
+            if (!out.imports.insert(mod).second)
+                diags_.error(loc, "'" + mod + "' ya estaba importado");
             return;
+        }
 
         default:
             error_here("se esperaba una declaracion (get/post/... endpoint, o app)");
@@ -536,6 +542,35 @@ void Parser::parse_app(Program& out) {
             } else if (k == "docs")    { out.app.docs    = true; }
             else if   (k == "health")  { out.app.health  = true; }
             else if   (k == "metrics") { out.app.metrics = true; }
+            // Bloque de configuracion de un modulo importado.
+            else if (out.imports.count(k)) {
+                expect(Tok::Colon, "tras el nombre del modulo");
+                skip_newlines();
+                if (!expect(Tok::Indent, "al abrir la configuracion del modulo")) break;
+
+                auto& opts = out.app.modules[k];
+                while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+                    skip_newlines();
+                    if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+                    if (!check(Tok::Ident)) { error_here("se esperaba una clave"); advance(); continue; }
+
+                    std::string mk = advance().text;
+                    std::string text; long long number = 0; bool flag = false; int kind = -1;
+                    if (!config_value(text, number, flag, kind)) {
+                        error_here("valor invalido: se esperaba una cadena, un numero, "
+                                   "true/false o env(\"VAR\")");
+                        while (!check(Tok::Newline) && !check(Tok::Dedent) &&
+                               !check(Tok::EndOfFile)) advance();
+                        continue;
+                    }
+                    // Todo se guarda como texto: cada driver interpreta lo suyo.
+                    opts[mk] = (kind == 1) ? std::to_string(number)
+                             : (kind == 2) ? (flag ? "true" : "false")
+                                           : text;
+                    skip_newlines();
+                }
+                match(Tok::Dedent);
+            }
             // session: y jwt: son sub-bloques con sus propias claves.
             else if (k == "session" || k == "jwt") {
                 bool is_session = (k == "session");

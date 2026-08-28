@@ -4,6 +4,7 @@
 #include <odio/emitter.hpp>
 #include <odio/vm.hpp>
 #include <odio/crypto.hpp>
+#include <odio/db.hpp>
 
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
@@ -18,6 +19,7 @@
 #include <cctype>
 #include <ctime>
 #include <map>
+#include <set>
 #include <fstream>
 #include <sstream>
 
@@ -274,6 +276,61 @@ int async_ws_recv_id() {
     return id;
 }
 
+int async_db_query_id() { static const int id = native_id("__db_query"); return id; }
+int async_db_exec_id()  { static const int id = native_id("__db_exec");  return id; }
+
+// Resuelve una suspension de base de datos: saca el modulo y la consulta de los
+// argumentos, hace el trabajo en el pool del modulo y devuelve el resultado.
+//
+// Un fallo del motor no revienta el handler: llega como un valor con `error`,
+// que el .odio puede mirar o dejar pasar.
+osodio::Task<Value> run_db(const VM::Result& r, bool is_query, osodio::Request& req) {
+    Value out = Value::null();
+
+    if (r.await_args.size() < 2 || !r.await_args[0].is_str() || !r.await_args[1].is_str()) {
+        Value::Dict d; d["error"] = Value::str("consulta mal formada");
+        co_return Value::dict(std::move(d));
+    }
+    const std::string mod = r.await_args[0].as_str();
+    const std::string sql = r.await_args[1].as_str();
+    std::vector<Value> params(r.await_args.begin() + 2, r.await_args.end());
+
+    auto& reg    = DbRegistry::instance();
+    auto* driver = reg.active(mod);
+    auto* pool   = reg.pool(mod);
+    if (!driver || !pool) {
+        Value::Dict d;
+        d["error"] = Value::str("el modulo '" + mod + "' no esta configurado: "
+                                "falta su bloque en app:");
+        co_return Value::dict(std::move(d));
+    }
+
+    auto result = std::make_shared<Value>(Value::null());
+    auto errmsg = std::make_shared<std::string>();
+
+    co_await DbAwaitable{pool, req.loop,
+        [driver, sql, params, is_query, result, errmsg](size_t worker) {
+            std::string err;
+            if (!driver->open(worker, err)) { *errmsg = err; return; }
+            if (is_query) {
+                Value rows;
+                if (!driver->query(worker, sql, params, rows, err)) { *errmsg = err; return; }
+                *result = std::move(rows);
+            } else {
+                long long affected = 0;
+                if (!driver->exec(worker, sql, params, affected, err)) { *errmsg = err; return; }
+                *result = Value::integer(affected);
+            }
+        }};
+
+    if (!errmsg->empty()) {
+        Value::Dict d; d["error"] = Value::str(*errmsg);
+        co_return Value::dict(std::move(d));
+    }
+    out = std::move(*result);
+    co_return out;
+}
+
 bool is_scalar(const std::string& t) {
     const auto& v = scalar_types();
     return std::find(v.begin(), v.end(), t) != v.end();
@@ -303,7 +360,8 @@ struct ClassInfo {
 using ClassTable = std::map<std::string, std::shared_ptr<ClassInfo>>;
 
 void build_classes(const Program& program, const FunctionSigs& fns,
-                   const ClassSigs& sigs, ClassTable& out, DiagnosticBag& diags) {
+                   const ClassSigs& sigs, const std::set<std::string>* imports,
+                   ClassTable& out, DiagnosticBag& diags) {
     for (const auto& c : program.classes) {
         if (out.count(c.name)) {
             diags.error(c.loc, "la clase '" + c.name + "' ya esta declarada");
@@ -333,7 +391,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         // nombre que no existe, el error sale aqui y no en produccion.
         for (const auto& r : c.rules) {
             auto    chunk = std::make_shared<Chunk>();
-            Emitter emitter(diags, &fns, &sigs);
+            Emitter emitter(diags, &fns, &sigs, imports);
             if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
             info->rules.push_back({chunk, r.message});
         }
@@ -1014,6 +1072,7 @@ ClassSigs build_class_signatures(Module& mod, DiagnosticBag& diags) {
 
 void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs& fns,
                        DiagnosticBag& diags) {
+    const std::set<std::string>* imports = &mod.program.imports;
     for (const auto& c : mod.program.classes) {
         auto it = classes.find(c.name);
         if (it == classes.end()) continue;
@@ -1022,13 +1081,13 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
         for (const auto& m : c.methods) {
             auto ms = sig.methods.find(m.name);
             if (ms == sig.methods.end()) continue;
-            Emitter emitter(diags, &fns, &classes);
+            Emitter emitter(diags, &fns, &classes, imports);
             emitter.emit_method(c.name, m, *mod.functions[ms->second.index]);
         }
         for (const auto& ct : c.ctors) {
             auto cs = sig.ctors.find(ct.params.size());
             if (cs == sig.ctors.end()) continue;
-            Emitter emitter(diags, &fns, &classes);
+            Emitter emitter(diags, &fns, &classes, imports);
             emitter.emit_ctor(c.name, sig.fields, ct, *mod.functions[cs->second]);
         }
 
@@ -1046,7 +1105,7 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
             }
             auto cs = sig.ctors.find(c.fields.size());
             if (cs != sig.ctors.end()) {
-                Emitter emitter(diags, &fns, &classes);
+                Emitter emitter(diags, &fns, &classes, imports);
                 emitter.emit_ctor(c.name, sig.fields, implicito,
                                   *mod.functions[cs->second]);
             }
@@ -1071,7 +1130,7 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
     for (const auto& f : mod.program.functions) {
         auto it = index.find(f.name);
         if (it == index.end()) continue;
-        Emitter emitter(diags, &index);
+        Emitter emitter(diags, &index, nullptr, &mod.program.imports);
         emitter.emit_function(f, *mod.functions[it->second.index]);
     }
     return index;
@@ -1081,7 +1140,7 @@ void build_error_handlers(Module& mod, const FunctionSigs& fns,
                           const ClassSigs& sigs, DiagnosticBag& diags) {
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns, &sigs);
+        Emitter emitter(diags, &fns, &sigs, &mod.program.imports);
         if (!emitter.emit_error_handler(e, *chunk)) continue;
         mod.error_handlers[e.code] = std::move(chunk);
     }
@@ -1120,7 +1179,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             }
 
             auto    ws_chunk = std::make_shared<Chunk>();
-            Emitter ws_emitter(diags, &fns, &sigs);
+            Emitter ws_emitter(diags, &fns, &sigs, &mod.program.imports);
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
 
             ++mod.vm_routes;
@@ -1156,6 +1215,11 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                                 auto msg = co_await conn.recv();
                                 if (msg && !msg->is_close())
                                     produced = Value::str(msg->data);
+                            }
+                            else if (result.await_id == async_db_query_id() ||
+                                     result.await_id == async_db_exec_id()) {
+                                produced = co_await run_db(
+                                    result, result.await_id == async_db_query_id(), req);
                             }
                             else if (result.await_id == async_sleep_id()) {
                                 long long ms = result.await_args.empty()
@@ -1195,7 +1259,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             }
 
             auto    sse_chunk = std::make_shared<Chunk>();
-            Emitter sse_emitter(diags, &fns, &sigs);
+            Emitter sse_emitter(diags, &fns, &sigs, &mod.program.imports);
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
 
             ++mod.vm_routes;
@@ -1222,14 +1286,20 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     VM::Result result = vm.start(*sse_chunk, std::move(args), ctx, fn_table);
 
                     while (result.status == VM::Status::Suspended) {
-                        if (result.await_id == async_sleep_id()) {
+                        Value produced = Value::null();
+                        if (result.await_id == async_db_query_id() ||
+                            result.await_id == async_db_exec_id()) {
+                            produced = co_await run_db(
+                                result, result.await_id == async_db_query_id(), req);
+                        }
+                        else if (result.await_id == async_sleep_id()) {
                             long long ms = result.await_args.empty()
                                          ? 0 : result.await_args[0].as_int();
                             if (ms < 0) ms = 0;
                             co_await osodio::sleep(static_cast<int>(ms));
                             if (req.is_cancelled()) co_return;
                         }
-                        result = vm.resume(Value::null(), ctx);
+                        result = vm.resume(std::move(produced), ctx);
                     }
 
                     if (result.status == VM::Status::Error) {
@@ -1260,7 +1330,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         if (!bind_params(r, classes, binds, diags)) continue;
 
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns, &sigs);
+        Emitter emitter(diags, &fns, &sigs, &mod.program.imports);
         if (!emitter.emit_route(r, *chunk)) continue;
 
         ++mod.vm_routes;
@@ -1307,7 +1377,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                 while (result.status == VM::Status::Suspended) {
                     Value produced = Value::null();
 
-                    if (result.await_id == async_sleep_id()) {
+                    if (result.await_id == async_db_query_id() ||
+                        result.await_id == async_db_exec_id()) {
+                        produced = co_await run_db(
+                            result, result.await_id == async_db_query_id(), req);
+                    }
+                    else if (result.await_id == async_sleep_id()) {
                         long long ms = result.await_args.empty()
                                      ? 0 : result.await_args[0].as_int();
                         if (ms < 0) ms = 0;
@@ -1374,6 +1449,30 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         parser.parse_into(mod->program);
     }
 
+    // Los modulos se comprueban antes que nada: importar uno que este binario
+    // no trae, o usarlo sin configurar, tiene que decirse claro.
+    if (diags.empty()) {
+        auto& reg = DbRegistry::instance();
+        for (const auto& m : mod->program.imports) {
+            if (!reg.has(m)) {
+                auto disponibles = reg.available();
+                std::string lista;
+                for (const auto& d : disponibles) lista += (lista.empty() ? "" : ", ") + d;
+                diags.error({}, "el modulo '" + m + "' no esta compilado en este binario" +
+                                (lista.empty() ? "" : "; disponibles: " + lista));
+                continue;
+            }
+            auto it = mod->program.app.modules.find(m);
+            if (it == mod->program.app.modules.end()) {
+                diags.error(mod->program.app.loc,
+                            "'import " + m + "' sin su bloque '" + m + ":' en app:");
+                continue;
+            }
+            std::string err;
+            if (!reg.activate(m, it->second, err)) diags.error(mod->program.app.loc, err);
+        }
+    }
+
     // Pasada 2: resolver clases y construir la tabla de rutas.  Las clases van
     // primero porque las rutas se enlazan contra ellas; dentro de cada pasada el
     // orden de los ficheros es indiferente.
@@ -1386,7 +1485,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         emit_class_bodies(*mod, sigs, fns, diags);
 
         ClassTable classes;
-        build_classes(mod->program, fns, sigs, classes, diags);
+        build_classes(mod->program, fns, sigs, &mod->program.imports, classes, diags);
 
         AuthConfig auth;
         auth.session_secret  = mod->program.app.session_secret;

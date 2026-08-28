@@ -1,5 +1,7 @@
 #pragma once
+#include <map>
 #include <memory>
+#include <set>
 #include <optional>
 #include <string>
 #include <vector>
@@ -191,11 +193,17 @@ struct AppDecl {
     std::string jwt_secret;
     std::string jwt_issuer;
 
+    // Bloques de configuracion de modulos: nombre -> clave -> valor.
+    std::map<std::string, std::map<std::string, std::string>> modules;
+
     SourceLoc                loc;
     bool                     present = false;
 };
 
 struct Program {
+    // Modulos importados.  Solo se puede usar `sqlite.query(...)` si hay un
+    // `import sqlite`.
+    std::set<std::string>  imports;
     std::vector<ClassDecl> classes;
     std::vector<FnDecl>    functions;
     std::vector<RouteDecl> routes;

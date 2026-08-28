@@ -299,7 +299,7 @@ plantillas.
 | Transporte | HTTP/1.1 en claro. TLS y HTTP/2 al reverse proxy |
 | Ejecución | Bytecode sobre VM propio, un VM por hilo de event loop |
 | Compilación | Interna al binario. Sin toolchain externo, sin transpilación a C++ |
-| Persistencia | **Fuera de 2.0.** Llegará como módulos, no como builtin |
+| Persistencia | Módulos `sqlite`, `postgres` y `mysql`, sobre pool de hilos y `await` |
 | Plantillas | **Jinja2Cpp**, no inja. Jinja2 de verdad, no un subconjunto |
 | Sintaxis | Bloques por indentación (Python), tipado estático (C++), rutas (Flask), entrada por firma (FastAPI) |
 | Genéricos | Solo contenedores nativos, borrados en compilación. Sin clases genéricas de usuario |
@@ -338,24 +338,33 @@ dependen del runtime de C++.
 
 ---
 
-## 10. Futuro: módulos
+## 10. Módulos de persistencia
 
-La persistencia y todo lo que dependa de una tecnología externa concreta entra como
-**módulos de Odio**, no como parte del núcleo:
+La persistencia entra como **módulos**, no como parte del núcleo:
 
 - `sqlite` — embebido, un fichero, sin servidor
 - `postgres` — vía libpq
-- `mysql`
+- `mysql` — vía libmysqlclient
+
+Cada uno se compila solo si su cliente está presente (`cmake` lo informa al configurar), y
+`import` de uno que no está da un error que enumera los disponibles.
 
 **Motivo de la separación:** el núcleo defiende eficiencia y no puede quedar atado a un
 motor síncrono. Un módulo se carga solo si la app lo declara, paga su coste solo quien lo
 usa, y cada uno puede resolver su propio modelo de concurrencia (pool de hilos para los
 síncronos, I/O nativa para los que hablan por socket).
 
-**Consecuencia para el diseño de la sintaxis, aunque no se implemente ahora:** el lenguaje
-necesita un concepto de **espacio de nombres** desde el día uno (`sqlite.query(...)` frente
-a nombres planos). Retrofitear namespacing a un lenguaje que nació plano es doloroso; dejar
-la puerta abierta en la gramática es gratis.
+**Concurrencia.** Los tres clientes tienen API bloqueante. Ejecutarlos en el hilo del event
+loop clavaría ese core entero, así que una consulta **suspende el handler** igual que
+`await sleep` y el trabajo ocurre en un pool propio del módulo. Cada worker es dueño de una
+conexión, así que no hay reparto ni sincronización entre hilos.
+
+Verificado: una consulta de 356 ms con cuatro en vuelo deja una ruta sin base de datos
+respondiendo en 10 ms.
+
+**Inyección de SQL.** Los parámetros van siempre por *bind* —`sqlite3_bind`, `PQexecParams`,
+sentencias preparadas de MySQL— y nunca concatenados. No hay forma de construir SQL por
+concatenación desde Odio.
 
 ---
 

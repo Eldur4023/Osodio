@@ -616,6 +616,46 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
             return;
         }
         const std::string& obj = e.object->object->text;
+
+        // Modulos: `sqlite.query(...)` exige `import sqlite`, y el nombre del
+        // modulo viaja como primer argumento para que un solo builtin sirva
+        // para los tres.
+        bool is_module = is_db_module(obj);
+        if (is_module && (!imports_ || !imports_->count(obj))) {
+            error(e.object->loc, "falta 'import " + obj + "' para poder usar '" +
+                                 obj + "." + e.object->text + "'");
+            return;
+        }
+        if (is_module) {
+            const NativeDef& mdef = native_at(id);
+            if (!awaited) {
+                error(e.loc, "'" + obj + "." + e.object->text + "()' es asincrono: "
+                             "hay que escribir 'await " + obj + "." + e.object->text +
+                             "(...)'");
+                return;
+            }
+            chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::str(obj)));
+            size_t argc = 1;
+            for (const auto& a : e.args) {
+                if (!a.name.empty()) {
+                    error(a.loc, "las consultas no admiten argumentos con nombre");
+                    return;
+                }
+                emit_expr(*a.value);
+                ++argc;
+            }
+            if (argc < static_cast<size_t>(mdef.min_args)) {
+                error(e.loc, "'" + obj + "." + e.object->text +
+                             "()' espera al menos la consulta SQL");
+                return;
+            }
+            if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
+            chunk_->has_await = true;
+            chunk_->emit(Op::CallAsync, e.loc,
+                         (static_cast<uint32_t>(id) << 8) | static_cast<uint32_t>(argc));
+            return;
+        }
+
         if ((obj == "sse" && route_method_ != "SSE") ||
             (obj == "ws"  && route_method_ != "WS")) {
             error(e.object->loc, "'" + obj + "' solo existe dentro de una ruta " + obj);

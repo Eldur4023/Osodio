@@ -17,6 +17,13 @@ option(OSODIO_IO_URING "Backend io_uring en lugar de epoll (Linux 5.1+)" OFF)
 option(OSODIO_BROTLI   "Compresion Brotli ademas de gzip"                OFF)
 option(OSODIO_EXAMPLES "Compilar los ejemplos de examples/"              ON)
 
+# Modulos de persistencia.  Cada uno se compila solo si su cliente esta
+# presente: `import sqlite` en un binario sin el da un error claro al compilar
+# el .odio, no un fallo raro en produccion.
+option(OSODIO_SQLITE   "Modulo sqlite"                                   ON)
+option(OSODIO_POSTGRES "Modulo postgres (libpq)"                         ON)
+option(OSODIO_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
+
 # ── Dependencias del sistema ──────────────────────────────────────────────────
 # Osodio 2.0 no enlaza OpenSSL ni nghttp2: TLS y HTTP/2 son cosa del reverse
 # proxy.  zlib es la unica dependencia obligatoria.
@@ -115,6 +122,7 @@ add_library(odio STATIC
     src/odio/lexer.cpp
     src/odio/parser.cpp
     src/odio/crypto.cpp
+    src/odio/db.cpp
     src/odio/value.cpp
     src/odio/natives.cpp
     src/odio/emitter.cpp
@@ -123,6 +131,48 @@ add_library(odio STATIC
 )
 target_include_directories(odio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(odio PUBLIC osodio)
+
+if(OSODIO_SQLITE)
+    find_path(SQLITE3_INC sqlite3.h)
+    find_library(SQLITE3_LIB sqlite3)
+    if(SQLITE3_INC AND SQLITE3_LIB)
+        target_sources(odio PRIVATE src/odio/db_sqlite.cpp)
+        target_compile_definitions(odio PRIVATE OSODIO_SQLITE)
+        target_include_directories(odio PRIVATE ${SQLITE3_INC})
+        target_link_libraries(odio PRIVATE ${SQLITE3_LIB})
+        message(STATUS "modulo sqlite: activado")
+    else()
+        message(STATUS "modulo sqlite: OMITIDO (falta libsqlite3-dev)")
+    endif()
+endif()
+
+if(OSODIO_POSTGRES)
+    find_path(PQ_INC libpq-fe.h PATH_SUFFIXES postgresql)
+    find_library(PQ_LIB pq)
+    if(PQ_INC AND PQ_LIB)
+        target_sources(odio PRIVATE src/odio/db_postgres.cpp)
+        target_compile_definitions(odio PRIVATE OSODIO_POSTGRES)
+        target_include_directories(odio PRIVATE ${PQ_INC})
+        target_link_libraries(odio PRIVATE ${PQ_LIB})
+        message(STATUS "modulo postgres: activado")
+    else()
+        message(STATUS "modulo postgres: OMITIDO (falta libpq-dev)")
+    endif()
+endif()
+
+if(OSODIO_MYSQL)
+    find_path(MYSQL_INC mysql.h PATH_SUFFIXES mysql mariadb)
+    find_library(MYSQL_LIB NAMES mysqlclient mariadb)
+    if(MYSQL_INC AND MYSQL_LIB)
+        target_sources(odio PRIVATE src/odio/db_mysql.cpp)
+        target_compile_definitions(odio PRIVATE OSODIO_MYSQL)
+        target_include_directories(odio PRIVATE ${MYSQL_INC})
+        target_link_libraries(odio PRIVATE ${MYSQL_LIB})
+        message(STATUS "modulo mysql: activado")
+    else()
+        message(STATUS "modulo mysql: OMITIDO (falta libmysqlclient-dev)")
+    endif()
+endif()
 target_compile_options(odio PRIVATE -Wall -Wextra)
 
 # El binario de Osodio 2.0.
