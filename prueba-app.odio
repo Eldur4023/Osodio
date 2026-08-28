@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------
+#  prueba-app.odio
+#  Las dos piezas que faltaban: configuración de la aplicación
+#  y subida de ficheros.
+# ---------------------------------------------------------------
+
+
+# --- Configuración ----------------------------------------------
+# La config es Odio, no un segundo formato. Sin YAML, sin TOML, sin
+# un fichero que aprender aparte.
+#
+# `osodio ./mi-app` lee todos los .odio del directorio, de forma
+# recursiva. El bloque `app:` puede estar en cualquiera de ellos,
+# pero solo una vez.
+#
+# El orden de los ficheros no importa: la compilación es en dos
+# pasadas — primero se recogen las declaraciones, después se
+# resuelven los nombres. Una clase puede usarse antes de definirse.
+
+app:
+    name        "Mi aplicación"
+    version     "1.0.0"
+    port        8080
+    templates   "./templates"
+
+    # Estáticos: prefijo de URL -> directorio. `spa` hace que las
+    # rutas no encontradas caigan en index.html.
+    static "/static" -> "./public"
+    static "/"       -> "./dist" spa
+
+    docs                        # habilita /openapi.json y /docs
+    health                      # habilita /health
+    metrics                     # habilita /metrics
+
+    # Los secretos nunca van escritos en el fichero.
+    session:
+        secret   env("SESSION_SECRET")
+        max_age  86400
+        secure   true
+
+    jwt:
+        secret   env("JWT_SECRET")
+        issuer   "mi-app"
+
+
+# --- Subida de ficheros -----------------------------------------
+# Igual que el body JSON, un fichero subido es un parámetro tipado.
+# `File` es una clase: name, filename, content_type, size.
+
+post endpoint("/upload/avatar", File avatar):
+    require avatar.content_type.starts_with("image/") else status(415)
+    require avatar.size <= 5 * 1024 * 1024            else status(413)
+
+    # save(dir) guarda con el nombre original ya saneado — se queda
+    # solo con el componente de fichero, así que ".." o una ruta
+    # absoluta en el filename del cliente no pueden escapar del
+    # directorio. Devuelve el nombre final.
+    string nombre = avatar.save("./uploads")
+
+    return { "url": "/static/uploads/" + nombre, "size": avatar.size }
+             .status(201)
+
+
+# Campos de texto y fichero conviven en el mismo formulario: cada
+# uno es un parámetro más, y se validan igual.
+post endpoint("/upload/documento", File fichero, string titulo):
+    require titulo != ""                    else status(422)
+    require fichero.size <= 20 * 1024 * 1024 else status(413)
+
+    string nombre = fichero.save("./uploads")
+    return render("subido.html", titulo=titulo, fichero=nombre)
+
+
+# Varios ficheros: contenedor nativo parametrizado. Los genéricos son
+# borrados — el checker los comprueba y desaparecen antes del bytecode,
+# así que el VM nunca ve un List<File>, solo una lista.
+post endpoint("/upload/galeria", List<File> imagenes, string album):
+    require imagenes.size > 0  else status(422)
+    require imagenes.size <= 20 else status(413)
+
+    List<string> guardadas = []
+
+    for File imagen in imagenes:
+        require imagen.content_type.starts_with("image/") else status(415)
+        guardadas.add(imagen.save("./uploads/" + album))
+
+    return { "album": album, "ficheros": guardadas }.status(201)
+
+
+# ---------------------------------------------------------------
+#  Layout de proyecto
+#
+#    mi-app/
+#      app.odio           configuración
+#      rutas/
+#        publico.odio     el orden entre ficheros es indiferente
+#        admin.odio
+#        api.odio
+#      templates/         plantillas Jinja2
+#      public/            estáticos
+#      uploads/           ficheros subidos
+#
+#    $ osodio ./mi-app
+#
+#  En desarrollo, osodio vigila el árbol y recompila el fichero que
+#  cambia. Si el nuevo no compila, sigue sirviendo el anterior y
+#  escribe el error con fichero:línea:columna.
+# ---------------------------------------------------------------
