@@ -488,8 +488,27 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
             return;
         }
     }
+    // Metodo sobre un valor: el receptor se resuelve en runtime, asi que se
+    // apila y el despacho por tipo lo hace el VM.
+    else if (e.object->kind == ExprKind::Member) {
+        emit_expr(*e.object->object);
+        size_t argc = 0;
+        for (const auto& a : e.args) {
+            if (!a.name.empty()) {
+                error(a.loc, "un metodo no admite argumentos con nombre");
+                return;
+            }
+            emit_expr(*a.value);
+            ++argc;
+        }
+        if (argc > 255) { error(e.loc, "demasiados argumentos"); return; }
+        chunk_->emit(Op::CallMethod, e.loc,
+                     (chunk_->add_constant(Value::str(e.object->text)) << 8) |
+                     static_cast<uint32_t>(argc));
+        return;
+    }
     else {
-        error(e.loc, "de momento solo se pueden llamar builtins por su nombre");
+        error(e.loc, "de momento solo se pueden llamar builtins o metodos");
         return;
     }
 

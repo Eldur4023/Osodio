@@ -1,15 +1,39 @@
 #pragma once
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "value.hpp"
 
-namespace osodio { class Request; class Response; class SSEWriter; class WSConnection; }
+namespace osodio {
+class Request; class Response; class SSEWriter; class WSConnection;
+struct MultipartPart;
+}
 
 namespace odio {
 
 // Contexto que el VM pasa a los builtins: es el puente de la capa 2, por donde
 // el bytecode alcanza el motor nativo.
+// Almacen compartido entre TODOS los hilos de event loop.
+//
+// Es la unica via de estado comun: cada VM tiene su pila y su heap y no
+// comparte nada con los demas.  Por eso expone operaciones y no propiedades —
+// `state.x = state.x + 1` seria una carrera entre la lectura y la escritura.
+class SharedState {
+public:
+    static SharedState& instance();
+
+    long long incr(const std::string& key, long long by);
+    Value     get(const std::string& key) const;
+    void      set(const std::string& key, Value v);
+    bool      remove(const std::string& key);
+
+private:
+    mutable std::mutex          mutex_;
+    std::map<std::string, Value> data_;
+};
+
 // Estado de la sesion durante una peticion.
 struct SessionState {
     Value::Dict data;
@@ -25,6 +49,11 @@ struct NativeCtx {
     // Solo en rutas sse: el escritor del flujo, creado por el driver antes de
     // arrancar el VM.  Nulo en el resto, y los builtins de sse lo comprueban.
     osodio::SSEWriter* sse = nullptr;
+
+    // Partes multipart ya parseadas.  Un File del lenguaje guarda el indice de
+    // su parte aqui, no los bytes: asi copiar un File es copiar un entero.
+    const std::vector<osodio::MultipartPart>* parts   = nullptr;
+    bool                                      uploads = false;
 
     // Solo en rutas ws: la conexion ya establecida.
     osodio::WSConnection* ws = nullptr;
@@ -71,6 +100,12 @@ int              native_id(const std::string& name);
 // builtin que lo implementa, o -1 si esa combinacion no existe.  El mapeo vive
 // junto a la tabla para que anadir un miembro sea tocar un sitio.
 int              member_native_id(const std::string& object, const std::string& member);
+
+// Metodo sobre un valor: "hola".starts_with(...), lista.add(...), fichero.save(...).
+// A diferencia de los objetos reservados, el receptor se conoce en runtime, asi
+// que el despacho es por tipo dentro del VM.
+Value call_method(NativeCtx& ctx, Value& receiver, const std::string& name,
+                  std::vector<Value>& args, std::string& error);
 bool             is_reserved_object(const std::string& name);
 const NativeDef& native_at(int id);
 int              native_count();

@@ -285,6 +285,22 @@ VM::Result VM::execute(NativeCtx& ctx) {
                 break;
             }
 
+            case Op::CallMethod: {
+                uint32_t name_k = in.operand >> 8;
+                int      argc   = static_cast<int>(in.operand & 0xFF);
+
+                std::vector<Value> args(static_cast<size_t>(argc));
+                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+                Value recv = pop();
+
+                std::string error;
+                Value out = call_method(ctx, recv, chunk.constants[name_k].as_str(),
+                                        args, error);
+                if (!error.empty()) return fail(std::move(error), in.loc);
+                push(std::move(out));
+                break;
+            }
+
             case Op::CallNative: {
                 int id   = static_cast<int>(in.operand >> 8);
                 int argc = static_cast<int>(in.operand & 0xFF);

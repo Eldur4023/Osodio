@@ -254,7 +254,9 @@ plantillas.
    C++. Sobre eso van las rutas **`sse`** y **`ws`**, con `sse` y `ws` como objetos
    reservados. Tambien `group` con prefijos anidados y guardas acumuladas, y los
    objetos `session` y `jwt`, mas `on error` con `error` y `request` como objetos
-   reservados. Falta `for`, `try/catch`, multipart, los constructores y los metodos.
+   reservados, `for`, el almacen compartido `state`, `log`, cookies, formularios,
+   multipart con `File`/`List<File>`, y metodos sobre valores. Falta `try/catch`,
+   `/docs` desde el AST, los constructores y los metodos de clase.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`, `sleep` (asincrono) y los
@@ -265,7 +267,8 @@ plantillas.
    cursor bajo la posición exacta.
 6. ~~**HMAC-SHA256 vendorizado**~~ — hecho: SHA-256, HMAC, base64url y comparación
    en tiempo constante, verificados contra los vectores del RFC y contra `openssl`.
-7. **Store de estado compartido** — nativo, atómico, entre hilos.
+7. ~~**Store de estado compartido**~~ — hecho: `state.incr/decr/get/set/remove`,
+   con mutex, verificado con 300 incrementos concurrentes sobre 16 hilos.
 8. ~~**`CMakeLists.txt`**~~ — hecho en el hito 0.
 
 ---

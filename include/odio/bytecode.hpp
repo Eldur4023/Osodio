@@ -34,6 +34,7 @@ enum class Op : uint8_t {
     IterList,     // convierte la cima en la lista que se va a recorrer
     GetMember,    // operand = indice de constante con el nombre
 
+    CallMethod,   // operand = (indice-de-constante-con-el-nombre << 8) | argc
     CallNative,   // operand = (id << 8) | argc
     CallAsync,    // idem, pero suspende: el driver hace el co_await real
     Return,       // devuelve la cima

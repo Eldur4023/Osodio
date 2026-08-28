@@ -4,8 +4,13 @@
 #include <osodio/response.hpp>
 #include <osodio/sse.hpp>
 #include <osodio/websocket.hpp>
+#include <osodio/logger.hpp>
+#include <osodio/multipart.hpp>
 
 #include <array>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
 
 namespace odio {
 
@@ -232,6 +237,72 @@ Value fn_jwt_claims(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return *ctx.jwt_claims;
 }
 
+// ─── state.* ─────────────────────────────────────────────────────────────────
+
+Value fn_state_incr(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "state.incr() espera la clave como string"; return Value::null(); }
+    long long by = 1;
+    if (args.size() > 1) {
+        if (!args[1].is_int()) { error = "state.incr() espera un entero"; return Value::null(); }
+        by = args[1].as_int();
+    }
+    return Value::integer(SharedState::instance().incr(args[0].as_str(), by));
+}
+
+Value fn_state_decr(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "state.decr() espera la clave como string"; return Value::null(); }
+    long long by = args.size() > 1 && args[1].is_int() ? args[1].as_int() : 1;
+    return Value::integer(SharedState::instance().incr(args[0].as_str(), -by));
+}
+
+Value fn_state_get(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "state.get() espera la clave como string"; return Value::null(); }
+    Value v = SharedState::instance().get(args[0].as_str());
+    if (v.is_null() && args.size() > 1) return args[1];
+    return v;
+}
+
+Value fn_state_set(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "state.set() espera la clave como string"; return Value::null(); }
+    SharedState::instance().set(args[0].as_str(), args[1]);
+    return args[1];
+}
+
+Value fn_state_remove(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "state.remove() espera la clave como string"; return Value::null(); }
+    return Value::boolean(SharedState::instance().remove(args[0].as_str()));
+}
+
+// ─── log.* / cookie / form ───────────────────────────────────────────────────
+
+Value fn_log_info(NativeCtx&, std::vector<Value>& args, std::string&) {
+    osodio::log().info(args[0].to_string());
+    return Value::null();
+}
+Value fn_log_warn(NativeCtx&, std::vector<Value>& args, std::string&) {
+    osodio::log().warn(args[0].to_string());
+    return Value::null();
+}
+Value fn_log_error(NativeCtx&, std::vector<Value>& args, std::string&) {
+    osodio::log().error(args[0].to_string());
+    return Value::null();
+}
+
+Value fn_cookie(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "cookie() espera el nombre como string"; return Value::null(); }
+    auto c = ctx.req.cookie(args[0].as_str());
+    if (!c) return args.size() > 1 ? args[1] : Value::null();
+    return Value::str(*c);
+}
+
+Value fn_form(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "form() espera el nombre como string"; return Value::null(); }
+    auto f  = ctx.req.form();
+    auto it = f.find(args[0].as_str());
+    if (it == f.end()) return args.size() > 1 ? args[1] : Value::null();
+    return Value::str(it->second);
+}
+
 // ─── error.* / request.* ─────────────────────────────────────────────────────
 
 Value fn_error_code(NativeCtx& ctx, std::vector<Value>&, std::string&) {
@@ -254,7 +325,7 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 31> kNatives = {{
+const std::array<NativeDef, 41> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -290,6 +361,16 @@ const std::array<NativeDef, 31> kNatives = {{
     {"__req_path",      0, 0,  fn_req_path},
     {"__req_method",    0, 0,  fn_req_method},
     {"__req_ip",        0, 0,  fn_req_ip},
+    {"__state_incr",    1, 2,  fn_state_incr},
+    {"__state_decr",    1, 2,  fn_state_decr},
+    {"__state_get",     1, 2,  fn_state_get},
+    {"__state_set",     2, 2,  fn_state_set},
+    {"__state_remove",  1, 1,  fn_state_remove},
+    {"__log_info",      1, 1,  fn_log_info},
+    {"__log_warn",      1, 1,  fn_log_warn},
+    {"__log_error",     1, 1,  fn_log_error},
+    {"cookie",          1, 2,  fn_cookie},
+    {"form",            1, 2,  fn_form},
     // Asincronos: sin fn, los resuelve el driver del handler.
     {"sleep",     1, 1,  nullptr, true},
     {"__ws_recv", 0, 0,  nullptr, true},
@@ -298,6 +379,36 @@ const std::array<NativeDef, 31> kNatives = {{
 }};
 
 } // namespace
+
+SharedState& SharedState::instance() {
+    static SharedState s;
+    return s;
+}
+
+long long SharedState::incr(const std::string& key, long long by) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto&     v   = data_[key];
+    long long cur = v.is_int() ? v.as_int() : 0;
+    long long out = cur + by;
+    v = Value::integer(out);
+    return out;
+}
+
+Value SharedState::get(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = data_.find(key);
+    return it == data_.end() ? Value::null() : it->second;
+}
+
+void SharedState::set(const std::string& key, Value v) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    data_[key] = std::move(v);
+}
+
+bool SharedState::remove(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return data_.erase(key) > 0;
+}
 
 int native_id(const std::string& name) {
     for (size_t i = 0; i + 1 < kNatives.size(); ++i)
@@ -309,10 +420,127 @@ const NativeDef& native_at(int id) { return kNatives[static_cast<size_t>(id)]; }
 
 int native_count() { return static_cast<int>(kNatives.size()) - 1; }
 
+// ─── Metodos sobre valores ───────────────────────────────────────────────────
+
+namespace {
+
+bool want(size_t got, size_t min, size_t max, const std::string& name,
+          std::string& error) {
+    if (got >= min && got <= max) return true;
+    error = "'" + name + "()' recibe un numero de argumentos que no admite";
+    return false;
+}
+
+// Guarda una parte subida quedandose solo con el nombre de fichero, sin ruta:
+// asi un filename con ".." o absoluto no puede escapar del directorio.
+std::string safe_name(const std::string& raw) {
+    size_t slash = raw.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? raw : raw.substr(slash + 1);
+    if (base.empty() || base == "." || base == "..") base = "subida";
+    return base;
+}
+
+} // namespace
+
+Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
+                  std::vector<Value>& args, std::string& error) {
+    // ── string ───────────────────────────────────────────────────────────────
+    if (recv.is_str()) {
+        const std::string& s = recv.as_str();
+        if (name == "starts_with" || name == "ends_with" || name == "contains") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_str()) { error = "'" + name + "()' espera un string"; return Value::null(); }
+            const std::string& n = args[0].as_str();
+            if (name == "starts_with") return Value::boolean(s.rfind(n, 0) == 0);
+            if (name == "ends_with")
+                return Value::boolean(s.size() >= n.size() &&
+                                      s.compare(s.size() - n.size(), n.size(), n) == 0);
+            return Value::boolean(s.find(n) != std::string::npos);
+        }
+        if (name == "upper" || name == "lower") {
+            std::string out = s;
+            for (char& c : out) c = static_cast<char>(name == "upper" ? ::toupper((unsigned char)c)
+                                                                     : ::tolower((unsigned char)c));
+            return Value::str(std::move(out));
+        }
+        if (name == "trim") {
+            size_t a = s.find_first_not_of(" \t\r\n");
+            if (a == std::string::npos) return Value::str("");
+            size_t b = s.find_last_not_of(" \t\r\n");
+            return Value::str(s.substr(a, b - a + 1));
+        }
+        error = "los string no tienen el metodo '" + name + "'";
+        return Value::null();
+    }
+
+    // ── List ─────────────────────────────────────────────────────────────────
+    if (recv.is_list()) {
+        if (name == "add") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            recv.as_list().push_back(args[0]);
+            return recv;
+        }
+        error = "las List no tienen el metodo '" + name + "'";
+        return Value::null();
+    }
+
+    // ── Dict, incluido File ──────────────────────────────────────────────────
+    if (recv.is_dict()) {
+        auto& d = recv.as_dict();
+
+        if (name == "save") {
+            auto idx = d.find("__idx");
+            if (idx == d.end() || !ctx.parts) {
+                error = "save() solo existe sobre un File subido";
+                return Value::null();
+            }
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_str()) { error = "save() espera el directorio como string"; return Value::null(); }
+
+            size_t i = static_cast<size_t>(idx->second.as_int());
+            if (!ctx.parts || i >= ctx.parts->size()) {
+                error = "el fichero subido ya no esta disponible";
+                return Value::null();
+            }
+
+            auto  fn   = d.find("filename");
+            std::string base = safe_name(fn == d.end() ? "" : fn->second.to_string());
+            std::string dir  = args[0].as_str();
+            if (!dir.empty() && dir.back() != '/') dir += "/";
+
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+
+            std::ofstream out(dir + base, std::ios::binary);
+            if (!out) { error = "no se puede escribir en " + dir + base; return Value::null(); }
+            const std::string& bytes = (*ctx.parts)[i].body;
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            if (!out) { error = "fallo al escribir " + dir + base; return Value::null(); }
+            return Value::str(base);
+        }
+
+        if (name == "has") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            return Value::boolean(d.count(args[0].to_string()) > 0);
+        }
+        if (name == "keys") {
+            Value::List ks;
+            for (const auto& [k, _] : d) if (k.rfind("__", 0) != 0) ks.push_back(Value::str(k));
+            return Value::list(std::move(ks));
+        }
+        error = "los Dict no tienen el metodo '" + name + "'";
+        return Value::null();
+    }
+
+    error = std::string("los valores de tipo ") + recv.type_name() +
+            " no tienen metodos";
+    return Value::null();
+}
+
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 15> kMembers = {{
+const std::array<MemberMap, 23> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -328,6 +556,14 @@ const std::array<MemberMap, 15> kMembers = {{
     {"request", "path",    "__req_path"},
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},
+    {"state",   "incr",    "__state_incr"},
+    {"state",   "decr",    "__state_decr"},
+    {"state",   "get",     "__state_get"},
+    {"state",   "set",     "__state_set"},
+    {"state",   "remove",  "__state_remove"},
+    {"log",     "info",    "__log_info"},
+    {"log",     "warn",    "__log_warn"},
+    {"log",     "error",   "__log_error"},
 }};
 } // namespace
 

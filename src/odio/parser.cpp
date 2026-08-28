@@ -847,8 +847,10 @@ ExprPtr Parser::parse_postfix() {
             SourceLoc loc = advance().loc;
             auto m = make(ExprKind::Member, loc);
             m->object = std::move(e);
-            if (check(Tok::Ident)) m->text = advance().text;
-            else                   error_here("se esperaba un nombre tras '.'");
+            // Tras un punto, una palabra reservada es solo un nombre: `state.get`
+            // y `log.error` no tienen por que chocar con `get` y `error`.
+            if (check(Tok::Ident) || !peek().text.empty()) m->text = advance().text;
+            else error_here("se esperaba un nombre tras '.'");
             e = std::move(m);
         }
         else if (check(Tok::LParen)) {

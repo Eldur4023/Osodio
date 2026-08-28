@@ -10,6 +10,7 @@
 #include <osodio/task.hpp>
 #include <osodio/sse.hpp>
 #include <osodio/websocket.hpp>
+#include <osodio/multipart.hpp>
 #include <osodio/app.hpp>
 #include <osodio/logger.hpp>
 
@@ -476,7 +477,7 @@ void end_auth(const AuthConfig& cfg, const SessionState& session,
 
 // ─── Enlace de parametros ────────────────────────────────────────────────────
 
-enum class BindKind { Path, Query, Body };
+enum class BindKind { Path, Query, Body, File, FileList };
 
 struct ParamBind {
     BindKind    kind = BindKind::Path;
@@ -550,6 +551,30 @@ bool bind_params(const RouteDecl& r, const ClassTable& classes,
     for (const auto& p : r.params) {
         bool in_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
                        != in_pattern.end();
+
+        // File / List<File> se enlazan a las partes multipart con ese nombre.
+        bool is_file      = (p.type.name == "File");
+        bool is_file_list = (p.type.name == "List" && p.type.args.size() == 1 &&
+                             p.type.args[0].name == "File");
+        if (is_file || is_file_list) {
+            if (in_path) {
+                diags.error(p.loc, "'" + p.name + "' esta en el patron de ruta, "
+                                   "asi que no puede ser un fichero subido");
+                ok = false;
+                continue;
+            }
+            if (r.method == "GET" || r.method == "DELETE") {
+                diags.error(p.loc, "una ruta " + r.method + " no lleva cuerpo");
+                ok = false;
+                continue;
+            }
+            ParamBind fb;
+            fb.kind = is_file ? BindKind::File : BindKind::FileList;
+            fb.name = p.name;
+            fb.type = p.type.name;
+            out.push_back(std::move(fb));
+            continue;
+        }
 
         // Un parametro cuyo tipo es una clase se enlaza al cuerpo de la
         // peticion: es la idea de FastAPI, el body es un parametro tipado mas.
@@ -698,11 +723,48 @@ bool bind_body(const ClassInfo& ci, osodio::Request& req, osodio::Response& res,
 
 // Rellena las ranuras de los parametros a partir de la peticion.
 // Devuelve false, con la respuesta ya escrita, si algun valor no encaja.
+// Un File del lenguaje son los metadatos mas el indice de su parte en
+// ctx.uploads; los bytes no viajan dentro del Value.
+Value make_file_value(const osodio::MultipartPart& part, size_t index) {
+    Value::Dict d;
+    d["name"]         = Value::str(part.name);
+    d["filename"]     = Value::str(part.filename);
+    d["content_type"] = Value::str(part.content_type);
+    d["size"]         = Value::integer(static_cast<long long>(part.body.size()));
+    d["__idx"]        = Value::integer(static_cast<long long>(index));
+    return Value::dict(std::move(d));
+}
+
 bool prepare_args(const std::vector<ParamBind>& binds,
                   osodio::Request& req, osodio::Response& res,
                   NativeCtx& ctx, std::vector<Value>& out) {
     out.reserve(binds.size());
     for (const auto& b : binds) {
+        if (b.kind == BindKind::File || b.kind == BindKind::FileList) {
+            if (!ctx.uploads) {
+                res.status(400).json({{"error", "se esperaba multipart/form-data"}});
+                return false;
+            }
+            Value::List matches;
+            for (size_t i = 0; i < ctx.parts->size(); ++i) {
+                const auto& part = (*ctx.parts)[i];
+                if (part.name == b.name && !part.filename.empty())
+                    matches.push_back(make_file_value(part, i));
+            }
+
+            if (b.kind == BindKind::FileList) {
+                out.push_back(Value::list(std::move(matches)));
+                continue;
+            }
+            if (matches.empty()) {
+                res.status(422).json({{"error", "Validacion fallida"},
+                                      {"mensajes", {b.name + ": falta el fichero"}}});
+                return false;
+            }
+            out.push_back(matches[0]);
+            continue;
+        }
+
         if (b.kind == BindKind::Body) {
             Value v;
             if (!bind_body(*b.cls, req, res, ctx, v)) return false;
@@ -923,14 +985,29 @@ void build_routes(Module& mod, const ClassTable& classes,
         if (!emitter.emit_route(r, *chunk)) continue;
 
         ++mod.vm_routes;
+        bool needs_upload = false;
+        for (const auto& b : binds)
+            if (b.kind == BindKind::File || b.kind == BindKind::FileList)
+                needs_upload = true;
+
         std::string where = r.method + " " + r.pattern;
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where, auth](osodio::Request& req, osodio::Response& res)
+            [chunk, binds, where, auth, needs_upload](osodio::Request& req, osodio::Response& res)
                 -> osodio::Task<void> {
                 NativeCtx    ctx{req, res};
                 SessionState session;
                 Value        claims = Value::dict();
                 begin_auth(auth, req, session, claims, ctx);
+
+                // Solo se parsea el cuerpo multipart si alguna ranura lo pide.
+                std::vector<osodio::MultipartPart> parts;
+                if (needs_upload) {
+                    if (auto p = osodio::parse_multipart(req)) {
+                        parts       = std::move(*p);
+                        ctx.parts   = &parts;
+                        ctx.uploads = true;
+                    }
+                }
 
                 std::vector<Value> args;
                 if (!prepare_args(binds, req, res, ctx, args)) co_return;

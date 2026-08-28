@@ -50,8 +50,12 @@ nlohmann::json Value::to_json() const {
             return arr;
         }
         case Type::Dict: {
+            // Las claves que empiezan por "__" son internas —por ejemplo el
+            // indice con el que un File localiza sus bytes— y no salen nunca en
+            // la respuesta.
             auto obj = nlohmann::json::object();
-            for (const auto& [k, v] : *m_) obj[k] = v.to_json();
+            for (const auto& [k, v] : *m_)
+                if (k.rfind("__", 0) != 0) obj[k] = v.to_json();
             return obj;
         }
     }
@@ -133,6 +137,7 @@ const char* op_name(Op op) {
         case Op::GetIndex:         return "GET_INDEX";
         case Op::IterList:         return "ITER_LIST";
         case Op::GetMember:        return "GET_MEMBER";
+        case Op::CallMethod:       return "CALL_METHOD";
         case Op::CallNative:       return "CALL_NATIVE";
         case Op::CallAsync:        return "CALL_ASYNC";
         case Op::Return:           return "RETURN";

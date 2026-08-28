@@ -1,0 +1,53 @@
+app:
+    port 8087
+
+# --- estado compartido entre hilos ---
+get endpoint("/visitas"):
+    return { "n": state.incr("visitas") }
+
+get endpoint("/contador"):
+    return { "n": state.get("visitas", 0) }
+
+post endpoint("/reset"):
+    state.set("visitas", 0)
+    return { "ok": true }
+
+# --- metodos sobre valores ---
+get endpoint("/texto/:s", string s):
+    return {
+        "mayus":    s.upper(),
+        "empieza":  s.starts_with("ho"),
+        "contiene": s.contains("la"),
+        "limpio":   "  con espacios  ".trim()
+    }
+
+get endpoint("/lista"):
+    List<int> xs = []
+    for int i in [1, 2, 3]:
+        xs.add(i * 10)
+    return { "xs": xs, "n": len(xs) }
+
+# --- log ---
+get endpoint("/avisa"):
+    log.info("alguien paso por /avisa")
+    return { "ok": true }
+
+# --- cookies y formularios ---
+get endpoint("/galleta"):
+    return { "tema": cookie("tema", "claro") }
+
+post endpoint("/formulario"):
+    return { "nombre": form("nombre", "(vacio)") }
+
+# --- subida de ficheros ---
+post endpoint("/subir", File avatar):
+    require avatar.content_type.starts_with("image/") else status(415)
+    require avatar.size <= 1048576                    else status(413)
+    string guardado = avatar.save("./subidas")
+    return { "guardado": guardado, "bytes": avatar.size, "tipo": avatar.content_type }
+
+post endpoint("/galeria", List<File> fotos):
+    List<string> nombres = []
+    for File f in fotos:
+        nombres.add(f.save("./subidas"))
+    return { "total": len(fotos), "nombres": nombres }
