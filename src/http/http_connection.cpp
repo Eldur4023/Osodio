@@ -146,7 +146,10 @@ void HttpConnection::do_read() {
             continue;
         }
 
-        if (!parser_.feed(buf, static_cast<size_t>(n))) {
+        in_parser_ = true;
+        bool ok    = parser_.feed(buf, static_cast<size_t>(n));
+        in_parser_ = false;
+        if (!ok) {
             send_error(400, "Bad Request");
             close();
             return;
@@ -164,6 +167,14 @@ void HttpConnection::do_read() {
                 }
                 pending_buf_.append(buf + static_cast<size_t>(n) - un, un);
             }
+        }
+
+        // El handler era sincrono y ya respondio dentro de feed(): ahora que la
+        // pausa esta puesta, se puede cerrar el ciclo de verdad.
+        if (cycle_pending_) {
+            cycle_pending_ = false;
+            finish_cycle();
+            if (closed_) return;
         }
     }
 }
@@ -434,6 +445,12 @@ void HttpConnection::on_write_complete() {
         return;
     }
 
+    // Dentro de feed() la pausa todavia no existe: aplazar el cierre de ciclo.
+    if (in_parser_) { cycle_pending_ = true; return; }
+    finish_cycle();
+}
+
+void HttpConnection::finish_cycle() {
     // Pipelining: drain any buffered bytes that belong to the next request.
     // Resume the parser, feed the saved bytes, and let the resulting dispatch
     // start a fresh response cycle.  We deliberately avoid re-arming EPOLLIN

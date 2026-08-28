@@ -55,6 +55,15 @@ private:
     bool                       in_flight_ = false;
     static constexpr size_t    kMaxPendingBuf = 64 * 1024;  // 64 KB pipelined
 
+    // Un handler sincrono responde DENTRO de parser_.feed(): llhttp llama a
+    // on_message_complete, que dispatch()a, y la respuesta se escribe entera
+    // antes de que el callback devuelva HPE_PAUSED.  Si el cierre de ciclo
+    // corriera ahi, haria resume() sobre una pausa que aun no existe y la
+    // conexion se quedaria pausada para siempre.  Asi que se aplaza hasta que
+    // feed() retorna y la pausa ya esta puesta.
+    bool in_parser_     = false;
+    bool cycle_pending_ = false;
+
     // ── Timeouts ──────────────────────────────────────────────────────────────
     // kHeaderTimeoutMs: armed at construction; fires 408 if complete headers are
     //   not received within this window (Slowloris defence).
@@ -79,6 +88,10 @@ private:
     void do_write();
     void do_sendfile();
     void on_write_complete();
+
+    // Cierre del ciclo de respuesta: resume el parser, reproduce lo que hubiera
+    // llegado por pipelining, rearma el temporizador de cabeceras y EPOLLIN.
+    void finish_cycle();
 
     // Begin writing `data`; buffers any unsent remainder and arms EPOLLOUT.
     void send_response(std::string data);
