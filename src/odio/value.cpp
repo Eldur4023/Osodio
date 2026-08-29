@@ -44,27 +44,35 @@ std::string Value::to_string() const {
 namespace {
 
 void escapar(const std::string& in, std::string& out) {
-    out.push_back('\"');
-    for (unsigned char c : in) {
+    // Casi ninguna cadena tiene nada que escapar, asi que se buscan los
+    // caracteres que si lo necesitan y el resto se copia de golpe.  Antes
+    // esto era un push_back por caracter, con su comprobacion de capacidad
+    // cada vez, y salia el 7% del perfil de una respuesta con listas.
+    out.push_back('"');
+    size_t limpio = 0;
+    for (size_t i = 0; i < in.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c >= 0x20 && c != '"' && c != '\\') continue;
+
+        out.append(in, limpio, i - limpio);
         switch (c) {
             case '"': out += "\\\""; break;
             case '\\': out += "\\\\"; break;
-            case 0x08:    out += "\\b";       break;
-            case 0x0C:    out += "\\f";       break;
-            case 0x0A:    out += "\\n";       break;
-            case 0x0D:    out += "\\r";       break;
-            case 0x09:    out += "\\t";       break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out.push_back(static_cast<char>(c));   // UTF-8 tal cual
-                }
+            case 0x08: out += "\\b"; break;
+            case 0x0C: out += "\\f"; break;
+            case 0x0A: out += "\\n"; break;
+            case 0x0D: out += "\\r"; break;
+            case 0x09: out += "\\t"; break;
+            default: {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            }
         }
+        limpio = i + 1;
     }
-    out.push_back('\"');
+    out.append(in, limpio, in.size() - limpio);
+    out.push_back('"');
 }
 
 void escribir_double(double d, std::string& out) {
