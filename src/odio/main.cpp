@@ -56,7 +56,9 @@ void usage() {
         "  --check       compila y sale, sin arrancar el servidor\n"
         "  --port N      sobrescribe el puerto del bloque app:\n"
         "  --no-watch    no vigilar cambios en los ficheros\n"
-        "  --verbose     registrar por consola cada peticion que llega\n";
+        "  --verbose     registrar por consola cada peticion que llega\n"
+        "  --autotest    al arrancar y en cada recarga, recorre los endpoints\n"
+        "  --autotest=all  incluye tambien POST/PUT/PATCH/DELETE\n";
 }
 
 // Vigila los ficheros compilados y recompila al detectar un cambio.

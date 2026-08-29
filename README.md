@@ -80,8 +80,8 @@ Ese argumento sigue en pie, y por eso conviene ser preciso sobre qué se interpr
 qué no.
 
 **El stack de I/O sigue siendo nativo y multinúcleo.** Un event loop por core, `SO_REUSEPORT`,
-sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON, nlohmann; el
-servicio de estáticos, `sendfile(2)`. Nada de eso cambia.
+sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON lo lee y lo escribe Osodio, sin
+árbol intermedio; el servicio de estáticos es `sendfile(2)`. Nada de eso cambia.
 
 **El bytecode solo ejecuta pegamento.** Resolver un nombre, llamar a un builtin nativo,
 encadenar el resultado. Y ni siquiera siempre: una ruta que se resuelve entera en
@@ -107,7 +107,7 @@ número a una cadena hay que decirlo: `"n = " + str(n)`.
 
 Osodio 2.0 no habla TLS ni HTTP/2. Los hace nginx o Caddy, mejor y desde hace años. El
 proxy es dueño del transporte; Osodio es dueño de la aplicación. Eso es lo que permite que
-el binario pese **3,5 MB** y no enlace OpenSSL ni nghttp2.
+el binario no enlace OpenSSL ni nghttp2.
 
 ---
 
@@ -336,13 +336,25 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-Dependencias vendorizadas en `third_party/`: nlohmann/json y llhttp.
+Única dependencia vendorizada en `third_party/`: **llhttp**, 360 KB de C sin dependencias
+propias. El JSON lo lee y lo escribe Osodio.
 
-**Jinja2Cpp es la excepción**: no está empaquetado, no es cabecera única y arrastra Boost,
-fmt y rapidjson. Se trae con `FetchContent` y un tag fijado, así que el **primer** configure
-necesita red. Se eligió sobre inja porque implementa Jinja2 de verdad —la sintaxis de
-Flask— en vez de un subconjunto. El coste es de disco y de tiempo de compilación: el
-binario final son 3,5 MB y no enlaza nada de Boost.
+**Jinja2Cpp es la excepción, y es cara**: no está empaquetado, no es cabecera única y
+arrastra siete proyectos —Boost, fmt, rapidjson, expected-lite, optional-lite, variant-lite
+y string-view-lite—, unos 800 MB en `build/_deps`. Se trae con `FetchContent` y un tag
+fijado, así que es **el único motivo** por el que el primer configure necesita red. Se
+eligió sobre inja porque implementa Jinja2 de verdad —la sintaxis de Flask— en vez de un
+subconjunto. El coste es de disco y de tiempo de compilación: el binario final son ~7,6 MB
+y no enlaza nada de Boost, que se usa solo en cabeceras.
+
+**jemalloc, opcional pero recomendado.** Con varios event loops y un pool de base de datos,
+el `malloc` de glibc serializa en sus arenas y se convierte en el cuello de botella: en
+respuestas JSON grandes, cambiarlo vale más que cualquier optimización del código. Si está,
+`cmake` lo enlaza solo; si no, se compila igual y lo dice por consola.
+
+```bash
+sudo apt install libjemalloc-dev     # opcional
+```
 
 ```bash
 osodio ./mi-app          # todos los .odio del directorio, recursivamente
@@ -351,6 +363,7 @@ osodio a.odio b.odio     # solo esos
 osodio ./app --check     # compila y sale
 osodio ./app --no-watch  # sin recarga en caliente
 osodio ./app --verbose   # una linea de log por peticion
+osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoints
 ```
 
 ---
@@ -358,7 +371,16 @@ osodio ./app --verbose   # una linea de log por peticion
 ## Estado
 
 Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
-funcionan y están cubiertos por los ejemplos del repositorio (`ejemplo-*.odio`).
+funcionan, están cubiertos por los ejemplos del repositorio (`ejemplo-*.odio`) y por una
+suite de regresión de 60 pruebas que ejerce el binario por el socket, tal y como se usa:
+
+```bash
+cmake --build build --target osodio-bin && ctest --test-dir build
+```
+
+Los módulos de `sqlite` y `postgres` están probados contra motores reales. El de `mysql`
+compila y enlaza, pero **nunca se ha ejecutado contra un servidor**: hasta que eso pase, es
+código sin verificar.
 
 El diseño completo, con las decisiones tomadas y sus motivos, está en
 [OSODIO-2.0.md](OSODIO-2.0.md). La gramática formal del lenguaje, en

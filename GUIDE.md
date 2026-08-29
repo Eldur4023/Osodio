@@ -39,7 +39,13 @@ cmake --build build -j$(nproc)
 ```
 
 Requiere Linux (epoll, `sendfile(2)`, `SO_REUSEPORT`), CMake 3.20+ y C++20. El primer
-`configure` necesita red para traer Jinja2Cpp.
+`configure` necesita red para traer Jinja2Cpp, que es la única dependencia que no está
+vendorizada.
+
+Opcional pero recomendado: `sudo apt install libjemalloc-dev`. Con varios event loops y un
+pool de base de datos, el `malloc` de glibc serializa en sus arenas; cambiarlo vale más que
+cualquier optimización del código en respuestas JSON grandes. Si está, `cmake` lo enlaza
+solo; si no, compila igual y lo dice.
 
 El argumento decide qué se compila, sin sorpresas:
 
