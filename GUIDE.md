@@ -54,6 +54,7 @@ El argumento decide qué se compila, sin sorpresas:
 | `--check` | Compila y sale, sin arrancar |
 | `--port N` | Sobrescribe el puerto del bloque `app:` |
 | `--no-watch` | No vigila cambios |
+| `--verbose` | Registra por consola cada petición que llega. Cuesta ~25% del rendimiento, así que no viene puesto |
 | `--autotest` | Al arrancar y en cada recarga, recorre los endpoints |
 | `--autotest=all` | Incluye también POST/PUT/PATCH/DELETE |
 

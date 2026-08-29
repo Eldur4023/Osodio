@@ -350,6 +350,7 @@ osodio app.odio          # solo ese fichero
 osodio a.odio b.odio     # solo esos
 osodio ./app --check     # compila y sale
 osodio ./app --no-watch  # sin recarga en caliente
+osodio ./app --verbose   # una linea de log por peticion
 ```
 
 ---

@@ -54,7 +54,8 @@ void usage() {
         "opciones:\n"
         "  --check       compila y sale, sin arrancar el servidor\n"
         "  --port N      sobrescribe el puerto del bloque app:\n"
-        "  --no-watch    no vigilar cambios en los ficheros\n";
+        "  --no-watch    no vigilar cambios en los ficheros\n"
+        "  --verbose     registrar por consola cada peticion que llega\n";
 }
 
 // Vigila los ficheros compilados y recompila al detectar un cambio.
@@ -111,13 +112,14 @@ void watch_loop(std::vector<fs::path> inputs) {
 
 int main(int argc, char** argv) {
     std::vector<std::string> args;
-    bool check_only = false, watch = true;
+    bool check_only = false, watch = true, verbose = false;
     int  port_override = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--check")    check_only = true;
         else if (a == "--no-watch") watch = false;
+        else if (a == "--verbose")  verbose = true;
         else if (a == "--autotest")     g_autotest.enabled = true;
         else if (a == "--autotest=all") { g_autotest.enabled = true; g_autotest.unsafe = true; }
         else if (a == "--help" || a == "-h") { usage(); return 0; }
@@ -160,7 +162,10 @@ int main(int argc, char** argv) {
 
     const odio::AppDecl& cfg = mod->program.app;
     osodio::App app;
-    app.use(osodio::logger());
+    // Una linea por peticion, con su flush, cuesta cerca de un 25% del
+    // rendimiento y multiplica por 2,6 la latencia mediana: se pide a mano.
+    // El arranque, las recargas y el autotest se siguen viendo siempre.
+    if (verbose) app.use(osodio::logger());
     app.set_templates(cfg.templates_dir);
     if (!cfg.name.empty()) app.api_info(cfg.name, cfg.version.empty() ? "0.1.0"
                                                                      : cfg.version);
