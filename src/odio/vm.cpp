@@ -333,20 +333,27 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             }
 
             case Op::MakeDict: {
+                // Los pares ya estan en la pila en orden clave,valor: se leen
+                // ahi mismo.  Antes se volcaban a un vector temporal, que era
+                // una asignacion mas por diccionario, y el diccionario crecia a
+                // saltos porque nadie le decia cuantas claves iban a entrar.
+                const size_t n    = in.operand;
+                const size_t base = stack_.size() - n * 2;
+
                 Value::Dict d;
-                // Los pares se apilan clave,valor en orden; se recogen al reves.
-                std::vector<std::pair<Value, Value>> pairs(in.operand);
-                for (uint32_t i = in.operand; i-- > 0;) {
-                    Value v = pop();
-                    Value k = pop();
-                    pairs[i] = {std::move(k), std::move(v)};
-                }
-                for (auto& [k, v] : pairs) {
-                    if (!k.is_str())
-                        return fail(std::string("la clave de un Dict tiene que ser "
-                                    "string, no ") + k.type_name(), in.loc);
+                d.reservar(n);
+                for (size_t i = 0; i < n; ++i) {
+                    Value& k = stack_[base + i * 2];
+                    Value& v = stack_[base + i * 2 + 1];
+                    if (!k.is_str()) {
+                        std::string t = k.type_name();
+                        stack_.resize(base);
+                        return fail("la clave de un Dict tiene que ser string, no " + t,
+                                    in.loc);
+                    }
                     d[k.as_str()] = std::move(v);
                 }
+                stack_.resize(base);
                 push(Value::dict(std::move(d)));
                 break;
             }

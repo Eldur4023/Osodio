@@ -55,6 +55,11 @@ public:
         size_t size()  const { return v_.size();  }
         bool   empty() const { return v_.empty(); }
         void   clear()       { v_.clear(); idx_.clear(); }
+
+        // Quien sabe cuantas claves va a meter —el MakeDict del VM las tiene
+        // contadas— evita que el vector crezca a saltos: sin esto un
+        // diccionario de 3 claves hace tres asignaciones, una por realojo.
+        void   reservar(size_t n) { v_.reserve(n); }
         size_t count(std::string_view k) const { return find(k) == end() ? 0 : 1; }
 
         iterator       find(std::string_view k);
