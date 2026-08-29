@@ -393,18 +393,18 @@ void App::run(const std::string& host, uint16_t port) {
         all_loops.push_back(&main_loop);
     }
 
-    g_initiate_drain = [&main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
+    g_initiate_drain = [this, &main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
         {
             std::lock_guard<std::mutex> lk(all_mutex);
             for (auto* s : all_servers) s->stop_accepting();
         }
 
-        main_loop.post([&main_loop, shared_conn_count, &all_loops, &all_mutex]() {
+        main_loop.post([this, &main_loop, shared_conn_count, &all_loops, &all_mutex]() {
             using Clock = std::chrono::steady_clock;
             auto deadline = Clock::now() + std::chrono::seconds(30);
 
             auto fn = std::make_shared<std::function<void()>>();
-            *fn = [fn, &main_loop, shared_conn_count, deadline,
+            *fn = [this, fn, &main_loop, shared_conn_count, deadline,
                    &all_loops, &all_mutex]() mutable {
                 bool timed_out = Clock::now() >= deadline;
                 int  remaining = shared_conn_count->load(std::memory_order_acquire);
@@ -415,6 +415,12 @@ void App::run(const std::string& host, uint16_t port) {
                                    remaining, " connection(s) dropped");
                     else
                         log().info("shutdown: all connections drained");
+                    // Ultimo momento en que los loops siguen vivos: aqui se
+                    // apaga lo que tenga hilos propios posteando a ellos.  Si
+                    // se hiciera despues, esos hilos escribirian en un loop ya
+                    // destruido.
+                    if (before_stop_) before_stop_();
+
                     std::lock_guard<std::mutex> lk(all_mutex);
                     for (auto* l : all_loops) l->stop();
                     return;

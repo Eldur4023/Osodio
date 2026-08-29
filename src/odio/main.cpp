@@ -2,6 +2,7 @@
 #include <odio/project.hpp>
 #include <odio/vm.hpp>
 #include <odio/autotest.hpp>
+#include <odio/db.hpp>
 
 #include <osodio/app.hpp>
 #include <osodio/middleware.hpp>
@@ -166,6 +167,12 @@ int main(int argc, char** argv) {
     // rendimiento y multiplica por 2,6 la latencia mediana: se pide a mano.
     // El arranque, las recargas y el autotest se siguen viendo siempre.
     if (verbose) app.use(osodio::logger());
+
+    // Los pools de los modulos de datos tienen hilos propios que reanudan
+    // handlers posteando al event loop.  Hay que pararlos y esperarlos mientras
+    // los loops siguen vivos; si no, un worker que termine tarde —SQLite puede
+    // quedarse hasta 5 s en su busy handler— postea a un loop ya destruido.
+    app.on_before_stop([] { odio::DbRegistry::instance().shutdown(); });
     app.set_templates(cfg.templates_dir);
     if (!cfg.name.empty()) app.api_info(cfg.name, cfg.version.empty() ? "0.1.0"
                                                                      : cfg.version);

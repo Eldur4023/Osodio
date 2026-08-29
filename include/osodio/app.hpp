@@ -29,6 +29,22 @@ public:
     // Middleware (applied in order for every request)
     App& use(Middleware m) { middlewares_.push_back(std::move(m)); return *this; }
 
+    // ── Cierre ───────────────────────────────────────────────────────────────
+    //
+    // Se invoca una vez, en el hilo del event loop principal, cuando las
+    // conexiones ya estan drenadas pero ANTES de parar los loops.
+    //
+    // Es el unico punto seguro para apagar cualquier cosa que tenga hilos
+    // propios posteando al loop —el pool de un modulo de base de datos, por
+    // ejemplo—: mientras corre, los loops siguen vivos, asi que un post() que
+    // llegue tarde todavia encuentra su destino.  Cuando vuelve, ya no puede
+    // quedar nadie posteando y parar los loops es seguro.
+    //
+    // Bloquea el cierre mientras dure, asi que debe terminar.
+    App& on_before_stop(std::function<void()> fn) {
+        before_stop_ = std::move(fn);
+        return *this;
+    }
 
     // Serve a directory of static files under a URL prefix.
     //   app.serve_static("/static", "./public")
@@ -310,6 +326,7 @@ private:
     std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;
     AsyncErrorHandler                          catchall_async_error_handler_;
     std::string                               templates_dir_ = "./templates";
+    std::function<void()>                     before_stop_;
 
     std::string                               api_title_       = "Osodio API";
     std::string                               api_version_     = "0.1.0";
