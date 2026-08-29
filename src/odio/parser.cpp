@@ -77,6 +77,23 @@ void Parser::synchronize() {
 
 // ─── Programa ────────────────────────────────────────────────────────────────
 
+// Una expresion suelta, para las plantillas.  Se exige que consuma todo el
+// flujo: `{{ a.titulo basura }}` tiene que ser un error, no leerse a medias.
+ExprPtr Parser::parse_single_expression() {
+    skip_newlines();
+    if (check(Tok::EndOfFile)) {
+        error_here("se esperaba una expresion");
+        return nullptr;
+    }
+    ExprPtr e = parse_expr();
+    skip_newlines();
+    if (!check(Tok::EndOfFile)) {
+        error_here("sobra algo detras de la expresion");
+        return nullptr;
+    }
+    return e;
+}
+
 void Parser::parse_into(Program& out) {
     skip_newlines();
     while (!check(Tok::EndOfFile)) {

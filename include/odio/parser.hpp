@@ -19,6 +19,11 @@ public:
     // el mismo Program: es lo que permite repartir la app en varios .odio.
     void parse_into(Program& out);
 
+    // Parsea UNA expresion y nada mas.  Lo usan las plantillas: lo que va
+    // dentro de {{ }} o de {% if %} es una expresion de Odio, no un lenguaje
+    // aparte.  Devuelve nulo si no hay expresion o si sobra algo detras.
+    ExprPtr parse_single_expression();
+
 private:
     std::vector<Token> toks_;
     DiagnosticBag&     diags_;

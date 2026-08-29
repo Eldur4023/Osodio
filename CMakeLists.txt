@@ -133,6 +133,7 @@ add_library(odio STATIC
     src/odio/db.cpp
     src/odio/value.cpp
     src/odio/json_parse.cpp
+    src/odio/jinja_puente.cpp
     src/odio/plantilla.cpp
     src/odio/natives.cpp
     src/odio/emitter.cpp
@@ -203,6 +204,13 @@ target_link_libraries(crypto_check PRIVATE odio)
 # No enlaza nada del proyecto, asi que prueba lo que se despliega y no una
 # version instrumentada de ello.
 enable_testing()
+
+# Las plantillas se prueban aparte y en proceso: compilar y renderizar no pasa
+# por el socket, asi que el guion de regresion no llega ahi.
+add_executable(prueba_plantillas tests/plantillas.cpp)
+target_link_libraries(prueba_plantillas PRIVATE odio)
+add_test(NAME plantillas COMMAND prueba_plantillas)
+
 add_test(NAME regresion
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:osodio-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
