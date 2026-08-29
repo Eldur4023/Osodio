@@ -183,8 +183,11 @@ int main(int argc, char** argv) {
     if (cfg.docs) {
         app.get("/openapi.json", [](osodio::Response& res) {
             auto mod = current_module();
-            if (!mod) { res.status(503).json({{"error", "sin modulo"}}); return; }
-            res.json(mod->openapi);
+            if (!mod) {
+                res.status(503).json_text(R"({"error":"sin modulo"})");
+                return;
+            }
+            res.json_text(mod->openapi);
         });
         app.get("/docs", [](osodio::Response& res) {
             res.html(osodio::swagger_ui_html("/openapi.json"));
@@ -201,11 +204,14 @@ int main(int argc, char** argv) {
     // segmentos, asi que la raiz "/" no entra en "/*".
     auto dispatch = [](osodio::Request& req, osodio::Response& res) -> osodio::Task<void> {
         auto mod = current_module();
-        if (!mod) { res.status(503).json({{"error", "sin modulo cargado"}}); co_return; }
+        if (!mod) { res.status(503).json_text(R"({"error":"sin modulo cargado"})"); co_return; }
 
         auto match = mod->router.match(req.method, req.path);
         if (!match.found) {
-            res.status(404).json({{"error", "Not Found"}, {"path", req.path}});
+            odio::Value::Dict d;
+            d["error"] = odio::Value::str("Not Found");
+            d["path"]  = odio::Value::str(req.path);
+            res.status(404).json_text(odio::Value::dict(std::move(d)).to_json_text());
             co_return;
         }
         req.params = std::move(match.params);

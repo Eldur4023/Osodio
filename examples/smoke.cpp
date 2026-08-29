@@ -11,7 +11,7 @@ int main() {
     app.set_templates("./templates");
 
     app.get("/json", [](Response& res) {
-        res.json({{"ok", true}, {"engine", "osodio-2.0"}});
+        res.json_text(R"({"ok":true,"engine":"osodio-2.0"})");
     });
 
     app.get("/tpl", [](Response& res) {

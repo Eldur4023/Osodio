@@ -11,7 +11,6 @@
 #include <cerrno>
 #include <iostream>
 #include <vector>
-#include <nlohmann/json.hpp>
 #include <jinja2cpp/template_env.h>
 #include <jinja2cpp/filesystem_handler.h>
 #include <jinja2cpp/value.h>
@@ -167,13 +166,16 @@ public:
         return *this;
     }
 
-    Response& json(const nlohmann::json& j) {
+    // Cuerpo JSON ya serializado.  Antes esto recibia un arbol nlohmann y
+    // llamaba a dump(); ahora quien tiene los datos los escribe directamente,
+    // que es una materializacion menos.
+    Response& json_text(std::string cuerpo) {
         if (state_->body_committed) {
-            std::cerr << "[osodio] Response.json() called after body already committed — ignoring\n";
+            std::cerr << "[osodio] Response.json_text() called after body already committed - ignoring\n";
             return *this;
         }
         header("Content-Type", "application/json; charset=utf-8");
-        state_->body = j.dump();
+        state_->body = std::move(cuerpo);
         state_->body_committed = true;
         return *this;
     }
@@ -191,10 +193,13 @@ public:
     // Render a Jinja2 template from the templates directory.
     // Uses Jinja2Cpp; the TemplateEnv is cached per thread per templates_dir.
     //
-    //   res.render("index.html", {{"user", user_data}, {"items", items}});
+    //   res.render("index.html", datos);
     //
+    // Los datos llegan ya como valores de Jinja2.  Antes se recibia un arbol
+    // nlohmann que habia que convertir aqui: un intermediario que solo servia
+    // para ir de un arbol a otro.
     Response& render(const std::string& template_name,
-                     const nlohmann::json& data = {}) {
+                     jinja2::ValuesMap data = {}) {
         if (state_->body_committed) {
             std::cerr << "[osodio] Response.render() called after body already committed — ignoring\n";
             return *this;
@@ -241,7 +246,7 @@ public:
             state_->headers["Content-Type"] = "application/json; charset=utf-8";
             return *this;
         }
-        auto result = tmpl->RenderAsString(json_to_values_map(data));
+        auto result = tmpl->RenderAsString(data);
         if (!result) {
             std::cerr << "[osodio] template render error: "
                       << result.error().ToString() << '\n';
@@ -387,31 +392,6 @@ public:
     }
 
 private:
-    static jinja2::Value json_to_value(const nlohmann::json& j) {
-        if (j.is_null())             return {};
-        if (j.is_boolean())          return j.get<bool>();
-        if (j.is_number_integer())   return j.get<int64_t>();
-        if (j.is_number_float())     return j.get<double>();
-        if (j.is_string())           return j.get<std::string>();
-        if (j.is_array()) {
-            jinja2::ValuesList list;
-            list.reserve(j.size());
-            for (const auto& item : j) list.push_back(json_to_value(item));
-            return list;
-        }
-        // object
-        jinja2::ValuesMap map;
-        for (auto& [k, v] : j.items()) map[k] = json_to_value(v);
-        return map;
-    }
-
-    static jinja2::ValuesMap json_to_values_map(const nlohmann::json& j) {
-        jinja2::ValuesMap map;
-        if (j.is_object())
-            for (auto& [k, v] : j.items()) map[k] = json_to_value(v);
-        return map;
-    }
-
     static bool is_template_name(const std::string& s) {
         if (s.empty() || s.find('\n') != std::string::npos) return false;
         if (s.find('<') != std::string::npos) return false;

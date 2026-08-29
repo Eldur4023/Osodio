@@ -27,7 +27,7 @@ struct Module {
     FunctionTable functions;
 
     // Especificacion OpenAPI generada desde el AST al compilar.
-    nlohmann::json openapi;
+    std::string    openapi;      // ya serializado al compilar
 
     // Manejadores de `on error`, por codigo.  La clave 0 es el global.
     std::map<int, std::shared_ptr<Chunk>> error_handlers;

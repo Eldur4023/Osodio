@@ -265,9 +265,9 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
             // Log internally but do not expose e.what() to clients — it may
             // contain connection strings, file paths, or other internal detail.
             osodio::log().error("unhandled exception: ", e.what());
-            res_ptr->status(500).json({{"error", "Internal Server Error"}});
+            res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
         } catch (...) {
-            res_ptr->status(500).json({{"error", "Internal Server Error"}});
+            res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
         }
     }(req_ptr, res_ptr, dispatch_);
 
@@ -314,7 +314,7 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
         int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             osodio::Response err;
-            err.status(500).json({{"error", "Cannot open file"}});
+            err.status(500).json_text(R"({"error":"Cannot open file"})");
             err.header("Connection", "close");
             keep_alive_ = false;
             send_response(err.build());
@@ -503,7 +503,8 @@ void HttpConnection::finish_cycle() {
 
 void HttpConnection::send_error(int code, const char* msg) {
     osodio::Response r;
-    r.status(code).json({{"error", msg}});
+    // El mensaje viene de una lista fija del motor, sin comillas ni barras.
+    r.status(code).json_text(std::string(R"({"error":")") + msg + R"("})");
     r.header("Connection", "close");
     // send_error is only called for protocol-level errors; ignore keep-alive
     keep_alive_ = false;

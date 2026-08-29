@@ -132,6 +132,8 @@ add_library(odio STATIC
     src/odio/crypto.cpp
     src/odio/db.cpp
     src/odio/value.cpp
+    src/odio/json_parse.cpp
+    src/odio/plantilla.cpp
     src/odio/natives.cpp
     src/odio/emitter.cpp
     src/odio/vm.cpp

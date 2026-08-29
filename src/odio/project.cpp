@@ -1,4 +1,5 @@
 #include <odio/project.hpp>
+#include <odio/plantilla.hpp>
 #include <odio/lexer.hpp>
 #include <odio/parser.hpp>
 #include <odio/emitter.hpp>
@@ -81,37 +82,6 @@ std::string format_errors(const DiagnosticBag& diags,
 
 namespace {
 
-bool const_eval(const Expr& e, nlohmann::json& out) {
-    switch (e.kind) {
-        case ExprKind::StringLit: out = e.text;        return true;
-        case ExprKind::IntLit:    out = e.int_value;   return true;
-        case ExprKind::FloatLit:  out = e.float_value; return true;
-        case ExprKind::BoolLit:   out = e.bool_value;  return true;
-        case ExprKind::NullLit:   out = nullptr;       return true;
-
-        case ExprKind::ListLit: {
-            out = nlohmann::json::array();
-            for (const auto& item : e.items) {
-                nlohmann::json v;
-                if (!const_eval(*item, v)) return false;
-                out.push_back(std::move(v));
-            }
-            return true;
-        }
-        case ExprKind::DictLit: {
-            out = nlohmann::json::object();
-            for (const auto& entry : e.entries) {
-                if (entry.key->kind != ExprKind::StringLit) return false;
-                nlohmann::json v;
-                if (!const_eval(*entry.value, v)) return false;
-                out[entry.key->text] = std::move(v);
-            }
-            return true;
-        }
-        default:
-            return false;
-    }
-}
 
 // Igual, pero produciendo un Value en vez de un arbol nlohmann.
 //
@@ -161,6 +131,30 @@ const std::string* callee_name(const Expr& e) {
     return &e.object->text;
 }
 
+// Responde con un cuerpo JSON construido a mano.
+void responder(osodio::Response& res, int code, Value v) {
+    res.status(code).json_text(v.to_json_text());
+}
+
+// Los errores del motor son siempre {"error": "..."} y a veces con una lista de
+// mensajes: dos formas fijas que no necesitan nada mas.
+void responder_error(osodio::Response& res, int code, const std::string& msg) {
+    Value::Dict d;
+    d["error"] = Value::str(msg);
+    responder(res, code, Value::dict(std::move(d)));
+}
+
+void responder_error(osodio::Response& res, int code, const std::string& msg,
+                     const std::vector<std::string>& mensajes) {
+    Value::List l;
+    l.reserve(mensajes.size());
+    for (const auto& m : mensajes) l.push_back(Value::str(m));
+    Value::Dict d;
+    d["error"]    = Value::str(msg);
+    d["mensajes"] = Value::list(std::move(l));
+    responder(res, code, Value::dict(std::move(d)));
+}
+
 using Action = std::function<void(osodio::Request&, osodio::Response&)>;
 
 // Traduce el `return <expr>` de una ruta declarativa a una accion nativa.
@@ -202,7 +196,9 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
         if (!tpl) return {};
 
         // Los argumentos con nombre son las variables Jinja2 de la plantilla.
-        nlohmann::json data = nlohmann::json::object();
+        // Se convierten a valores de Jinja2 AQUI, una vez: la ruta es
+        // declarativa, asi que en caliente solo queda renderizar.
+        Value::Dict data;
         for (size_t i = 1; i < e.args.size(); ++i) {
             const Arg& a = e.args[i];
             if (a.name.empty()) {
@@ -210,16 +206,17 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
                                    "de render() van con nombre: clave=valor");
                 return {};
             }
-            nlohmann::json v;
-            if (!const_eval(*a.value, v)) {
+            Value v;
+            if (!const_eval_valor(*a.value, v)) {
                 diags.error(a.loc, "valor no constante en render(): requiere el VM");
                 return {};
             }
             data[a.name] = std::move(v);
         }
-        std::string name = *tpl;
-        return [name, data](osodio::Request&, osodio::Response& res) {
-            res.render(name, data);
+        std::string       name    = *tpl;
+        jinja2::ValuesMap valores = valores_plantilla(Value::dict(std::move(data)));
+        return [name, valores](osodio::Request&, osodio::Response& res) {
+            res.render(name, valores);
         };
     }
 
@@ -538,7 +535,7 @@ constexpr const char* kSessionCookie = "osodio_session";
 
 std::string sign_session(const Value::Dict& data, const std::string& secret) {
     std::string payload = crypto::base64url_encode(
-        Value::dict(data).to_json().dump());
+        Value::dict(data).to_json_text());
     std::string mac = crypto::base64url_encode(
         crypto::hmac_sha256(secret, payload));
     return payload + "." + mac;
@@ -561,10 +558,8 @@ bool load_session(const std::string& cookie, const std::string& secret,
     std::string json_text;
     if (!crypto::base64url_decode(payload, json_text)) return false;
 
-    auto j = nlohmann::json::parse(json_text, nullptr, false);
-    if (j.is_discarded() || !j.is_object()) return false;
-
-    Value v = Value::from_json(j);
+    Value v;
+    if (!Value::parse_json(json_text, v) || !v.is_dict()) return false;
     out = v.as_dict();
     return true;
 }
@@ -593,20 +588,31 @@ bool verify_jwt(const std::string& token, const std::string& secret,
     if (!crypto::base64url_decode(token.substr(p1 + 1, p2 - p1 - 1), payload_text))
         return false;
 
-    auto header = nlohmann::json::parse(header_text, nullptr, false);
-    if (header.is_discarded() || !header.is_object()) return false;
-    if (header.value("alg", "") != "HS256") return false;
-
-    auto payload = nlohmann::json::parse(payload_text, nullptr, false);
-    if (payload.is_discarded() || !payload.is_object()) return false;
-
-    if (payload.contains("exp") && payload["exp"].is_number()) {
-        long long now = static_cast<long long>(std::time(nullptr));
-        if (payload["exp"].get<long long>() < now) return false;
+    Value header;
+    if (!Value::parse_json(header_text, header) || !header.is_dict()) return false;
+    {
+        auto it = header.as_dict().find("alg");
+        if (it == header.as_dict().end() || !it->second.is_str() ||
+            it->second.as_str() != "HS256")
+            return false;
     }
-    if (!issuer.empty() && payload.value("iss", issuer) != issuer) return false;
 
-    claims_out = Value::from_json(payload);
+    Value payload;
+    if (!Value::parse_json(payload_text, payload) || !payload.is_dict()) return false;
+
+    if (auto it = payload.as_dict().find("exp");
+        it != payload.as_dict().end() && it->second.is_num()) {
+        const long long now = static_cast<long long>(std::time(nullptr));
+        if (static_cast<long long>(it->second.as_float()) < now) return false;
+    }
+    if (!issuer.empty()) {
+        auto it = payload.as_dict().find("iss");
+        if (it != payload.as_dict().end() &&
+            (!it->second.is_str() || it->second.as_str() != issuer))
+            return false;
+    }
+
+    claims_out = std::move(payload);
     return true;
 }
 
@@ -691,25 +697,30 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
 // Comprueba que un valor JSON encaja con el tipo declarado del campo.
 // No hay conversion entre familias: un string en un campo int es un error, no
 // un intento de parseo.
-bool json_fits(const nlohmann::json& j, const std::string& type, Value& out) {
+// Comprueba que el valor recibido encaja con el tipo declarado en la clase.
+//
+// Es deliberadamente estricto: un "30" no vale donde se declaro un int.  Que el
+// cuerpo diga una cosa y la clase otra es justo lo que la validacion existe
+// para atrapar.
+bool valor_encaja(const Value& v, const std::string& type, Value& out) {
     if (type == "string") {
-        if (!j.is_string()) return false;
-        out = Value::str(j.get<std::string>());
+        if (!v.is_str()) return false;
+        out = v;
         return true;
     }
     if (type == "bool") {
-        if (!j.is_boolean()) return false;
-        out = Value::boolean(j.get<bool>());
+        if (!v.is_bool()) return false;
+        out = v;
         return true;
     }
     if (type == "int" || type == "long") {
-        if (!j.is_number_integer()) return false;
-        out = Value::integer(j.get<long long>());
+        if (!v.is_int()) return false;
+        out = v;
         return true;
     }
     if (type == "float" || type == "double") {
-        if (!j.is_number()) return false;
-        out = Value::real(j.get<double>());
+        if (!v.is_num()) return false;
+        out = Value::real(v.as_float());
         return true;
     }
     return false;
@@ -848,14 +859,14 @@ Action try_declarative(const RouteDecl& r) {
 bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
                osodio::Request& req, osodio::Response& res,
                NativeCtx& ctx, Value& out) {
-    auto body = nlohmann::json::parse(req.body, nullptr, false);
-    if (body.is_discarded()) {
-        res.status(400).json({{"error", "JSON invalido"}});
+    Value body;
+    if (!Value::parse_json(req.body, body)) {
+        responder_error(res, 400, "JSON invalido");
         return false;
     }
-    if (!body.is_object()) {
-        res.status(422).json({{"error", "Validacion fallida"},
-                              {"mensajes", {"el cuerpo tiene que ser un objeto JSON"}}});
+    if (!body.is_dict()) {
+        responder_error(res, 422, "Validacion fallida",
+                        {"el cuerpo tiene que ser un objeto JSON"});
         return false;
     }
 
@@ -864,15 +875,15 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
     std::vector<Value>       ordered;
 
     for (const auto& f : ci.fields) {
-        auto it = body.find(f.name);
-        if (it == body.end() || it->is_null()) {
+        auto it = body.as_dict().find(f.name);
+        if (it == body.as_dict().end() || it->second.is_null()) {
             if (!f.optional) messages.push_back(f.name + ": obligatorio");
             fields[f.name] = Value::null();
             ordered.push_back(Value::null());
             continue;
         }
         Value v;
-        if (!json_fits(*it, f.type, v)) {
+        if (!valor_encaja(it->second, f.type, v)) {
             messages.push_back(f.name + ": se esperaba " + f.type);
             fields[f.name] = Value::null();
             ordered.push_back(Value::null());
@@ -890,7 +901,7 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
             VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx, fns);
             if (r.status != VM::Status::Done) {
                 osodio::log().error("validate de " + ci.name + ": " + r.error);
-                res.status(500).json({{"error", r.error}});
+                responder_error(res, 500, r.error);
                 return false;
             }
             if (!r.value.truthy()) messages.push_back(rule.message);
@@ -900,7 +911,7 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
     if (!messages.empty()) {
         // Se dejan a mano del manejador `on error 422` de esta misma peticion.
         last_validation_messages() = messages;
-        res.status(422).json({{"error", "Validacion fallida"}, {"mensajes", messages}});
+        responder_error(res, 422, "Validacion fallida", messages);
         return false;
     }
 
@@ -932,7 +943,7 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
     for (const auto& b : binds) {
         if (b.kind == BindKind::File || b.kind == BindKind::FileList) {
             if (!ctx.uploads) {
-                res.status(400).json({{"error", "se esperaba multipart/form-data"}});
+                responder_error(res, 400, "se esperaba multipart/form-data");
                 return false;
             }
             Value::List matches;
@@ -947,8 +958,8 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                 continue;
             }
             if (matches.empty()) {
-                res.status(422).json({{"error", "Validacion fallida"},
-                                      {"mensajes", {b.name + ": falta el fichero"}}});
+                responder_error(res, 422, "Validacion fallida",
+                                {b.name + ": falta el fichero"});
                 return false;
             }
             out.push_back(matches[0]);
@@ -981,12 +992,12 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
             else if (b.type == "float" || b.type == "double") v = Value::real(0);
             else                         v = Value::integer(0);
         } else if (!coerce(raw, b.type, v)) {
-            res.status(400).json({
-                {"error",    "parametro invalido"},
-                {"param",    b.name},
-                {"esperado", b.type},
-                {"recibido", raw},
-            });
+            Value::Dict d;
+            d["error"]    = Value::str("parametro invalido");
+            d["param"]    = Value::str(b.name);
+            d["esperado"] = Value::str(b.type);
+            d["recibido"] = Value::str(raw);
+            responder(res, 400, Value::dict(std::move(d)));
             return false;
         }
         out.push_back(std::move(v));
@@ -1025,40 +1036,56 @@ std::string openapi_path(const std::string& pattern) {
     return out;
 }
 
-nlohmann::json build_openapi(const Program& program, const ClassTable& classes) {
-    nlohmann::json doc;
-    doc["openapi"] = "3.0.3";
-    doc["info"]    = {
-        {"title",   program.app.name.empty() ? "Osodio API" : program.app.name},
-        {"version", program.app.version.empty() ? "0.1.0" : program.app.version},
-    };
+// Atajos para montar el documento sin ahogarse en Value::Dict.
+Value jstr(std::string v) { return Value::str(std::move(v)); }
+
+Value jobj(std::initializer_list<std::pair<const char*, Value>> campos) {
+    Value::Dict d;
+    d.reservar(campos.size());
+    for (const auto& [k, v] : campos) d[k] = v;
+    return Value::dict(std::move(d));
+}
+
+// El documento se construye y se serializa UNA vez, al compilar el .odio.
+// Antes se guardaba el arbol y se hacia dump() en cada peticion a
+// /openapi.json, que es trabajo en caliente para algo que no cambia.
+std::string build_openapi(const Program& program, const ClassTable& classes) {
+    Value::Dict doc;
+    doc["openapi"] = jstr("3.0.3");
+    doc["info"]    = jobj({
+        {"title",   jstr(program.app.name.empty() ? "Osodio API" : program.app.name)},
+        {"version", jstr(program.app.version.empty() ? "0.1.0" : program.app.version)},
+    });
 
     // Las clases se publican como esquemas reutilizables.  Los mensajes de
     // `validate:` se adjuntan como descripcion: son las reglas reales que
     // aplica el servidor, asi que documentan mejor que cualquier texto aparte.
-    nlohmann::json schemas = nlohmann::json::object();
+    Value::Dict schemas;
     for (const auto& [name, info] : classes) {
-        nlohmann::json props    = nlohmann::json::object();
-        nlohmann::json required = nlohmann::json::array();
+        Value::Dict props;
+        Value::List required;
 
         for (const auto& f : info->fields) {
-            props[f.name] = {{"type", openapi_type(f.type)}};
-            if (!f.optional) required.push_back(f.name);
+            props[f.name] = jobj({{"type", jstr(openapi_type(f.type))}});
+            if (!f.optional) required.push_back(jstr(f.name));
         }
 
-        nlohmann::json schema = {{"type", "object"}, {"properties", props}};
-        if (!required.empty()) schema["required"] = required;
+        Value::Dict schema;
+        schema["type"]       = jstr("object");
+        schema["properties"] = Value::dict(std::move(props));
+        if (!required.empty()) schema["required"] = Value::list(std::move(required));
 
         if (!info->rules.empty()) {
             std::string desc = "Reglas de validacion:";
             for (const auto& r : info->rules) desc += "\n- " + r.message;
-            schema["description"] = desc;
+            schema["description"] = jstr(std::move(desc));
         }
-        schemas[name] = std::move(schema);
+        schemas[name] = Value::dict(std::move(schema));
     }
-    if (!schemas.empty()) doc["components"]["schemas"] = std::move(schemas);
+    if (!schemas.empty())
+        doc["components"] = jobj({{"schemas", Value::dict(std::move(schemas))}});
 
-    nlohmann::json paths = nlohmann::json::object();
+    Value::Dict paths;
 
     for (const auto& r : program.routes) {
         // Las rutas de flujo no encajan en OpenAPI 3.0: se anuncian como GET
@@ -1068,9 +1095,9 @@ nlohmann::json build_openapi(const Program& program, const ClassTable& classes) 
         if (method == "*")                     method = "get";
         for (auto& c : method) c = static_cast<char>(::tolower((unsigned char)c));
 
-        auto in_pattern = pattern_params(r.pattern);
-        nlohmann::json params    = nlohmann::json::array();
-        std::string    body_class;
+        auto        in_pattern = pattern_params(r.pattern);
+        Value::List params;
+        std::string body_class;
 
         for (const auto& p : r.params) {
             if (classes.count(p.type.name)) { body_class = p.type.name; continue; }
@@ -1081,62 +1108,70 @@ nlohmann::json build_openapi(const Program& program, const ClassTable& classes) 
                 continue;
             }
 
-            bool in_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
-                           != in_pattern.end();
-            params.push_back({
-                {"name",     p.name},
-                {"in",       in_path ? "path" : "query"},
-                {"required", in_path},
-                {"schema",   {{"type", openapi_type(p.type.name)}}},
+            const bool in_path = std::find(in_pattern.begin(), in_pattern.end(), p.name)
+                                 != in_pattern.end();
+            params.push_back(jobj({
+                {"name",     jstr(p.name)},
+                {"in",       jstr(in_path ? "path" : "query")},
+                {"required", Value::boolean(in_path)},
+                {"schema",   jobj({{"type", jstr(openapi_type(p.type.name))}})},
+            }));
+        }
+
+        Value::Dict op;
+        if (!params.empty()) op["parameters"] = Value::list(std::move(params));
+
+        if (body_class == "__multipart") {
+            op["requestBody"] = jobj({
+                {"required", Value::boolean(true)},
+                {"content",  jobj({{"multipart/form-data",
+                                    jobj({{"schema", jobj({{"type", jstr("object")}})}})}})},
+            });
+        } else if (!body_class.empty()) {
+            op["requestBody"] = jobj({
+                {"required", Value::boolean(true)},
+                {"content",  jobj({{"application/json",
+                    jobj({{"schema", jobj({{"$ref",
+                        jstr("#/components/schemas/" + body_class)}})}})}})},
             });
         }
 
-        nlohmann::json op;
-        if (!params.empty()) op["parameters"] = params;
-
-        if (body_class == "__multipart") {
-            op["requestBody"] = {
-                {"required", true},
-                {"content", {{"multipart/form-data",
-                    {{"schema", {{"type", "object"}}}}}}},
-            };
-        } else if (!body_class.empty()) {
-            op["requestBody"] = {
-                {"required", true},
-                {"content", {{"application/json",
-                    {{"schema", {{"$ref", "#/components/schemas/" + body_class}}}}}}},
-            };
-        }
-
-        nlohmann::json responses;
+        Value::Dict responses;
         if (r.method == "SSE") {
-            responses["200"] = {{"description", "Flujo de eventos"},
-                                {"content", {{"text/event-stream", nlohmann::json::object()}}}};
-            op["summary"] = "Server-Sent Events";
+            responses["200"] = jobj({
+                {"description", jstr("Flujo de eventos")},
+                {"content",     jobj({{"text/event-stream", Value::dict()}})},
+            });
+            op["summary"] = jstr("Server-Sent Events");
         } else if (r.method == "WS") {
-            responses["101"] = {{"description", "Cambio a WebSocket"}};
-            op["summary"] = "WebSocket";
+            responses["101"] = jobj({{"description", jstr("Cambio a WebSocket")}});
+            op["summary"]    = jstr("WebSocket");
         } else {
-            responses["200"] = {{"description", "OK"}};
+            responses["200"] = jobj({{"description", jstr("OK")}});
         }
         // Solo se declaran los codigos que el servidor produce de verdad.
         if (!body_class.empty() && body_class != "__multipart")
-            responses["422"] = {{"description", "Validacion fallida"}};
+            responses["422"] = jobj({{"description", jstr("Validacion fallida")}});
         if (!r.guards.empty())
-            responses["403"] = {{"description", "Guarda del grupo no superada"}};
-        op["responses"] = std::move(responses);
+            responses["403"] = jobj({{"description", jstr("Guarda del grupo no superada")}});
 
         // Cada codigo de `on error` declarado se anuncia en todas las rutas.
         for (const auto& e : program.errors)
             if (e.code >= 400)
-                op["responses"][std::to_string(e.code)] =
-                    nlohmann::json{{"description", "Manejador propio"}};
+                responses[std::to_string(e.code)] =
+                    jobj({{"description", jstr("Manejador propio")}});
 
-        paths[openapi_path(r.pattern)][method] = std::move(op);
+        op["responses"] = Value::dict(std::move(responses));
+
+        // Varios metodos pueden compartir ruta, asi que se acumula sobre la que
+        // ya hubiera en lugar de sobrescribirla.
+        Value& entrada = paths[openapi_path(r.pattern)];
+        if (!entrada.is_dict()) entrada = Value::dict();
+        entrada.as_dict()[method] = Value::dict(std::move(op));
     }
 
-    doc["paths"] = std::move(paths);
-    return doc;
+    doc["paths"] = Value::dict(std::move(paths));
+    return Value::dict(std::move(doc)).to_json_text();
 }
 
 // Las funciones se compilan antes que rutas y manejadores, y todas ven la
@@ -1532,7 +1567,10 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                           std::to_string(result.error_loc.col)
                         : where;
                     osodio::log().error(at + ": " + result.error);
-                    res.status(500).json({{"error", result.error}, {"en", at}});
+                    Value::Dict d;
+                    d["error"] = Value::str(result.error);
+                    d["en"]    = Value::str(at);
+                    responder(res, 500, Value::dict(std::move(d)));
                     co_return;
                 }
 

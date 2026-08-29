@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <nlohmann/json.hpp>
 
 namespace odio {
 
@@ -172,19 +171,14 @@ public:
 
     const char* type_name() const;
     std::string to_string() const;          // representacion para text()/concatenacion
-    nlohmann::json to_json() const;         // interoperar con el motor
-
-    // Serializacion de respuesta.
-    //
-    // Escribe el JSON directamente en el bufer.  La via anterior era
-    // to_json().dump(): construir un arbol nlohmann completo —cuyos objetos son
-    // std::map y cuyos nodos van al monton uno a uno— y despues recorrerlo
-    // entero otra vez para pasarlo a texto.  Dos materializaciones para algo
-    // que se puede hacer en una pasada.
+    // Serializacion: escribe el JSON directamente en el bufer, de una pasada.
     void        write_json(std::string& out) const;
     std::string to_json_text() const { std::string s; write_json(s); return s; }
 
-    static Value from_json(const nlohmann::json& j);
+    // Parsea JSON a un Value, sin arbol intermedio.  Devuelve false ante
+    // cualquier cosa que no sea JSON valido y completo, basura al final
+    // incluida.  Ver src/odio/json_parse.cpp.
+    static bool parse_json(std::string_view texto, Value& out);
 
     bool equals(const Value& o) const;
 

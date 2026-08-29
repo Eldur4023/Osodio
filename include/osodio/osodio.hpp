@@ -15,7 +15,6 @@
 #include "handler_traits.hpp"
 #include "middleware.hpp"
 #include "openapi.hpp"
-#include "errors.hpp"
 #include "defer.hpp"
 #include "sse.hpp"
 #include "multipart.hpp"

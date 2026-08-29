@@ -35,7 +35,7 @@ std::string Value::to_string() const {
         }
         case Type::Str:   return as_str();
         case Type::List:
-        case Type::Dict:  return to_json().dump();
+        case Type::Dict:  return to_json_text();
     }
     return {};
 }
@@ -156,47 +156,6 @@ void Value::write_json(std::string& out) const {
     out += "null";
 }
 
-nlohmann::json Value::to_json() const {
-    switch (type_) {
-        case Type::Null:  return nullptr;
-        case Type::Bool:  return b_;
-        case Type::Int:   return i_;
-        case Type::Float: return d_;
-        case Type::Str:   return as_str();
-        case Type::List: {
-            auto arr = nlohmann::json::array();
-            for (const auto& v : as_list()) arr.push_back(v.to_json());
-            return arr;
-        }
-        case Type::Dict: {
-            // Las claves que empiezan por "__" son internas —por ejemplo el
-            // indice con el que un File localiza sus bytes— y no salen nunca en
-            // la respuesta.
-            auto obj = nlohmann::json::object();
-            for (const auto& [k, v] : as_dict())
-                if (k.rfind("__", 0) != 0) obj[k] = v.to_json();
-            return obj;
-        }
-    }
-    return nullptr;
-}
-
-Value Value::from_json(const nlohmann::json& j) {
-    if (j.is_null())            return Value::null();
-    if (j.is_boolean())         return Value::boolean(j.get<bool>());
-    if (j.is_number_integer())  return Value::integer(j.get<long long>());
-    if (j.is_number_float())    return Value::real(j.get<double>());
-    if (j.is_string())          return Value::str(j.get<std::string>());
-    if (j.is_array()) {
-        List l;
-        l.reserve(j.size());
-        for (const auto& item : j) l.push_back(from_json(item));
-        return Value::list(std::move(l));
-    }
-    Dict d;
-    for (auto it = j.begin(); it != j.end(); ++it) d[it.key()] = from_json(it.value());
-    return Value::dict(std::move(d));
-}
 
 bool Value::equals(const Value& o) const {
     // int y float se comparan por valor numerico; el resto exige mismo tipo.

@@ -1,4 +1,5 @@
 #include <odio/natives.hpp>
+#include <odio/plantilla.hpp>
 
 #include <osodio/request.hpp>
 #include <osodio/response.hpp>
@@ -44,15 +45,15 @@ Value fn_render(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
         error += args[0].type_name();
         return Value::null();
     }
-    nlohmann::json data = nlohmann::json::object();
+    jinja2::ValuesMap data;
     if (args.size() > 1) {
         if (!args[1].is_dict()) {
             error = "las variables de render() tienen que ser un Dict";
             return Value::null();
         }
-        data = args[1].to_json();
+        data = valores_plantilla(args[1]);
     }
-    ctx.res.render(args[0].as_str(), data);
+    ctx.res.render(args[0].as_str(), std::move(data));
     ctx.response_written = true;
     return Value::null();
 }

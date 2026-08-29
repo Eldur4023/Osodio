@@ -8,7 +8,6 @@
 #include <osodio/core/event_loop.hpp>
 #include "cancel.hpp"
 #include "cookies.hpp"
-#include <nlohmann/json.hpp>
 
 namespace osodio {
 
@@ -52,10 +51,6 @@ public:
     // Cancelled when the connection closes (timeout, disconnect, write error).
     // Check in long-running handlers to exit early.
     std::shared_ptr<CancellationToken> cancel_token;
-
-    // JWT claims — populated by jwt_auth() middleware after successful verification.
-    // Empty object if jwt_auth() was not used or the route was skipped.
-    nlohmann::json jwt_claims = nlohmann::json::object();
 
     // Convenience: true if the underlying connection has been closed.
     bool is_cancelled() const noexcept {

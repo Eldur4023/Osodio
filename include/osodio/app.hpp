@@ -152,7 +152,7 @@ public:
                     }
                 }
                 if (!ok) {
-                    res.status(403).json({{"error", "Origin not allowed"}});
+                    res.status(403).json_text(R"({"error":"Origin not allowed"})");
                     co_return;
                 }
             }
@@ -191,7 +191,7 @@ public:
             if (!upgrade || !has_websocket_token(*upgrade) || !key) {
                 res.status(426)
                    .header("Sec-WebSocket-Version", "13")
-                   .json({{"error","WebSocket upgrade required"}});
+                   .json_text(R"({"error":"WebSocket upgrade required"})");
                 co_return;
             }
 
@@ -201,12 +201,12 @@ public:
             if (!ws_ver || *ws_ver != "13") {
                 res.status(426)
                    .header("Sec-WebSocket-Version", "13")
-                   .json({{"error","Unsupported WebSocket version"}});
+                   .json_text(R"({"error":"Unsupported WebSocket version"})");
                 co_return;
             }
 
             if (!req._raw_write) {
-                res.status(500).json({{"error","no raw writer for WS upgrade"}});
+                res.status(500).json_text(R"({"error":"no raw writer for WS upgrade"})");
                 co_return;
             }
 
@@ -281,7 +281,8 @@ public:
     //
     App& enable_health(std::string path = "/health") {
         router_.add("GET", std::move(path), [](Request&, Response& res) {
-            res.json(Metrics::instance().to_health_json());
+            res.header("Content-Type", "application/json; charset=utf-8")
+               .send(Metrics::instance().to_health_text());
         });
         return *this;
     }

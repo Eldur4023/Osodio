@@ -114,7 +114,7 @@ static bool try_serve_static(
         // We check the URL-decoded relative path so %2E bypasses are caught.
         for (size_t i = 0; i < rel.size(); ++i) {
             if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') {
-                res.status(404).json({{"error", "Not Found"}});
+                res.status(404).json_text(R"({"error":"Not Found"})");
                 return true;
             }
         }
@@ -125,7 +125,7 @@ static bool try_serve_static(
         std::error_code root_ec;
         auto canonical_root = fs::canonical(m.root, root_ec);
         if (root_ec) {
-            res.status(500).json({{"error", "Server misconfiguration"}});
+            res.status(500).json_text(R"({"error":"Server misconfiguration"})");
             return true;
         }
 
@@ -139,7 +139,7 @@ static bool try_serve_static(
             auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
                                           preliminary.begin());
             if (ri != canonical_root.end()) {
-                res.status(403).json({{"error", "Forbidden"}});
+                res.status(403).json_text(R"({"error":"Forbidden"})");
                 return true;
             }
         }
@@ -153,7 +153,7 @@ static bool try_serve_static(
             if (m.spa) {
                 canonical_file = fs::canonical(canonical_root / "index.html", ec);
                 if (ec || !fs::is_regular_file(fs::status(canonical_file))) {
-                    res.status(404).json({{"error", "Not Found"}});
+                    res.status(404).json_text(R"({"error":"Not Found"})");
                     return true;
                 }
                 // index.html itself may be a symlink pointing outside the root.
@@ -164,11 +164,11 @@ static bool try_serve_static(
                                                  canonical_root.end(),
                                                  canonical_file.begin());
                 if (ri3 != canonical_root.end()) {
-                    res.status(403).json({{"error", "Forbidden"}});
+                    res.status(403).json_text(R"({"error":"Forbidden"})");
                     return true;
                 }
             } else {
-                res.status(404).json({{"error", "Not Found"}});
+                res.status(404).json_text(R"({"error":"Not Found"})");
                 return true;
             }
         } else {
@@ -177,13 +177,13 @@ static bool try_serve_static(
             // that point outside the root (e.g. uploads/evil -> /etc/passwd).
             canonical_file = fs::canonical(preliminary, ec);
             if (ec) {
-                res.status(404).json({{"error", "Not Found"}});
+                res.status(404).json_text(R"({"error":"Not Found"})");
                 return true;
             }
             auto [ri2, fi2] = std::mismatch(canonical_root.begin(), canonical_root.end(),
                                              canonical_file.begin());
             if (ri2 != canonical_root.end()) {
-                res.status(403).json({{"error", "Forbidden"}});
+                res.status(403).json_text(R"({"error":"Forbidden"})");
                 return true;
             }
         }
@@ -193,7 +193,7 @@ static bool try_serve_static(
         auto mtime    = fs::last_write_time(canonical_file, mtime_ec);
         auto filesize = fs::file_size(canonical_file, size_ec);
         if (mtime_ec || size_ec) {
-            res.status(500).json({{"error", "Cannot stat file"}});
+            res.status(500).json_text(R"({"error":"Cannot stat file"})");
             return true;
         }
         std::string etag = make_etag(mtime, filesize);
@@ -310,7 +310,7 @@ Task<void> App::handle_request(Request& req, Response& res) {
                 req.params = std::move(match.params);
                 co_await match.handler(req, res);
             } else {
-                res.status(404).json({{"error", "Not Found"}});
+                res.status(404).json_text(R"({"error":"Not Found"})");
             }
         }
     };
