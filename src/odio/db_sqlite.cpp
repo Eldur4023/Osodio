@@ -1,3 +1,4 @@
+#include <string_view>
 #include <odio/db.hpp>
 
 #include <sqlite3.h>
@@ -90,9 +91,16 @@ public:
                 return false;
             }
             Value::Dict row;
+            // El numero de columnas se sabe: sin esto el diccionario crecia a
+            // saltos y eran cinco realojos por fila.
+            row.reservar(static_cast<size_t>(cols));
             for (int i = 0; i < cols; ++i) {
                 const char* col = sqlite3_column_name(stmt, i);
-                row[col ? col : std::to_string(i)] = column_value(stmt, i);
+                // Sin el ternario: mezclarlo con std::to_string obligaba a
+                // construir un std::string temporal en CADA columna de CADA fila
+                // solo para volver a leerlo como string_view.
+                if (col) row[std::string_view(col)]  = column_value(stmt, i);
+                else     row[std::to_string(i)]      = column_value(stmt, i);
             }
             rows.push_back(Value::dict(std::move(row)));
         }

@@ -1,4 +1,5 @@
 #include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <odio/value.hpp>
 #include <odio/bytecode.hpp>
@@ -43,16 +44,44 @@ std::string Value::to_string() const {
 
 namespace {
 
+// Cierto si alguno de los ocho bytes necesita escape.  Las tres pruebas son
+// SWAR: en vez de mirar byte a byte, se opera sobre la palabra entera.
+inline bool bloque_sucio(uint64_t w) {
+    constexpr uint64_t UNOS  = 0x0101010101010101ULL;
+    constexpr uint64_t ALTOS = 0x8080808080808080ULL;
+    const uint64_t menor_20 = (w - UNOS * 0x20) & ~w & ALTOS;
+    const uint64_t c1 = w ^ (UNOS * 0x22);            // comillas
+    const uint64_t c2 = w ^ (UNOS * 0x5C);            // barra invertida
+    return (menor_20 | ((c1 - UNOS) & ~c1 & ALTOS)
+                     | ((c2 - UNOS) & ~c2 & ALTOS)) != 0;
+}
+
 void escapar(const std::string& in, std::string& out) {
-    // Casi ninguna cadena tiene nada que escapar, asi que se buscan los
-    // caracteres que si lo necesitan y el resto se copia de golpe.  Antes
-    // esto era un push_back por caracter, con su comprobacion de capacidad
-    // cada vez, y salia el 7% del perfil de una respuesta con listas.
+    // El texto real —el cuerpo de un articulo, un resumen— no lleva casi nada
+    // que escapar, asi que se avanza de ocho en ocho bytes mientras el bloque
+    // este limpio y solo se baja a mirar byte a byte cuando hay algo.  Con las
+    // respuestas grandes esta funcion era el 24% del perfil.
     out.push_back('"');
-    size_t limpio = 0;
-    for (size_t i = 0; i < in.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(in[i]);
-        if (c >= 0x20 && c != '"' && c != '\\') continue;
+    const char*  p = in.data();
+    const size_t n = in.size();
+    size_t i = 0, limpio = 0;
+
+    while (i < n) {
+        while (i + 8 <= n) {
+            uint64_t w;
+            std::memcpy(&w, p + i, 8);
+            if (bloque_sucio(w)) break;
+            i += 8;
+        }
+        // O quedan menos de ocho bytes, o el bloque de aqui trae algo: en
+        // cualquier caso esto recorre ocho como mucho.
+        unsigned char c = 0;
+        bool hay = false;
+        for (; i < n; ++i) {
+            c = static_cast<unsigned char>(p[i]);
+            if (c < 0x20 || c == '"' || c == '\\') { hay = true; break; }
+        }
+        if (!hay) break;
 
         out.append(in, limpio, i - limpio);
         switch (c) {
@@ -69,9 +98,9 @@ void escapar(const std::string& in, std::string& out) {
                 out += buf;
             }
         }
-        limpio = i + 1;
+        limpio = ++i;
     }
-    out.append(in, limpio, in.size() - limpio);
+    out.append(in, limpio, n - limpio);
     out.push_back('"');
 }
 
