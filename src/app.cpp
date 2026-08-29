@@ -11,6 +11,7 @@
 #include <sys/epoll.h>
 
 #include <csignal>
+#include <sched.h>
 #include <iostream>
 #include <memory>
 #include <filesystem>
@@ -367,7 +368,19 @@ void App::run(const std::string& host, uint16_t port) {
     };
 
     // ── Multi-core: one event loop per hardware thread ────────────────────────
-    unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
+    // hardware_concurrency() cuenta los cores de la maquina, no los que este
+    // proceso puede usar: ignora la mascara de afinidad y el limite de cpu del
+    // cgroup.  En un contenedor con 2 cores asignados de una maquina de 64,
+    // levantaria 64 event loops sobre 2 cores.
+    unsigned num_threads = 0;
+    {
+        cpu_set_t mask;
+        CPU_ZERO(&mask);
+        if (::sched_getaffinity(0, sizeof(mask), &mask) == 0)
+            num_threads = static_cast<unsigned>(CPU_COUNT(&mask));
+    }
+    if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
+    num_threads = std::max(1u, num_threads);
 
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);
