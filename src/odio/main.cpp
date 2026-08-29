@@ -239,7 +239,8 @@ int main(int argc, char** argv) {
         if (result.status != odio::VM::Status::Done) return;   // no puede suspenderse
 
         if (!ctx.response_written && !result.value.is_null())
-            res.json(result.value.to_json());
+            res.header("Content-Type", "application/json; charset=utf-8")
+               .send(result.value.to_json_text());
 
         // El manejador describe el fallo; no puede convertirlo en un exito.
         res.status(code);

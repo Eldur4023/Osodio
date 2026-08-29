@@ -1,3 +1,5 @@
+#include <charconv>
+#include <cstdio>
 #include <odio/value.hpp>
 #include <odio/bytecode.hpp>
 
@@ -35,6 +37,86 @@ std::string Value::to_string() const {
         case Type::Dict:  return to_json().dump();
     }
     return {};
+}
+
+// ─── Serializacion directa a texto ───────────────────────────────────────────
+
+namespace {
+
+void escapar(const std::string& in, std::string& out) {
+    out.push_back('\"');
+    for (unsigned char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case 0x08:    out += "\\b";       break;
+            case 0x0C:    out += "\\f";       break;
+            case 0x0A:    out += "\\n";       break;
+            case 0x0D:    out += "\\r";       break;
+            case 0x09:    out += "\\t";       break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back(static_cast<char>(c));   // UTF-8 tal cual
+                }
+        }
+    }
+    out.push_back('\"');
+}
+
+void escribir_double(double d, std::string& out) {
+    char buf[32];
+    auto r = std::to_chars(buf, buf + sizeof(buf), d);
+    if (r.ec != std::errc{}) { out += "0"; return; }
+    std::string t(buf, r.ptr);
+    // Un double entero sale como "3"; JSON lo leeria como entero, asi que se le
+    // pone el ".0" igual que hacia nlohmann.
+    if (t.find_first_of(".eE") == std::string::npos &&
+        t.find("inf") == std::string::npos && t.find("nan") == std::string::npos)
+        t += ".0";
+    out += t;
+}
+
+} // namespace
+
+void Value::write_json(std::string& out) const {
+    switch (type_) {
+        case Type::Null:  out += "null";                   return;
+        case Type::Bool:  out += b_ ? "true" : "false";    return;
+        case Type::Int:   out += std::to_string(i_);       return;
+        case Type::Float: escribir_double(d_, out);        return;
+        case Type::Str:   escapar(as_str(), out);          return;
+        case Type::List: {
+            out.push_back('[');
+            bool primero = true;
+            for (const auto& v : as_list()) {
+                if (!primero) out.push_back(',');
+                primero = false;
+                v.write_json(out);
+            }
+            out.push_back(']');
+            return;
+        }
+        case Type::Dict: {
+            // Las claves que empiezan por "__" son internas y no salen nunca.
+            out.push_back('{');
+            bool primero = true;
+            for (const auto& [k, v] : as_dict()) {
+                if (k.rfind("__", 0) == 0) continue;
+                if (!primero) out.push_back(',');
+                primero = false;
+                escapar(k, out);
+                out.push_back(':');
+                v.write_json(out);
+            }
+            out.push_back('}');
+            return;
+        }
+    }
+    out += "null";
 }
 
 nlohmann::json Value::to_json() const {

@@ -29,7 +29,8 @@ Value fn_html(NativeCtx& ctx, std::vector<Value>& args, std::string&) {
 }
 
 Value fn_json(NativeCtx& ctx, std::vector<Value>& args, std::string&) {
-    ctx.res.json(args[0].to_json());
+    ctx.res.header("Content-Type", "application/json; charset=utf-8")
+           .send(args[0].to_json_text());
     ctx.response_written = true;
     return Value::null();
 }

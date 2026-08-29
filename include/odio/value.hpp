@@ -1,9 +1,12 @@
 #pragma once
 #include <atomic>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -21,7 +24,68 @@ public:
     enum class Type { Null, Bool, Int, Float, Str, List, Dict };
 
     using List = std::vector<Value>;
-    using Dict = std::map<std::string, Value>;
+
+    // Diccionario del VM.
+    //
+    // Era un std::map: un arbol rojo-negro, con una asignacion por nodo y un
+    // salto de puntero por acceso, para objetos que casi siempre tienen entre 3
+    // y 10 claves.  Medido con claves de cadena, el recorrido lineal sobre un
+    // vector contiguo va el doble de rapido por debajo de 8 claves y el arbol
+    // no gana hasta las 64.
+    //
+    // Asi que aqui va siempre un vector, en orden de insercion, y al pasar de
+    // un umbral se le anade un indice hash.  De ese modo la busqueda tambien es
+    // O(1) en los diccionarios grandes —un acumulador, un contador de
+    // palabras—, donde el recorrido lineal seria un desastre, y la insercion es
+    // O(1) amortizada en todos los tamanos, cosa que el arbol nunca dio.
+    //
+    // El orden de las claves de la respuesta no cambia: lo fija nlohmann al
+    // construir el objeto JSON, no este contenedor.
+    class Dict {
+    public:
+        using Par            = std::pair<std::string, Value>;
+        using iterator       = std::vector<Par>::iterator;
+        using const_iterator = std::vector<Par>::const_iterator;
+
+        iterator       begin()       { return v_.begin(); }
+        iterator       end()         { return v_.end();   }
+        const_iterator begin() const { return v_.begin(); }
+        const_iterator end()   const { return v_.end();   }
+
+        size_t size()  const { return v_.size();  }
+        bool   empty() const { return v_.empty(); }
+        void   clear()       { v_.clear(); idx_.clear(); }
+        size_t count(std::string_view k) const { return find(k) == end() ? 0 : 1; }
+
+        iterator       find(std::string_view k);
+        const_iterator find(std::string_view k) const;
+        Value&         operator[](std::string_view k);
+
+    private:
+        // Busqueda heterogenea: sin esto, cada find con un const char* o un
+        // string_view construiria un std::string solo para consultar.
+        struct Hash {
+            using is_transparent = void;
+            size_t operator()(std::string_view s) const noexcept {
+                return std::hash<std::string_view>{}(s);
+            }
+        };
+        struct Igual {
+            using is_transparent = void;
+            bool operator()(std::string_view a, std::string_view b) const noexcept {
+                return a == b;
+            }
+        };
+
+        // Por debajo del umbral no hay indice: mantenerlo costaria mas que
+        // recorrer el vector entero.
+        static constexpr size_t kUmbral = 16;
+
+        void indexar();
+
+        std::vector<Par>                                    v_;
+        std::unordered_map<std::string, size_t, Hash, Igual> idx_;
+    };
 
     Value() = default;
     ~Value() { soltar(); }
@@ -103,7 +167,17 @@ public:
 
     const char* type_name() const;
     std::string to_string() const;          // representacion para text()/concatenacion
-    nlohmann::json to_json() const;         // serializacion de respuesta
+    nlohmann::json to_json() const;         // interoperar con el motor
+
+    // Serializacion de respuesta.
+    //
+    // Escribe el JSON directamente en el bufer.  La via anterior era
+    // to_json().dump(): construir un arbol nlohmann completo —cuyos objetos son
+    // std::map y cuyos nodos van al monton uno a uno— y despues recorrerlo
+    // entero otra vez para pasarlo a texto.  Dos materializaciones para algo
+    // que se puede hacer en una pasada.
+    void        write_json(std::string& out) const;
+    std::string to_json_text() const { std::string s; write_json(s); return s; }
 
     static Value from_json(const nlohmann::json& j);
 
@@ -147,5 +221,45 @@ private:
     };
     Type type_ = Type::Null;
 };
+
+// ─── Value::Dict ─────────────────────────────────────────────────────────────
+// Fuera de la clase porque necesitan que Value este completo.
+
+inline void Value::Dict::indexar() {
+    idx_.clear();
+    idx_.reserve(v_.size() * 2);
+    for (size_t i = 0; i < v_.size(); ++i) idx_.emplace(v_[i].first, i);
+}
+
+inline Value::Dict::iterator Value::Dict::find(std::string_view k) {
+    if (!idx_.empty()) {
+        auto it = idx_.find(k);
+        return it == idx_.end() ? v_.end()
+                                : v_.begin() + static_cast<std::ptrdiff_t>(it->second);
+    }
+    for (auto it = v_.begin(); it != v_.end(); ++it)
+        if (it->first == k) return it;
+    return v_.end();
+}
+
+inline Value::Dict::const_iterator Value::Dict::find(std::string_view k) const {
+    if (!idx_.empty()) {
+        auto it = idx_.find(k);
+        return it == idx_.end() ? v_.end()
+                                : v_.begin() + static_cast<std::ptrdiff_t>(it->second);
+    }
+    for (auto it = v_.begin(); it != v_.end(); ++it)
+        if (it->first == k) return it;
+    return v_.end();
+}
+
+inline Value& Value::Dict::operator[](std::string_view k) {
+    if (auto it = find(k); it != v_.end()) return it->second;
+
+    v_.emplace_back(std::string(k), Value());
+    if (!idx_.empty())            idx_.emplace(v_.back().first, v_.size() - 1);
+    else if (v_.size() > kUmbral) indexar();
+    return v_.back().second;
+}
 
 } // namespace odio

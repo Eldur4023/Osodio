@@ -129,8 +129,12 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
     // return { ... }  /  return "literal"  → cuerpo JSON
     nlohmann::json literal;
     if (const_eval(e, literal)) {
-        return [literal](osodio::Request&, osodio::Response& res) {
-            res.json(literal);
+        // El cuerpo se serializa AQUI, una vez.  Antes se guardaba el arbol
+        // nlohmann y se hacia dump() en cada peticion: una ruta que se resuelve
+        // entera al compilar no deberia serializar nada en caliente.
+        std::string cuerpo = literal.dump();
+        return [cuerpo](osodio::Request&, osodio::Response& res) {
+            res.header("Content-Type", "application/json; charset=utf-8").send(cuerpo);
         };
     }
 
@@ -235,7 +239,10 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
             diags.error(e.loc, "json() con valor no constante: requiere el VM");
             return {};
         }
-        return [v](osodio::Request&, osodio::Response& res) { res.json(v); };
+        std::string cuerpo = v.dump();
+        return [cuerpo](osodio::Request&, osodio::Response& res) {
+            res.header("Content-Type", "application/json; charset=utf-8").send(cuerpo);
+        };
     }
 
     diags.error(e.loc, "funcion nativa desconocida: '" + *fn + "'");
@@ -1493,7 +1500,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
                 if (ctx.response_written) co_return;
                 if (result.value.is_null()) { res.status(204).send(""); co_return; }
-                res.json(result.value.to_json());
+                res.header("Content-Type", "application/json; charset=utf-8")
+                   .send(result.value.to_json_text());
             });
     }
 }
