@@ -7,8 +7,6 @@
 #include "types.hpp"
 #include "router.hpp"
 #include "openapi.hpp"
-#include "di.hpp"
-#include "group.hpp"
 #include "websocket.hpp"
 #include "metrics.hpp"
 
@@ -21,15 +19,16 @@ public:
 
     // Route registration — support both :param and {param} styles.
     // Each registration also captures compile-time type info for OpenAPI generation.
-    template<typename F> App& get   (std::string path, F&& h) { register_route("GET",    path, h); router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& post  (std::string path, F&& h) { register_route("POST",   path, h); router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& put   (std::string path, F&& h) { register_route("PUT",    path, h); router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& patch (std::string path, F&& h) { register_route("PATCH",  path, h); router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& del   (std::string path, F&& h) { register_route("DELETE", path, h); router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& get   (std::string path, F&& h) { router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& post  (std::string path, F&& h) { router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& put   (std::string path, F&& h) { router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& patch (std::string path, F&& h) { router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& del   (std::string path, F&& h) { router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
     template<typename F> App& any   (std::string path, F&& h) {                                     router_.add("*",      std::move(path), std::forward<F>(h)); return *this; }
 
     // Middleware (applied in order for every request)
     App& use(Middleware m) { middlewares_.push_back(std::move(m)); return *this; }
+
 
     // Serve a directory of static files under a URL prefix.
     //   app.serve_static("/static", "./public")
@@ -77,55 +76,6 @@ public:
         return *this;
     }
 
-
-    // ── OpenAPI / Swagger UI ─────────────────────────────────────────────────
-    //
-    // Opt-in: call enable_docs() to expose the spec and the Swagger UI.
-    //
-    //   app.enable_docs();                  // /openapi.json + /docs
-    //   app.enable_docs("/api.json", "/ui"); // custom paths
-    //
-    App& enable_docs(std::string spec_path = "/openapi.json",
-                     std::string ui_path   = "/docs") {
-        openapi_spec_path_ = std::move(spec_path);
-        openapi_ui_path_   = std::move(ui_path);
-        openapi_enabled_   = true;
-        return *this;
-    }
-
-    // ── Dependency injection ─────────────────────────────────────────────────
-    //
-    // Register a singleton — the same shared_ptr is returned for every request.
-    //   app.provide(std::make_shared<Database>(conn_str));
-    //
-    template<typename T>
-    App& provide(std::shared_ptr<T> instance) {
-        container_.singleton<T>(std::move(instance));
-        return *this;
-    }
-
-    // Register a transient factory — called once per Inject<T> resolution.
-    //   app.provide<Logger>([]{ return std::make_shared<Logger>(); });
-    //
-    template<typename T, typename F>
-    App& provide(F&& factory) {
-        container_.transient<T>(std::forward<F>(factory));
-        return *this;
-    }
-
-    // ── Route groups ─────────────────────────────────────────────────────────
-    //
-    // Creates a group with a URL prefix. Routes registered on the group are
-    // prefixed automatically. Middleware added via group.use() runs only for
-    // routes in that group, after global middlewares.
-    //
-    //   auto api = app.group("/api/v1");
-    //   api.use(auth);
-    //   api.get("/users", list_users);   // → GET /api/v1/users
-    //
-    RouteGroup group(std::string prefix) {
-        return RouteGroup(std::move(prefix), router_, openapi_routes_);
-    }
 
     // ── WebSocket ────────────────────────────────────────────────────────────
     //
@@ -352,12 +302,6 @@ public:
     struct StaticMount { std::string prefix; std::string root; bool spa = false; };
 
 private:
-    // Called once per route registration to capture type metadata for OpenAPI.
-    template<typename F>
-    void register_route(const std::string& method, const std::string& path, const F&) {
-        openapi_routes_.push_back(DocBuilder<std::decay_t<F>>::build(method, path));
-    }
-
     Router                                    router_;
     std::vector<Middleware>                   middlewares_;
     std::vector<StaticMount>                  static_mounts_;
@@ -367,17 +311,8 @@ private:
     AsyncErrorHandler                          catchall_async_error_handler_;
     std::string                               templates_dir_ = "./templates";
 
-    // OpenAPI state
-    std::vector<RouteDoc>                     openapi_routes_;
     std::string                               api_title_       = "Osodio API";
     std::string                               api_version_     = "0.1.0";
-    bool                                      openapi_enabled_ = false;
-    std::string                               openapi_spec_path_ = "/openapi.json";
-    std::string                               openapi_ui_path_   = "/docs";
-
-    // Service container — populated before run(), read-only after
-    ServiceContainer                          container_;
-
     int                                       max_connections_ = 10'000;
 
 

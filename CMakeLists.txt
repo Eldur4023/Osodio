@@ -14,7 +14,6 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 option(OSODIO_IO_URING "Backend io_uring en lugar de epoll (Linux 5.1+)" OFF)
-option(OSODIO_BROTLI   "Compresion Brotli ademas de gzip"                OFF)
 option(OSODIO_EXAMPLES "Compilar los ejemplos de examples/"              ON)
 
 # Modulos de persistencia.  Cada uno se compila solo si su cliente esta
@@ -25,9 +24,8 @@ option(OSODIO_POSTGRES "Modulo postgres (libpq)"                         ON)
 option(OSODIO_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
 
 # ── Dependencias del sistema ──────────────────────────────────────────────────
-# Osodio 2.0 no enlaza OpenSSL ni nghttp2: TLS y HTTP/2 son cosa del reverse
-# proxy.  zlib es la unica dependencia obligatoria.
-find_package(ZLIB REQUIRED)
+# Osodio 2.0 no enlaza OpenSSL, nghttp2 ni zlib: TLS, HTTP/2 y compresion son
+# cosa del reverse proxy.  Solo hacen falta hilos.
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -68,10 +66,6 @@ add_library(osodio_llhttp STATIC
 target_include_directories(osodio_llhttp PUBLIC third_party/llhttp/include)
 set_target_properties(osodio_llhttp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(osodio_simdjson STATIC third_party/simdjson.cpp)
-target_include_directories(osodio_simdjson PUBLIC third_party)
-set_target_properties(osodio_simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
 # ── Biblioteca principal ──────────────────────────────────────────────────────
 set(OSODIO_SOURCES
     src/app.cpp
@@ -95,8 +89,6 @@ target_include_directories(osodio PUBLIC
 
 target_link_libraries(osodio PUBLIC
     osodio_llhttp
-    osodio_simdjson
-    ZLIB::ZLIB
     Threads::Threads
     jinja2cpp
 )
@@ -105,12 +97,6 @@ if(OSODIO_IO_URING)
     find_library(URING_LIB uring REQUIRED)
     target_compile_definitions(osodio PUBLIC OSODIO_IO_URING)
     target_link_libraries(osodio PUBLIC ${URING_LIB})
-endif()
-
-if(OSODIO_BROTLI)
-    find_library(BROTLI_ENC brotlienc REQUIRED)
-    target_compile_definitions(osodio PUBLIC OSODIO_HAS_BROTLI)
-    target_link_libraries(osodio PUBLIC ${BROTLI_ENC})
 endif()
 
 target_compile_options(osodio PRIVATE -Wall -Wextra -Wno-unused-parameter)

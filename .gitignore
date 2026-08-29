@@ -3,3 +3,6 @@ potential_bugs.md
 plan.md
 .claude/
 build/
+
+# Artefactos que deja la suite de pruebas.
+pruebas-suite.db*

@@ -48,10 +48,6 @@ public:
     // did its own ::read) so reads work over TLS too.
     std::function<void(const char*, size_t)> _ws_on_data;
 
-    // Pointer to the service container (set by App::run before dispatch).
-    // Non-owning: the App owns the container and outlives all requests.
-    class ServiceContainer* container = nullptr;
-
     // Cancellation token — shared with the HttpConnection.
     // Cancelled when the connection closes (timeout, disconnect, write error).
     // Check in long-running handlers to exit early.

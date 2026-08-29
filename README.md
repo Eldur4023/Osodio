@@ -80,7 +80,7 @@ Ese argumento sigue en pie, y por eso conviene ser preciso sobre qué se interpr
 qué no.
 
 **El stack de I/O sigue siendo nativo y multinúcleo.** Un event loop por core, `SO_REUSEPORT`,
-sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON, nlohmann y simdjson; el
+sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON, nlohmann; el
 servicio de estáticos, `sendfile(2)`. Nada de eso cambia.
 
 **El bytecode solo ejecuta pegamento.** Resolver un nombre, llamar a un builtin nativo,
@@ -311,6 +311,7 @@ no tumba el servidor.
 | **Tiempo real** | SSE con `id:` para reconexión, WebSockets RFC 6455 |
 | **Auth** | `session` en cookie firmada, JWT HS256 con verificación de `alg`, `exp` e `iss` |
 | **Estado** | Almacén compartido con operaciones atómicas |
+| **Persistencia** | Módulos `sqlite`, `postgres` y `mysql`: pool de conexiones, transacciones y consultas parametrizadas |
 | **Ficheros** | MIME, ETag, 304, `sendfile(2)`, SPA, bloqueo de dotfiles y traversal |
 | **Lenguaje** | Clases, `for`, `while`, `try/catch`, ternario, listas, diccionarios, métodos |
 | **Docs** | `/openapi.json` y `/docs` generados desde el AST |
@@ -321,23 +322,21 @@ no tumba el servidor.
 
 **TLS y HTTP/2** — del reverse proxy.
 **CORS, compresión, rate limiting, cabeceras de seguridad** — del reverse proxy.
-**Persistencia** — llegará como módulos (`sqlite`, `postgres`, `mysql`). Atar el núcleo a
-un motor síncrono contradice el argumento de eficiencia.
 **Clases genéricas de usuario** — `List<T>` y `Dict<K,V>` sí; `class Caja<T>` no.
 
 ---
 
 ## Compilar
 
-Requiere **Linux** (epoll, `sendfile(2)`, `SO_REUSEPORT`), **CMake 3.20+**, **C++20**
-(GCC 11+ o Clang 13+) y **zlib**.
+Requiere **Linux** (epoll, `sendfile(2)`, `SO_REUSEPORT`), **CMake 3.20+** y **C++20**
+(GCC 11+ o Clang 13+). No hace falta OpenSSL ni zlib.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-Dependencias vendorizadas en `third_party/`: nlohmann/json, simdjson y llhttp.
+Dependencias vendorizadas en `third_party/`: nlohmann/json y llhttp.
 
 **Jinja2Cpp es la excepción**: no está empaquetado, no es cabecera única y arrastra Boost,
 fmt y rapidjson. Se trae con `FetchContent` y un tag fijado, así que el **primer** configure

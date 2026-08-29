@@ -119,8 +119,9 @@ pasadas, primero se recogen las declaraciones y después se resuelven los nombre
 ```
 import_decl   ::= "import" IDENT NEWLINE
 ```
-Introduce un espacio de nombres. Los módulos (`SQLite`, `Postgres`, `MySQL`) quedan fuera
-del alcance de 2.0; la sintaxis existe para no cerrarles la puerta.
+Introduce un espacio de nombres. Los módulos disponibles son `sqlite`, `postgres` y
+`mysql`, y cada uno necesita además su bloque de configuración dentro de `app:`. Importar
+uno que el binario no trae compilado es un error al compilar el `.odio`.
 
 ### class
 ```

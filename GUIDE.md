@@ -17,16 +17,17 @@
 9. [Sesión](#9-sesión)
 10. [JWT](#10-jwt)
 11. [Asincronía](#11-asincronía)
-12. [Server-Sent Events](#12-server-sent-events)
-13. [WebSockets](#13-websockets)
-14. [Estado compartido](#14-estado-compartido)
-15. [Subida de ficheros](#15-subida-de-ficheros)
-16. [Manejadores de error](#16-manejadores-de-error)
-17. [Funciones](#17-funciones)
-18. [El lenguaje](#18-el-lenguaje)
-19. [Referencia de builtins](#19-referencia-de-builtins)
-20. [Errores frecuentes](#20-errores-frecuentes)
-21. [Cómo funciona por dentro](#21-cómo-funciona-por-dentro)
+12. [Base de datos](#12-base-de-datos)
+13. [Server-Sent Events](#13-server-sent-events)
+14. [WebSockets](#14-websockets)
+15. [Estado compartido](#15-estado-compartido)
+16. [Subida de ficheros](#16-subida-de-ficheros)
+17. [Manejadores de error](#17-manejadores-de-error)
+18. [Funciones](#18-funciones)
+19. [El lenguaje](#19-el-lenguaje)
+20. [Referencia de builtins](#20-referencia-de-builtins)
+21. [Errores frecuentes](#21-errores-frecuentes)
+22. [Cómo funciona por dentro](#22-cómo-funciona-por-dentro)
 
 ---
 
@@ -37,7 +38,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-Requiere Linux (epoll, `sendfile(2)`, `SO_REUSEPORT`), CMake 3.20+, C++20 y zlib. El primer
+Requiere Linux (epoll, `sendfile(2)`, `SO_REUSEPORT`), CMake 3.20+ y C++20. El primer
 `configure` necesita red para traer Jinja2Cpp.
 
 El argumento decide qué se compila, sin sorpresas:
@@ -453,7 +454,105 @@ Asíncronos disponibles: `sleep(ms)` y `ws.recv()`.
 
 ---
 
-## 12. Server-Sent Events
+## 12. Base de datos
+
+Tres módulos: `sqlite`, `postgres` y `mysql`. Se importan y se configuran; la conexión la
+gestionan ellos.
+
+```odio
+import postgres
+
+app:
+    postgres:
+        host     "127.0.0.1"
+        port     5432
+        database "mi_app"
+        user     "odio"
+        password env("PG_PASSWORD")
+        pool     4
+```
+
+Cada módulo se compila solo si su cliente estaba presente al compilar Osodio. Si no,
+`import postgres` da un error al compilar el `.odio`, no un fallo raro en producción.
+
+### Configuración
+
+| Módulo | Claves |
+|---|---|
+| `sqlite` | `file` (obligatoria), `pool`, `timeout_ms` |
+| `postgres` | `url`, o bien `host` / `port` / `database` (obligatoria) / `user` / `password`; `pool` |
+| `mysql` | `host` / `port` / `database` / `user` / `password`; `pool` |
+
+`pool` es el número de conexiones, entre 1 y 64. Por defecto 4. Usa `env()` para las
+contraseñas: se resuelve al compilar y no queda escrita en el `.odio`.
+
+### Consultar
+
+```odio
+get endpoint("/articulos"):
+    return await postgres.query("select id, titulo from articulos order by id")
+
+get endpoint("/articulos/:id", int id):
+    List<Json> filas = await postgres.query("select titulo from articulos where id = $1", id)
+    if len(filas) == 0:
+        return status(404)
+    return filas[0]
+```
+
+`query()` devuelve `List<Json>`: una lista de diccionarios, con los tipos del motor
+convertidos a los de Odio —entero, decimal, booleano, cadena y `null`—.
+
+```odio
+post endpoint("/articulos", Articulo a):
+    int filas = await postgres.exec(
+        "insert into articulos (titulo, vistas) values ($1, $2)", a.titulo, a.vistas)
+    int id = await postgres.last_id()
+    return { "id": id }.status(201)
+```
+
+`exec()` devuelve el número de filas afectadas. `last_id()` devuelve el último id
+autogenerado.
+
+**Los parámetros van siempre aparte, nunca concatenados.** El marcador depende del motor:
+`?` en sqlite y mysql, `$1`, `$2`… en postgres. Concatenar la consulta a mano es la única
+forma de abrirse a una inyección, y el lenguaje no te la pone fácil.
+
+### Transacciones
+
+```odio
+post endpoint("/transfiere"):
+    await sqlite.begin()
+    await sqlite.exec("update cuentas set saldo = saldo - 30 where id = 1")
+    await sqlite.exec("update cuentas set saldo = saldo + 30 where id = 2")
+    await sqlite.commit()
+    return { "ok": true }
+```
+
+`begin()` fija la conexión: todo lo que venga después en esa petición va por la misma, y
+`commit()` o `rollback()` la sueltan. Si el handler termina —o revienta— con una
+transacción abierta, Osodio hace `ROLLBACK` y lo avisa por consola. Sin eso, la siguiente
+petición que cogiera esa conexión del pool heredaría el estado.
+
+### Errores
+
+Un error del motor no revienta el handler: llega como un diccionario con `error`.
+
+```odio
+get endpoint("/malo"):
+    Json r = await sqlite.query("select * from no_existe")
+    return r          # { "error": "no such table: no_existe" }
+```
+
+### Por qué no bloquea
+
+Los clientes de sqlite, libpq y libmysqlclient son síncronos. Cada módulo mantiene un pool
+de hilos con **una conexión por trabajador**; el `await` encola el trabajo, suelta el event
+loop y lo retoma cuando el hilo termina. Ningún `query()` para el event loop, que es lo que
+haría que todo el argumento de eficiencia se cayera.
+
+---
+
+## 13. Server-Sent Events
 
 ```odio
 sse endpoint("/metricas/:cada", int cada):
@@ -481,7 +580,7 @@ final que devolver.
 
 ---
 
-## 13. WebSockets
+## 14. WebSockets
 
 ```odio
 ws endpoint("/eco") origins("https://miapp.com", "http://localhost:5173"):
@@ -511,7 +610,7 @@ origen fuera de la lista recibe `403`.
 
 ---
 
-## 14. Estado compartido
+## 15. Estado compartido
 
 ```odio
 get endpoint("/visitas"):
@@ -537,7 +636,7 @@ Vive en memoria del proceso: se pierde al reiniciar, y no se comparte entre máq
 
 ---
 
-## 15. Subida de ficheros
+## 16. Subida de ficheros
 
 ```odio
 post endpoint("/avatar", File imagen):
@@ -564,7 +663,7 @@ lista vacía.
 
 ---
 
-## 16. Manejadores de error
+## 17. Manejadores de error
 
 ```odio
 on error 404:
@@ -595,7 +694,7 @@ defecto.
 
 ---
 
-## 17. Funciones
+## 18. Funciones
 
 ```odio
 fn int doble(int x):
@@ -643,7 +742,7 @@ Declarar una función con el nombre de un builtin es un error de compilación.
 
 ---
 
-## 18. El lenguaje
+## 19. El lenguaje
 
 ### Tipos
 
@@ -719,7 +818,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 
 ---
 
-## 19. Referencia de builtins
+## 20. Referencia de builtins
 
 ### Funciones
 
@@ -748,8 +847,10 @@ string rol = edad >= 18 ? "adulto" : "menor"
 | `sse` | `send` `ping` `open` | Rutas `sse` |
 | `ws` | `send` `recv` `open` `close` | Rutas `ws` |
 | `error` | `code` `message` `messages` | Bloques `on error` |
+| `sqlite` `postgres` `mysql` | `query` `exec` `last_id` `begin` `commit` `rollback` | Con `import` y su bloque en `app:` |
 
-Usar uno fuera de su contexto es error de compilación.
+Usar uno fuera de su contexto es error de compilación. Todos los métodos de un módulo de
+base de datos son asíncronos: se llaman con `await`.
 
 ### Métodos por tipo
 
@@ -763,7 +864,7 @@ Usar uno fuera de su contexto es error de compilación.
 
 ---
 
-## 20. Errores frecuentes
+## 21. Errores frecuentes
 
 | Mensaje | Qué pasa |
 |---|---|
@@ -780,7 +881,7 @@ Todos salen con fichero, línea, columna y un cursor bajo la posición exacta.
 
 ---
 
-## 21. Cómo funciona por dentro
+## 22. Cómo funciona por dentro
 
 ```
 osodio ./app  →  lex → parse → check → emitir

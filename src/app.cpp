@@ -265,7 +265,7 @@ static void signal_handler(int) {
 // ── App::run ──────────────────────────────────────────────────────────────────
 
 // ── App::prepare ─────────────────────────────────────────────────────────────
-// Registers docs routes once (idempotent). Safe to call multiple times.
+// Ordena los montajes estaticos una sola vez (idempotente).
 
 void App::prepare() {
     if (prepared_) return;
@@ -274,17 +274,6 @@ void App::prepare() {
               [](const StaticMount& a, const StaticMount& b) {
                   return a.prefix.size() > b.prefix.size();
               });
-    if (openapi_enabled_) {
-        std::string spec = build_openapi_doc(api_title_, api_version_, openapi_routes_).dump(2);
-        std::string spec_path = openapi_spec_path_;
-        std::string ui_path   = openapi_ui_path_;
-        router_.add("GET", spec_path, [spec](Request&, Response& res) {
-            res.header("Content-Type", "application/json; charset=utf-8").send(spec);
-        });
-        router_.add("GET", ui_path, [spec_path](Request&, Response& res) {
-            res.html(swagger_ui_html(spec_path));
-        });
-    }
 }
 
 // ── App::handle_request ───────────────────────────────────────────────────────
@@ -293,7 +282,6 @@ void App::prepare() {
 
 Task<void> App::handle_request(Request& req, Response& res) {
     res.set_templates_dir(templates_dir_);
-    req.container = &container_;
 
     // Static file mounts bypass the middleware chain.
     if (req.method == "GET" || req.method == "HEAD") {
@@ -370,7 +358,7 @@ Task<void> App::handle_request(Request& req, Response& res) {
 void App::run(const std::string& host, uint16_t port) {
     std::signal(SIGPIPE, SIG_IGN);
 
-    prepare();  // register docs routes if enable_docs() was called
+    prepare();  // ordena los montajes estaticos
 
     // ── Build the async dispatch function ─────────────────────────────────────
     // Returns handle_request() directly — no extra coroutine frame.

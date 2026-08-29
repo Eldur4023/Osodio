@@ -129,14 +129,14 @@ Esto es el contrato: todo lo que Odio tiene que saber expresar, y nada más.
 - `/health`, `/metrics` (Prometheus)
 - `/docs` + `/openapi.json` **generados desde el AST**
 
-### Fuera: persistencia
-2.0 **no tiene acceso a datos**. Atar el núcleo a un motor de base de datos síncrono
-contradice el argumento de eficiencia del proyecto. La persistencia llegará como **módulos**
-(§10), no como builtin.
+### Aparte: persistencia
+El núcleo **no** habla con ninguna base de datos. La persistencia entra como **módulos**
+(§10) que se importan y se configuran: atar el núcleo a un motor síncrono contradice el
+argumento de eficiencia del proyecto.
 
-Sin DB, lo que el VM realmente suspende en 2.0 es `ws.recv()` (bloquea hasta que llega un
-mensaje) y `sleep()` (bucles de keepalive de SSE). Ambos están en esta superficie, así que
-la pila propia sigue siendo obligatoria.
+Lo que el VM suspende, por tanto, es `ws.recv()` (bloquea hasta que llega un mensaje),
+`sleep()` (bucles de keepalive de SSE) y las llamadas a un módulo de datos. La pila propia
+del VM es obligatoria por los dos primeros, aunque no se importe ningún módulo.
 
 ---
 
@@ -205,36 +205,47 @@ el mismo conjunto que se compiló, ni más ni menos.
 
 ---
 
-## 6. Qué se corta
+## 6. Qué se cortó
 
-| Se corta | Motivo |
-|---|---|
-| TLS / OpenSSL | Lo hace el reverse proxy |
-| HTTP/2 / nghttp2 | Ídem |
-| `cors()`, `compress()`, `helmet()`, `rate_limit()` | Ídem |
-| `csrf.hpp` | Depende de OpenSSL; el patrón se resuelve en el proxy o en Odio |
-| `handler_traits.hpp` (448 líneas) | Existe solo para extraer argumentos de lambdas C++ |
-| `schema.hpp` — macro `SCHEMA` | El lenguaje declara los structs |
-| `validation.hpp` | Validación a nivel de lenguaje |
-| `di.hpp` / `Inject<T>` | No hay código C++ de usuario donde inyectar |
-| `group.hpp` | Anidamiento a nivel de lenguaje |
-| `testing.hpp` — `TestClient` | Depende de la historia de tests de Odio (sin decidir) |
-| `io_uring_loop.cpp` | Segundo backend en un 2.0 que quiere adelgazar. Puede volver |
-| `openapi.hpp` (347 líneas) | **Se reescribe** desde el AST, no se conserva |
+Ya está hecho. Lo que sigue es el registro de lo que se fue y lo que quedó, con
+las cuentas reales.
 
-**~1.400 líneas de metaprogramación de plantillas desaparecen.** `handler_traits`,
-`schema`, `validation` y `di` existen únicamente porque el usuario escribe C++. Sin usuario
-de C++, el binding de argumentos lo hace el frontend al leer el `.odio`, una vez, sin
-plantillas.
+### Borrado entero
 
-### Cirugía necesaria, no borrado limpio
+| Fichero | Líneas | Motivo |
+|---|---:|---|
+| `schema.hpp` — macro `SCHEMA` | 128 | Las clases se declaran en el `.odio` |
+| `validation.hpp` | 64 | `validate:` es parte del lenguaje |
+| `di.hpp` / `Inject<T>` | 81 | No queda código C++ de usuario donde inyectar |
+| `group.hpp` | 112 | `group ... :` es parte del lenguaje |
+| `testing.hpp` — `TestClient` | 225 | Las pruebas ejercen el binario por el socket |
+| `third_party/simdjson.*` | — | El único usuario era `handler_traits` |
 
-- **nghttp2 se filtra** a `app.hpp`, `request.hpp`, `sse.hpp` y `websocket.hpp`. Cortar
-  HTTP/2 toca esas cuatro cabeceras además de `http2_connection.*`.
-- **OpenSSL se filtra** a `src/app.cpp`, `src/core/tcp_server.hpp` y
-  `src/http/http_connection.*` (ramas TLS del ciclo de lectura/escritura).
-- `jwt.hpp` y `csrf.hpp` están enteros dentro de `#ifdef OSODIO_HAS_TLS`: al cortar TLS
-  mueren solos. JWT se reimplementa sobre HMAC-SHA256 vendorizado.
+También se fueron TLS/OpenSSL, HTTP/2/nghttp2, `csrf.hpp` y `jwt.hpp` (estaban
+enteros dentro de `#ifdef OSODIO_HAS_TLS`). JWT se rehízo sobre el HMAC-SHA256
+propio de `src/odio/crypto.cpp`.
+
+### Recortado
+
+| Fichero | Antes | Ahora | Qué queda |
+|---|---:|---:|---|
+| `handler_traits.hpp` | 448 | 70 | Repartir `Request&`/`Response&` y aceptar `void` o `Task<void>` |
+| `middleware.hpp` | 482 | 57 | `logger()`. `cors`, `compress`, `helmet` y `rate_limit` los pone el proxy |
+| `openapi.hpp` | 347 | 69 | El HTML de Swagger UI. El documento lo genera el frontend desde el AST |
+| `app.hpp` | 388 | 322 | Sin `provide()`, `group()`, `enable_docs()` ni la contabilidad de rutas |
+
+Son **1.856 líneas menos** de código del proyecto (más los 174.000 de simdjson
+vendorizado). La metaprogramación de plantillas se va porque existía únicamente
+para que el usuario escribiera C++: el binding de argumentos ahora lo hace el
+frontend al leer el `.odio`, una vez, con los nombres y los tipos delante.
+
+### Lo que NO se cortó, y por qué
+
+- **`io_uring_loop.cpp` sigue ahí.** Está detrás de `-DOSODIO_IO_URING=ON`, no se
+  compila por defecto y no cuesta nada tenerlo. Cortarlo era adelgazar por
+  adelgazar.
+- **`api_info()` sigue en `App`.** Es almacenamiento simple —título y versión— que
+  el binario lee para el documento OpenAPI.
 
 ---
 
@@ -257,8 +268,8 @@ plantillas.
    reservados, `for`, el almacen compartido `state`, `log`, cookies, formularios,
    multipart con `File`/`List<File>`, metodos sobre valores, `try/catch` y `/docs`
    generado desde el AST. **La superficie de la capa 2 esta cubierta**, mas
-   funciones de usuario, constructores y metodos de clase. Queda la
-   persistencia, que es alcance nuevo (modulos), no un hueco.
+   funciones de usuario, constructores y metodos de clase. La persistencia entro
+   despues como modulos (§10): sqlite, postgres y mysql.
 3. **Tabla de builtins** — el puente de §4 hacia el motor nativo.
    *Hecho en el hito 2:* `text`, `html`, `json`, `render`, `status`, `redirect`,
    `send_file`, `len`, `str`, `int`, `header`, `query`, `sleep` (asincrono) y los
@@ -398,3 +409,12 @@ concatenación desde Odio.
   `tests/run_tests.sh` es la suite de regresión del proyecto, que ejerce el binario por el
   socket.
 - (resuelto) `elif` y `else if` se admiten los dos.
+- **MySQL no se ha probado contra un servidor real.** Compila, enlaza y comparte el
+  camino de sqlite y postgres —que sí están probados—, pero no se ha levantado un `mysqld`
+  contra el que ejercerlo. Hasta que eso pase, el módulo es código sin verificar.
+- (resuelto) **Los métodos HTTP son palabras reservadas en todo el fichero.** `get`,
+  `post`, `put`, `patch`, `delete` y `any` no valen como nombre de variable, campo ni
+  parámetro, aunque solo signifiquen algo delante de `endpoint`. Se podrían haber hecho
+  contextuales; se ha decidido dejarlas reservadas. Con mayúscula no chocan —`class Post`
+  y `Post p` compilan— y tras un `.` cualquier palabra clave es un nombre, así que
+  `state.get(...)` funciona.
