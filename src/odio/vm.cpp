@@ -125,6 +125,21 @@ VM::Result VM::execute(NativeCtx& ctx) {
     return r;
 }
 
+// Un opcode especializado se comporta exactamente como su generico cuando la
+// guarda de tipo falla.
+static Op sin_especializar(Op op) {
+    switch (op) {
+        case Op::AddInt: return Op::Add;
+        case Op::SubInt: return Op::Sub;
+        case Op::MulInt: return Op::Mul;
+        case Op::LtInt:  return Op::Lt;
+        case Op::LeInt:  return Op::Le;
+        case Op::GtInt:  return Op::Gt;
+        case Op::GeInt:  return Op::Ge;
+        default:         return op;
+    }
+}
+
 VM::Result VM::run_until_error(NativeCtx& ctx) {
     // El contador se reinicia en cada tramo: un bucle de SSE legitimo puede
     // estar horas vivo, pero entre dos suspensiones no debe dar mas de kStepLimit.
@@ -145,10 +160,6 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             continue;
         }
 
-        if (++steps > kStepLimit)
-            return fail("el handler supero el limite de pasos: bucle infinito?",
-                        chunk.code[frame.pc].loc);
-
         const Instr& in = chunk.code[frame.pc++];
 
         switch (in.op) {
@@ -168,7 +179,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 pop();
                 break;
 
-            case Op::Add: {
+            case Op::Add: generico_add: {
                 Value b = pop(), a = pop();
                 // '+' exige que AMBOS lados sean del mismo tipo. Dos cadenas
                 // concatenan, dos numeros suman, dos listas se unen.
@@ -198,20 +209,21 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
             }
 
-            case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod: {
+            case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod: generico_arit: {
+                const Op og = sin_especializar(in.op);
                 Value b = pop(), a = pop();
                 if (!numeric_pair(a, b))
                     return fail(std::string("operacion aritmetica entre ") +
                                 a.type_name() + " y " + b.type_name(), in.loc);
 
                 bool ints = a.is_int() && b.is_int();
-                if (in.op == Op::Mod) {
+                if (og == Op::Mod) {
                     if (!ints) return fail("'%' solo aplica a enteros", in.loc);
                     if (b.as_int() == 0) return fail("modulo por cero", in.loc);
                     push(Value::integer(a.as_int() % b.as_int()));
                     break;
                 }
-                if (in.op == Op::Div) {
+                if (og == Op::Div) {
                     if (b.as_float() == 0) return fail("division por cero", in.loc);
                     if (ints && a.as_int() % b.as_int() == 0)
                         push(Value::integer(a.as_int() / b.as_int()));
@@ -221,10 +233,10 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 }
                 if (ints) {
                     long long x = a.as_int(), y = b.as_int();
-                    push(Value::integer(in.op == Op::Sub ? x - y : x * y));
+                    push(Value::integer(og == Op::Sub ? x - y : x * y));
                 } else {
                     double x = a.as_float(), y = b.as_float();
-                    push(Value::real(in.op == Op::Sub ? x - y : x * y));
+                    push(Value::real(og == Op::Sub ? x - y : x * y));
                 }
                 break;
             }
@@ -240,10 +252,10 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             case Op::Eq: { Value b = pop(), a = pop(); push(Value::boolean(a.equals(b)));  break; }
             case Op::Ne: { Value b = pop(), a = pop(); push(Value::boolean(!a.equals(b))); break; }
 
-            case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge: {
+            case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge: generico_cmp: {
                 Value b = pop(), a = pop();
                 bool ok = false;
-                bool r  = compare(a, b, in.op, ok);
+                bool r  = compare(a, b, sin_especializar(in.op), ok);
                 if (!ok)
                     return fail(std::string("no se pueden comparar ") + a.type_name() +
                                 " y " + b.type_name(), in.loc);
@@ -255,7 +267,48 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 push(Value::boolean(!pop().truthy()));
                 break;
 
+            // ── Enteros conocidos al compilar ────────────────────────────────
+            //
+            // El emisor las pone cuando puede demostrar que los dos lados son
+            // `int`.  Se ahorran la cascada de comprobaciones de tipo del
+            // camino generico y las dos copias de Value: se mira la cima sin
+            // sacarla.
+            //
+            // La guarda esta porque el tipo declarado no se impone al asignar.
+            // Si no cuadra, cae al generico y el programa se comporta igual,
+            // con el mismo mensaje de error.
+            case Op::AddInt: case Op::SubInt: case Op::MulInt:
+            case Op::LtInt:  case Op::LeInt:  case Op::GtInt: case Op::GeInt: {
+                const Value& vb = stack_[stack_.size() - 1];
+                const Value& va = stack_[stack_.size() - 2];
+                if (!va.is_int() || !vb.is_int()) {
+                    if (in.op == Op::AddInt) goto generico_add;
+                    if (in.op == Op::SubInt || in.op == Op::MulInt) goto generico_arit;
+                    goto generico_cmp;
+                }
+                const long long x = va.as_int(), y = vb.as_int();
+                stack_.pop_back();
+                stack_.pop_back();
+                switch (in.op) {
+                    case Op::AddInt: push(Value::integer(x + y));  break;
+                    case Op::SubInt: push(Value::integer(x - y));  break;
+                    case Op::MulInt: push(Value::integer(x * y));  break;
+                    case Op::LtInt:  push(Value::boolean(x <  y)); break;
+                    case Op::LeInt:  push(Value::boolean(x <= y)); break;
+                    case Op::GtInt:  push(Value::boolean(x >  y)); break;
+                    default:         push(Value::boolean(x >= y)); break;
+                }
+                break;
+            }
+
             case Op::Jump:
+                // El contador solo se mira aqui.  Un bucle infinito necesita un
+                // salto hacia atras por definicion, y la recursion infinita la
+                // corta antes el tope de marcos: comprobarlo en cada
+                // instruccion era una rama por instruccion para nada.
+                if (in.operand <= frame.pc && ++steps > kStepLimit)
+                    return fail("el handler supero el limite de pasos: bucle infinito?",
+                                in.loc);
                 frame.pc = in.operand;
                 break;
 

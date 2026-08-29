@@ -95,6 +95,11 @@ private:
     int  declare_local(const std::string& name, SourceLoc loc,
                        const std::string& type = {});
     const std::string& local_type(const std::string& name) const;
+
+    // Cierto solo si se PUEDE demostrar que la expresion es de tipo int.  Ante
+    // la duda dice que no: especializar de menos solo deja codigo generico,
+    // especializar de mas seria un error.
+    bool es_int(const Expr& e) const;
     int  resolve_local(const std::string& name) const;
     void begin_scope();
     void end_scope();

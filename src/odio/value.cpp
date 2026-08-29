@@ -30,7 +30,7 @@ std::string Value::to_string() const {
             ss << d_;
             return ss.str();
         }
-        case Type::Str:   return *s_;
+        case Type::Str:   return as_str();
         case Type::List:
         case Type::Dict:  return to_json().dump();
     }
@@ -43,10 +43,10 @@ nlohmann::json Value::to_json() const {
         case Type::Bool:  return b_;
         case Type::Int:   return i_;
         case Type::Float: return d_;
-        case Type::Str:   return *s_;
+        case Type::Str:   return as_str();
         case Type::List: {
             auto arr = nlohmann::json::array();
-            for (const auto& v : *l_) arr.push_back(v.to_json());
+            for (const auto& v : as_list()) arr.push_back(v.to_json());
             return arr;
         }
         case Type::Dict: {
@@ -54,7 +54,7 @@ nlohmann::json Value::to_json() const {
             // indice con el que un File localiza sus bytes— y no salen nunca en
             // la respuesta.
             auto obj = nlohmann::json::object();
-            for (const auto& [k, v] : *m_)
+            for (const auto& [k, v] : as_dict())
                 if (k.rfind("__", 0) != 0) obj[k] = v.to_json();
             return obj;
         }
@@ -90,18 +90,18 @@ bool Value::equals(const Value& o) const {
     switch (type_) {
         case Type::Null: return true;
         case Type::Bool: return b_ == o.b_;
-        case Type::Str:  return *s_ == *o.s_;
+        case Type::Str:  return as_str() == o.as_str();
         case Type::List: {
-            if (l_->size() != o.l_->size()) return false;
-            for (size_t i = 0; i < l_->size(); ++i)
-                if (!(*l_)[i].equals((*o.l_)[i])) return false;
+            if (as_list().size() != o.as_list().size()) return false;
+            for (size_t i = 0; i < as_list().size(); ++i)
+                if (!as_list()[i].equals(o.as_list()[i])) return false;
             return true;
         }
         case Type::Dict: {
-            if (m_->size() != o.m_->size()) return false;
-            for (const auto& [k, v] : *m_) {
-                auto it = o.m_->find(k);
-                if (it == o.m_->end() || !v.equals(it->second)) return false;
+            if (as_dict().size() != o.as_dict().size()) return false;
+            for (const auto& [k, v] : as_dict()) {
+                auto it = o.as_dict().find(k);
+                if (it == o.as_dict().end() || !v.equals(it->second)) return false;
             }
             return true;
         }
@@ -128,6 +128,13 @@ const char* op_name(Op op) {
         case Op::Gt:               return "GT";
         case Op::Ge:               return "GE";
         case Op::Not:              return "NOT";
+        case Op::AddInt:           return "ADD_INT";
+        case Op::SubInt:           return "SUB_INT";
+        case Op::MulInt:           return "MUL_INT";
+        case Op::LtInt:            return "LT_INT";
+        case Op::LeInt:            return "LE_INT";
+        case Op::GtInt:            return "GT_INT";
+        case Op::GeInt:            return "GE_INT";
         case Op::Jump:             return "JUMP";
         case Op::JumpIfFalse:      return "JUMP_IF_FALSE";
         case Op::JumpIfFalsePeek:  return "JUMP_IF_FALSE_PEEK";

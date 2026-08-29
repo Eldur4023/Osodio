@@ -34,6 +34,18 @@ const std::string& Emitter::local_type(const std::string& name) const {
     return kNone;
 }
 
+bool Emitter::es_int(const Expr& e) const {
+    switch (e.kind) {
+        case ExprKind::IntLit: return true;
+        case ExprKind::Ident:  return local_type(e.text) == "int";
+        case ExprKind::Binary:
+            if (e.text == "+" || e.text == "-" || e.text == "*")
+                return e.lhs && e.rhs && es_int(*e.lhs) && es_int(*e.rhs);
+            return false;
+        default: return false;
+    }
+}
+
 int Emitter::resolve_local(const std::string& name) const {
     for (int i = static_cast<int>(locals_.size()) - 1; i >= 0; --i)
         if (locals_[static_cast<size_t>(i)].name == name) return i;
@@ -468,6 +480,21 @@ void Emitter::emit_expr(const Expr& e) {
             else if (e.text == ">")  op = Op::Gt;
             else if (e.text == ">=") op = Op::Ge;
             else { error(e.loc, "operador no soportado: " + e.text); return; }
+
+            // Odio declara los tipos, asi que lo que el VM generico averigua en
+            // cada vuelta se sabe aqui una sola vez.
+            if (es_int(*e.lhs) && es_int(*e.rhs)) {
+                switch (op) {
+                    case Op::Add: op = Op::AddInt; break;
+                    case Op::Sub: op = Op::SubInt; break;
+                    case Op::Mul: op = Op::MulInt; break;
+                    case Op::Lt:  op = Op::LtInt;  break;
+                    case Op::Le:  op = Op::LeInt;  break;
+                    case Op::Gt:  op = Op::GtInt;  break;
+                    case Op::Ge:  op = Op::GeInt;  break;
+                    default: break;
+                }
+            }
             chunk_->emit(op, e.loc);
             break;
         }

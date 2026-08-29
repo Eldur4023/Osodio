@@ -24,6 +24,17 @@ enum class Op : uint8_t {
     Eq, Ne, Lt, Le, Gt, Ge,
     Not,
 
+    // Variantes con los dos lados declarados `int`.  Odio es de tipado
+    // estatico, asi que el emisor sabe al compilar lo que el VM generico tiene
+    // que averiguar en cada vuelta: son la misma operacion sin la cascada de
+    // comprobaciones de tipo.
+    //
+    // El tipo declarado no se impone en la asignacion, asi que llevan guarda:
+    // si los valores no son enteros de verdad, caen al camino generico y el
+    // programa se comporta igual, con el mismo mensaje de error.
+    AddInt, SubInt, MulInt,
+    LtInt, LeInt, GtInt, GeInt,
+
     Jump,         // operand = destino absoluto
     JumpIfFalse,  // idem; consume la cima
     JumpIfFalsePeek,  // idem, pero deja la cima (cortocircuito de and/or)
