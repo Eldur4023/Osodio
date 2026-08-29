@@ -1,4 +1,5 @@
 #include <odio/natives.hpp>
+#include <odio/plantilla.hpp>
 #include <odio/jinja_puente.hpp>
 
 #include <osodio/request.hpp>
@@ -54,6 +55,41 @@ Value fn_render(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
         data = valores_plantilla(args[1]);
     }
     ctx.res.render(args[0].as_str(), std::move(data));
+    ctx.response_written = true;
+    return Value::null();
+}
+
+// Renderiza una plantilla ya compilada.  El primer argumento es su indice en
+// la tabla del modulo, que puso el emisor; el segundo, las variables.
+//
+// Los valores se colocan en el mismo orden en que se compilaron: la plantilla
+// guarda sus nombres, asi que aqui no se busca nada por cadena en caliente.
+Value fn_render_tpl(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!ctx.plantillas || !args[0].is_int()) {
+        error = "render(): plantilla no compilada";
+        return Value::null();
+    }
+    const size_t idx = static_cast<size_t>(args[0].as_int());
+    if (idx >= ctx.plantillas->size()) {
+        error = "render(): indice de plantilla fuera de rango";
+        return Value::null();
+    }
+    const Plantilla& p = (*ctx.plantillas)[idx];
+
+    std::vector<Value> valores;
+    valores.reserve(p.nombres.size());
+    const bool hay = args.size() > 1 && args[1].is_dict();
+    for (const auto& n : p.nombres) {
+        if (!hay) { valores.push_back(Value::null()); continue; }
+        auto it = args[1].as_dict().find(n);
+        valores.push_back(it == args[1].as_dict().end() ? Value::null() : it->second);
+    }
+
+    std::string salida;
+    if (!render_plantilla(p, std::move(valores), ctx, ctx.funciones, salida, error))
+        return Value::null();
+
+    ctx.res.header("Content-Type", "text/html; charset=utf-8").send(std::move(salida));
     ctx.response_written = true;
     return Value::null();
 }
@@ -336,12 +372,13 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 48> kNatives = {{
+const std::array<NativeDef, 49> kNatives = {{
     // Respuesta
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
     {"json",      1, 1,  fn_json},
     {"render",    1, 2,  fn_render},
+    {"__render_tpl", 2, 2, fn_render_tpl},
     {"status",    1, 1,  fn_status},
     {"redirect",  1, 2,  fn_redirect},
     {"send_file", 1, 1,  fn_send_file},

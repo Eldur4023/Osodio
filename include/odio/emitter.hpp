@@ -32,14 +32,28 @@ struct ClassSig {
 };
 using ClassSigs = std::map<std::string, ClassSig>;
 
+struct Plantilla;
+
+// Donde estan las plantillas y donde se guardan ya compiladas.
+//
+// Cuando el emisor ve un render("x.html", k=v) con el nombre literal, compila
+// la plantilla AHI MISMO contra esas claves.  Por eso una errata dentro de un
+// {{ }} sale en `osodio --check` y no cuando alguien pide la pagina.
+struct PlantillaCtx {
+    std::string             dir;
+    std::vector<Plantilla>* tabla = nullptr;
+};
+
 class Emitter {
 public:
     // `functions` mapea nombre de funcion de usuario a su indice en la tabla
     // del modulo.  Se resuelve al emitir, asi que el VM no busca por nombre.
     explicit Emitter(DiagnosticBag& diags, const FunctionSigs* functions = nullptr,
                      const ClassSigs* classes = nullptr,
-                     const std::set<std::string>* imports = nullptr)
-        : diags_(diags), functions_(functions), classes_(classes), imports_(imports) {}
+                     const std::set<std::string>* imports = nullptr,
+                     PlantillaCtx* plantillas = nullptr)
+        : diags_(diags), functions_(functions), classes_(classes), imports_(imports),
+          plantillas_(plantillas) {}
 
     // Los parametros de la ruta ocupan las primeras ranuras, en orden.
     // Devuelve false si algo del cuerpo no se puede compilar todavia.
@@ -68,6 +82,7 @@ private:
     const FunctionSigs*                  functions_ = nullptr;
     const ClassSigs*                     classes_   = nullptr;
     const std::set<std::string>*         imports_   = nullptr;
+    PlantillaCtx*                        plantillas_ = nullptr;
     Chunk*         chunk_ = nullptr;
     bool           failed_ = false;
 
@@ -107,6 +122,7 @@ private:
     void emit_block(const Block& body);
     void emit_stmt(const Stmt& s);
     void emit_expr(const Expr& e);
+    void emitir_render_compilado(const Expr& e);
     void emit_call(const Expr& e, bool awaited);
     // Metodo cuyo receptor no tiene tipo conocido al compilar: se apila y el
     // despacho por tipo lo hace el VM.

@@ -1,4 +1,7 @@
 #include <odio/emitter.hpp>
+#include <fstream>
+#include <filesystem>
+#include <odio/plantilla.hpp>
 #include <odio/natives.hpp>
 
 #include <algorithm>
@@ -962,6 +965,21 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
         return;
     }
 
+    // ── render() con nombre literal: la plantilla se compila AQUI ────────────
+    //
+    // El emisor tiene delante el nombre del fichero y las claves que se le
+    // pasan, que es exactamente lo que hace falta.  Compilar ahora convierte
+    // una errata dentro de un {{ }} en un error de `osodio --check`.
+    //
+    // Si el nombre no es literal —render(variable)— no hay nada que compilar
+    // por adelantado y se sigue por la via antigua.
+    if (name == "render" && plantillas_ && plantillas_->tabla &&
+        !e.args.empty() && e.args[0].name.empty() &&
+        e.args[0].value->kind == ExprKind::StringLit) {
+        emitir_render_compilado(e);
+        return;
+    }
+
     for (const auto& a : e.args)
         if (a.name.empty()) emit_expr(*a.value);
 
@@ -992,6 +1010,55 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
 
     chunk_->emit(def.is_async ? Op::CallAsync : Op::CallNative, e.loc,
                  (static_cast<uint32_t>(id) << 8) | static_cast<uint32_t>(argc));
+}
+
+// Compila la plantilla contra las claves de esta llamada y emite una llamada a
+// __render_tpl(indice, datos).
+void Emitter::emitir_render_compilado(const Expr& e) {
+    const std::string& nombre = e.args[0].value->text;
+
+    if (nombre.find("..") != std::string::npos ||
+        std::filesystem::path(nombre).is_absolute()) {
+        error(e.args[0].loc, "nombre de plantilla no valido: '" + nombre + "'");
+        return;
+    }
+
+    std::vector<std::string> claves;
+    for (const auto& a : e.args) {
+        if (a.name.empty()) continue;
+        claves.push_back(a.name);
+    }
+
+    const std::filesystem::path ruta =
+        std::filesystem::path(plantillas_->dir) / nombre;
+    std::ifstream f(ruta, std::ios::binary);
+    if (!f) {
+        error(e.args[0].loc, "no se encuentra la plantilla '" + nombre + "' en " +
+                             plantillas_->dir);
+        return;
+    }
+    const std::string fuente((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+
+    Plantilla tpl;
+    if (!compilar_plantilla(fuente, nombre, plantillas_->dir, claves, diags_, tpl)) {
+        failed_ = true;
+        return;
+    }
+    const uint32_t idx = static_cast<uint32_t>(plantillas_->tabla->size());
+    plantillas_->tabla->push_back(std::move(tpl));
+
+    // __render_tpl(indice, datos)
+    chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::integer(idx)));
+    for (const auto& a : e.args) {
+        if (a.name.empty()) continue;
+        chunk_->emit(Op::Const, a.loc, chunk_->add_constant(Value::str(a.name)));
+        emit_expr(*a.value);
+    }
+    chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(claves.size()));
+
+    const int id = native_id("__render_tpl");
+    chunk_->emit(Op::CallNative, e.loc, (static_cast<uint32_t>(id) << 8) | 2u);
 }
 
 } // namespace odio

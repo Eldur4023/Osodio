@@ -9,6 +9,7 @@
 #include <osodio/router.hpp>
 #include "bytecode.hpp"
 #include "ast.hpp"
+#include "plantilla.hpp"
 #include "diagnostic.hpp"
 
 namespace odio {
@@ -25,6 +26,11 @@ struct Module {
 
     // Funciones de usuario compiladas, indexadas por orden de declaracion.
     FunctionTable functions;
+
+    // Plantillas compiladas, indexadas por el orden en que el emisor las
+    // encontro.  Cada render() del fuente tiene la suya, compilada contra las
+    // claves concretas que le pasa esa llamada.
+    std::vector<Plantilla> plantillas;
 
     // Especificacion OpenAPI generada desde el AST al compilar.
     std::string    openapi;      // ya serializado al compilar

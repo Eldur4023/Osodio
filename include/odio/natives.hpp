@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "bytecode.hpp"
 #include "value.hpp"
 
 namespace osodio {
@@ -42,9 +43,19 @@ struct SessionState {
     std::string secret;           // vacio = sesiones no configuradas
 };
 
+struct Plantilla;
+
 struct NativeCtx {
     osodio::Request&  req;
     osodio::Response& res;
+
+    // Plantillas compiladas del modulo.  Se compilan al arrancar, asi que
+    // renderizar es recorrerlas, no parsearlas.
+    const std::vector<Plantilla>* plantillas = nullptr;
+
+    // Tabla de funciones de usuario del modulo.  La necesitan las expresiones
+    // de una plantilla para poder llamar a una funcion del .odio.
+    const FunctionTable* funciones = nullptr;
 
     // Solo en rutas sse: el escritor del flujo, creado por el driver antes de
     // arrancar el VM.  Nulo en el resto, y los builtins de sse lo comprueban.

@@ -1,4 +1,5 @@
 #include <odio/project.hpp>
+#include <odio/plantilla.hpp>
 #include <odio/jinja_puente.hpp>
 #include <odio/lexer.hpp>
 #include <odio/parser.hpp>
@@ -160,7 +161,8 @@ using Action = std::function<void(osodio::Request&, osodio::Response&)>;
 // Traduce el `return <expr>` de una ruta declarativa a una accion nativa.
 // Devuelve un Action vacio y anota el diagnostico si la expresion necesita
 // evaluacion en runtime.
-Action compile_return(const Expr& e, DiagnosticBag& diags) {
+Action compile_return(const Expr& e, DiagnosticBag& diags,
+                      const std::string& tpl_dir) {
     // return { ... }  /  return "literal"  → cuerpo JSON
     Value literal;
     if (const_eval_valor(e, literal)) {
@@ -213,10 +215,40 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
             }
             data[a.name] = std::move(v);
         }
-        std::string       name    = *tpl;
-        jinja2::ValuesMap valores = valores_plantilla(Value::dict(std::move(data)));
-        return [name, valores](osodio::Request&, osodio::Response& res) {
-            res.render(name, valores);
+        // Los datos son constantes, asi que la pagina se puede renderizar
+        // ENTERA aqui: la ruta se queda en mandar unos bytes fijos.  Y de paso
+        // los errores de la plantilla salen al compilar, como en las demas.
+        const std::string name = *tpl;
+        if (name.find("..") != std::string::npos ||
+            std::filesystem::path(name).is_absolute()) {
+            diags.error(e.loc, "nombre de plantilla no valido: '" + name + "'");
+            return {};
+        }
+        std::ifstream f(std::filesystem::path(tpl_dir) / name, std::ios::binary);
+        if (!f) {
+            diags.error(e.loc, "no se encuentra la plantilla '" + name + "' en " + tpl_dir);
+            return {};
+        }
+        const std::string fuente((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+
+        std::vector<std::string> claves;
+        std::vector<Value>       valores;
+        for (const auto& [k, v] : data) { claves.push_back(k); valores.push_back(v); }
+
+        Plantilla tpl_c;
+        if (!compilar_plantilla(fuente, name, tpl_dir, claves, diags, tpl_c)) return {};
+
+        osodio::Request  req_falsa;
+        osodio::Response res_falsa;
+        NativeCtx        ctx{req_falsa, res_falsa};
+        std::string      html, err;
+        if (!render_plantilla(tpl_c, std::move(valores), ctx, nullptr, html, err)) {
+            diags.error(e.loc, "al renderizar '" + name + "': " + err);
+            return {};
+        }
+        return [html](osodio::Request&, osodio::Response& res) {
+            res.header("Content-Type", "text/html; charset=utf-8").send(html);
         };
     }
 
@@ -838,7 +870,7 @@ bool bind_params(const RouteDecl& r, const ClassTable& classes,
 
 // Reconoce la forma puramente declarativa: un unico `return` que se resuelve
 // entero en compilacion.  Estas rutas no ejecutan ni un paso de bytecode.
-Action try_declarative(const RouteDecl& r) {
+Action try_declarative(const RouteDecl& r, const std::string& tpl_dir) {
     // Una ruta con guardas NUNCA puede tomar la via declarativa: la accion
     // nativa no las ejecuta, asi que se saltaria la proteccion del grupo.
     if (!r.guards.empty())                                       return {};
@@ -847,7 +879,7 @@ Action try_declarative(const RouteDecl& r) {
     if (r.body[0]->kind != StmtKind::Return || !r.body[0]->value) return {};
 
     DiagnosticBag scratch;
-    Action a = compile_return(*r.body[0]->value, scratch);
+    Action a = compile_return(*r.body[0]->value, scratch, tpl_dir);
     return scratch.empty() ? a : Action{};
 }
 
@@ -1297,9 +1329,11 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
 
 void build_error_handlers(Module& mod, const FunctionSigs& fns,
                           const ClassSigs& sigs, DiagnosticBag& diags) {
+    // Un manejador de error tambien puede renderizar una pagina.
+    PlantillaCtx pctx{mod.program.app.templates_dir, &mod.plantillas};
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns, &sigs, &mod.program.imports);
+        Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
         if (!emitter.emit_error_handler(e, *chunk)) continue;
         mod.error_handlers[e.code] = std::move(chunk);
     }
@@ -1311,6 +1345,14 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
     // El Module posee la tabla y sobrevive a cualquier peticion en vuelo: el
     // dispatcher mantiene vivo su shared_ptr mientras el handler se ejecuta.
     const FunctionTable* fn_table = &mod.functions;
+    // Las plantillas viven en el modulo, como las funciones: el puntero es
+    // estable mientras el modulo lo este, y el swap de recarga cambia los dos
+    // a la vez.
+    const std::vector<Plantilla>* tpl_table = &mod.plantillas;
+
+    // Contexto que necesitan los emisores para compilar las plantillas que
+    // encuentren en un render().
+    PlantillaCtx pctx{mod.program.app.templates_dir, &mod.plantillas};
 
     for (const auto& r : mod.program.routes) {
         if (!r.origins.empty() && r.method != "WS")
@@ -1338,7 +1380,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             }
 
             auto    ws_chunk = std::make_shared<Chunk>();
-            Emitter ws_emitter(diags, &fns, &sigs, &mod.program.imports);
+            Emitter ws_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
 
             ++mod.vm_routes;
@@ -1348,10 +1390,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             mod.router.add_internal("GET", r.pattern,
                 osodio::App::make_ws_handler(
-                    [ws_chunk, ws_binds, ws_where, auth, fn_table]
+                    [ws_chunk, ws_binds, ws_where, auth, fn_table, tpl_table]
                     (osodio::WSConnection conn, osodio::Request& req,
                      osodio::Response& res) -> osodio::Task<void> {
                         NativeCtx    ctx{req, res};
+                ctx.plantillas = tpl_table;
+                ctx.funciones  = fn_table;
                         SessionState session;
                         Value        claims = Value::dict();
                         begin_auth(auth, req, session, claims, ctx);
@@ -1417,16 +1461,18 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             }
 
             auto    sse_chunk = std::make_shared<Chunk>();
-            Emitter sse_emitter(diags, &fns, &sigs, &mod.program.imports);
+            Emitter sse_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
 
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
             mod.router.add_internal("GET", r.pattern,
-                [sse_chunk, sse_binds, sse_where, auth, fn_table](osodio::Request& req,
+                [sse_chunk, sse_binds, sse_where, auth, fn_table, tpl_table](osodio::Request& req,
                                                         osodio::Response& res)
                     -> osodio::Task<void> {
                     NativeCtx    ctx{req, res};
+                ctx.plantillas = tpl_table;
+                ctx.funciones  = fn_table;
                     SessionState session;
                     Value        claims = Value::dict();
                     begin_auth(auth, req, session, claims, ctx);
@@ -1482,7 +1528,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         }
 
         // Nivel 1: ruta declarativa → accion nativa, cero bytecode.
-        if (Action a = try_declarative(r)) {
+        if (Action a = try_declarative(r, mod.program.app.templates_dir)) {
             ++mod.declarative_routes;
             mod.router.add_internal(r.method, r.pattern,
                 [a](osodio::Request& req, osodio::Response& res) -> osodio::Task<void> {
@@ -1497,7 +1543,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         if (!bind_params(r, classes, binds, diags)) continue;
 
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns, &sigs, &mod.program.imports);
+        Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
         if (!emitter.emit_route(r, *chunk)) continue;
 
         ++mod.vm_routes;
@@ -1508,9 +1554,11 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
         std::string where = r.method + " " + r.pattern;
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where, auth, needs_upload, fn_table](osodio::Request& req, osodio::Response& res)
+            [chunk, binds, where, auth, needs_upload, fn_table, tpl_table](osodio::Request& req, osodio::Response& res)
                 -> osodio::Task<void> {
                 NativeCtx    ctx{req, res};
+                ctx.plantillas = tpl_table;
+                ctx.funciones  = fn_table;
                 SessionState session;
                 Value        claims = Value::dict();
                 begin_auth(auth, req, session, claims, ctx);
