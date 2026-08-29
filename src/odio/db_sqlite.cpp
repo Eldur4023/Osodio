@@ -1,4 +1,5 @@
 #include <string_view>
+#include <unordered_map>
 #include <odio/db.hpp>
 
 #include <sqlite3.h>
@@ -42,6 +43,7 @@ public:
         if (t != options.end()) busy_timeout_ = std::atoi(t->second.c_str());
 
         conns_.assign(pool_size(), nullptr);
+        cache_.assign(pool_size(), {});
         return true;
     }
 
@@ -77,7 +79,8 @@ public:
     bool query(size_t worker, const std::string& sql, const std::vector<Value>& args,
                Value& out, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        if (!prepare(worker, sql, args, &stmt, error)) return false;
+        bool          cacheada = false;
+        if (!prepare(worker, sql, args, &stmt, &cacheada, error)) return false;
 
         Value::List rows;
         int cols = sqlite3_column_count(stmt);
@@ -87,7 +90,7 @@ public:
             if (rc == SQLITE_DONE) break;
             if (rc != SQLITE_ROW) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
-                sqlite3_finalize(stmt);
+                soltar(stmt, cacheada);
                 return false;
             }
             Value::Dict row;
@@ -105,7 +108,7 @@ public:
             rows.push_back(Value::dict(std::move(row)));
         }
 
-        sqlite3_finalize(stmt);
+        soltar(stmt, cacheada);
         out = Value::list(std::move(rows));
         return true;
     }
@@ -113,15 +116,16 @@ public:
     bool exec(size_t worker, const std::string& sql, const std::vector<Value>& args,
               long long& affected, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        if (!prepare(worker, sql, args, &stmt, error)) return false;
+        bool          cacheada = false;
+        if (!prepare(worker, sql, args, &stmt, &cacheada, error)) return false;
 
         int rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
             error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
-            sqlite3_finalize(stmt);
+            soltar(stmt, cacheada);
             return false;
         }
-        sqlite3_finalize(stmt);
+        soltar(stmt, cacheada);
         affected = sqlite3_changes(conns_[worker]);
         return true;
     }
@@ -136,29 +140,64 @@ public:
     }
 
     ~SqliteDriver() override {
+        // Las sentencias primero: sqlite3_close falla si quedan vivas.
+        for (auto& tabla : cache_)
+            for (auto& [_, stmt] : tabla) sqlite3_finalize(stmt);
         for (auto* db : conns_) if (db) sqlite3_close(db);
     }
 
+    // Devuelve la sentencia al sitio del que salio.  Una cacheada se resetea
+    // —hay que hacerlo si o si: en modo WAL una sentencia a medio recorrer
+    // mantiene abierta su instantanea de lectura— y una suelta se destruye.
+    static void soltar(sqlite3_stmt* stmt, bool cacheada) {
+        if (!stmt) return;
+        if (cacheada) { sqlite3_reset(stmt); sqlite3_clear_bindings(stmt); }
+        else          sqlite3_finalize(stmt);
+    }
+
 private:
+    // Sentencias preparadas, por conexion.
+    //
+    // Las consultas de un .odio son literales del fuente, asi que el juego es
+    // cerrado y pequeno.  Sin esto SQLite parseaba y planificaba el mismo SELECT
+    // decenas de miles de veces por segundo.
+    //
+    // Con el tope lleno, una consulta nueva se prepara y se destruye como antes:
+    // nunca se echa a una que ya esta dentro.  Asi, quien construya SQL a mano
+    // no puede reventar la memoria ni desalojar las buenas.
+    static constexpr size_t kMaxSentencias = 128;
+
     std::string           file_;
     int                   busy_timeout_ = 5000;
     std::vector<sqlite3*> conns_;
+    std::vector<std::unordered_map<std::string, sqlite3_stmt*>> cache_;
 
     // Los parametros van SIEMPRE por bind, nunca concatenados: es lo que hace
     // imposible la inyeccion de SQL desde Odio.
     bool prepare(size_t worker, const std::string& sql, const std::vector<Value>& args,
-                 sqlite3_stmt** out, std::string& error) {
+                 sqlite3_stmt** out, bool* cacheada, std::string& error) {
         sqlite3* db = conns_[worker];
-        if (sqlite3_prepare_v2(db, sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
-            error = std::string("sqlite: ") + sqlite3_errmsg(db);
-            return false;
+        auto&    tabla = cache_[worker];
+
+        if (auto it = tabla.find(sql); it != tabla.end()) {
+            *out      = it->second;
+            *cacheada = true;
+            sqlite3_reset(*out);
+            sqlite3_clear_bindings(*out);
+        } else {
+            if (sqlite3_prepare_v2(db, sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
+                error = std::string("sqlite: ") + sqlite3_errmsg(db);
+                return false;
+            }
+            *cacheada = tabla.size() < kMaxSentencias;
+            if (*cacheada) tabla.emplace(sql, *out);
         }
 
         int expected = sqlite3_bind_parameter_count(*out);
         if (expected != static_cast<int>(args.size())) {
             error = "sqlite: la consulta tiene " + std::to_string(expected) +
                     " parametro(s) y se pasaron " + std::to_string(args.size());
-            sqlite3_finalize(*out);
+            soltar(*out, *cacheada);
             *out = nullptr;
             return false;
         }
@@ -179,7 +218,7 @@ private:
             if (rc != SQLITE_OK) {
                 error = std::string("sqlite: al enlazar el parametro ") +
                         std::to_string(idx) + ": " + sqlite3_errmsg(db);
-                sqlite3_finalize(*out);
+                soltar(*out, *cacheada);
                 *out = nullptr;
                 return false;
             }
