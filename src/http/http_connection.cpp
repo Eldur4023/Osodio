@@ -1,7 +1,4 @@
 #include "http_connection.hpp"
-#ifdef OSODIO_HAS_HTTP2
-#  include "http2_connection.hpp"
-#endif
 #include "../../include/osodio/request.hpp"
 #include "../../include/osodio/response.hpp"
 #include "../../include/osodio/task.hpp"
@@ -70,28 +67,16 @@ static void parse_query(const std::string& qs,
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
                                osodio::DispatchFn dispatch,
-                               std::shared_ptr<std::atomic<int>> conn_count,
-                               SSL_CTX* ssl_ctx)
+                               std::shared_ptr<std::atomic<int>> conn_count)
     : fd_(fd)
     , loop_(loop)
     , dispatch_(std::move(dispatch))
     , conn_count_(std::move(conn_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); })
-{
-#ifndef OSODIO_HAS_TLS
-    (void)ssl_ctx;
-#else
-    if (ssl_ctx) {
-        ssl_ = SSL_new(ssl_ctx);
-        if (!ssl_) return; // close() will be called in start() → error path
-        SSL_set_fd(ssl_, fd_);
-        SSL_set_accept_state(ssl_);
-    }
-#endif // OSODIO_HAS_TLS
-}
+{}
 
 void HttpConnection::start() {
-    // Arm the header timeout — covers both TLS handshake + HTTP header receive.
+    // Arm the header timeout — Slowloris defence.
     auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
     header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
         if (auto self = self_weak.lock()) {
@@ -102,12 +87,6 @@ void HttpConnection::start() {
             }
         }
     });
-
-    // TLS: wait for first EPOLLIN before starting the handshake.
-    // (The fd is added to epoll by TcpServer immediately after start().)
-#ifdef OSODIO_HAS_TLS
-    if (ssl_) tls_handshaking_ = true;
-#endif
 }
 
 HttpConnection::~HttpConnection() {
@@ -117,9 +96,6 @@ HttpConnection::~HttpConnection() {
         if (header_tfd_  >= 0) ::close(header_tfd_);
         if (timeout_tfd_ >= 0) ::close(timeout_tfd_);
         if (file_fd_     >= 0) ::close(file_fd_);
-#ifdef OSODIO_HAS_TLS
-        if (ssl_) { SSL_shutdown(ssl_); SSL_free(ssl_); ssl_ = nullptr; }
-#endif
         ::close(fd_);
     }
 }
@@ -129,75 +105,11 @@ HttpConnection::~HttpConnection() {
 void HttpConnection::on_event(uint32_t events) {
     if (events & (EPOLLERR | EPOLLHUP)) { close(); return; }
 
-    // TLS handshake: route ALL events until SSL_accept() completes.
-#ifdef OSODIO_HAS_TLS
-    if (tls_handshaking_) { do_tls_handshake(); return; }
-#endif
-
     // While write_buf_ has data, only EPOLLOUT is armed.
     // Once the buffer is drained, EPOLLIN is re-armed (see on_write_complete).
     if (events & EPOLLOUT) do_write();
     if (events & EPOLLIN)  do_read();
 }
-
-// ── TLS handshake ─────────────────────────────────────────────────────────────
-//
-// Called for every epoll event while tls_handshaking_ is true.
-// SSL_accept() is non-blocking: it may need multiple EPOLLIN/EPOLLOUT rounds
-// before the handshake finishes.
-
-#ifdef OSODIO_HAS_TLS
-void HttpConnection::do_tls_handshake() {
-    int r = SSL_accept(ssl_);
-    if (r == 1) {
-        // Handshake complete — check ALPN-negotiated protocol.
-        const unsigned char* proto     = nullptr;
-        unsigned int         proto_len = 0;
-        SSL_get0_alpn_selected(ssl_, &proto, &proto_len);
-
-#ifdef OSODIO_HAS_HTTP2
-        if (proto_len == 2 && memcmp(proto, "h2", 2) == 0) {
-            // ── Upgrade to HTTP/2 ──────────────────────────────────────────
-            // Transfer fd and ssl* ownership to Http2Connection.
-            // The EventLoop copies the callback before calling it (see run()),
-            // so loop_.remove() + loop_.add() here are safe.
-            int  xfd  = fd_;
-            SSL* xssl = ssl_;
-            fd_   = -1;    // prevent close() from touching these
-            ssl_  = nullptr;
-            closed_ = true; // suppress any further activity on this object
-            loop_.cancel_timer(header_tfd_);
-            header_tfd_ = -1;
-
-            loop_.remove(xfd);
-
-            auto h2 = std::make_shared<Http2Connection>(
-                xfd, xssl, loop_, dispatch_, conn_count_);
-
-            if (!h2->init()) return; // Http2Connection::init() cleaned up on failure
-
-            loop_.add(xfd, EPOLLIN | EPOLLOUT,
-                      [h2](uint32_t ev) { h2->on_event(ev); });
-            return;
-        }
-#endif // OSODIO_HAS_HTTP2
-
-        // HTTP/1.1 (or no ALPN) — proceed normally.
-        tls_handshaking_ = false;
-        loop_.modify(fd_, EPOLLIN);
-        return;
-    }
-    int err = SSL_get_error(ssl_, r);
-    if (err == SSL_ERROR_WANT_READ) {
-        loop_.modify(fd_, EPOLLIN);   // already default, but be explicit
-    } else if (err == SSL_ERROR_WANT_WRITE) {
-        loop_.modify(fd_, EPOLLOUT);  // need to flush handshake data
-    } else {
-        // Fatal TLS error (bad client hello, cert mismatch, etc.)
-        close();
-    }
-}
-#endif // OSODIO_HAS_TLS
 
 // ── Read path ─────────────────────────────────────────────────────────────────
 
@@ -205,18 +117,6 @@ void HttpConnection::do_read() {
     char buf[16384];
     while (!closed_) {
         ssize_t n;
-#ifdef OSODIO_HAS_TLS
-        if (ssl_) {
-            n = SSL_read(ssl_, buf, sizeof(buf));
-            if (n <= 0) {
-                int err = SSL_get_error(ssl_, static_cast<int>(n));
-                if (err == SSL_ERROR_WANT_READ)  return; // wait for more data
-                if (err == SSL_ERROR_ZERO_RETURN) { close(); return; } // clean shutdown
-                if (err == SSL_ERROR_WANT_WRITE)  return; // rare renegotiation case
-                close(); return;
-            }
-        } else
-#endif
         {
             n = ::read(fd_, buf, sizeof(buf));
             if (n == 0) { close(); return; }
@@ -246,7 +146,10 @@ void HttpConnection::do_read() {
             continue;
         }
 
-        if (!parser_.feed(buf, static_cast<size_t>(n))) {
+        in_parser_ = true;
+        bool ok    = parser_.feed(buf, static_cast<size_t>(n));
+        in_parser_ = false;
+        if (!ok) {
             send_error(400, "Bad Request");
             close();
             return;
@@ -264,6 +167,14 @@ void HttpConnection::do_read() {
                 }
                 pending_buf_.append(buf + static_cast<size_t>(n) - un, un);
             }
+        }
+
+        // El handler era sincrono y ya respondio dentro de feed(): ahora que la
+        // pausa esta puesta, se puede cerrar el ciclo de verdad.
+        if (cycle_pending_) {
+            cycle_pending_ = false;
+            finish_cycle();
+            if (closed_) return;
         }
     }
 }
@@ -296,26 +207,13 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->_conn_fd     = fd_;
 
     // TLS-aware writer for SSE / WebSocket / any path that needs direct socket
-    // I/O.  Captures `this` via shared_from_this so the SSL* and fd stay valid
-    // for the lifetime of the lambda.  After close(), ssl_ is null and fd_ is
+    // I/O.  Captures `this` via shared_from_this so the fd stays valid
+    // for the lifetime of the lambda.  After close(), fd_ is
     // -1, so calls degrade to write(-1) which returns EBADF cleanly.
     {
         auto self = shared_from_this();
         req_ptr->_raw_write = [self](const char* data, size_t len) -> ssize_t {
             if (self->closed_) { errno = EBADF; return -1; }
-#ifdef OSODIO_HAS_TLS
-            if (self->ssl_) {
-                int n = SSL_write(self->ssl_, data, static_cast<int>(len));
-                if (n > 0) return n;
-                int err = SSL_get_error(self->ssl_, n);
-                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-                    errno = EAGAIN;
-                    return -1;
-                }
-                errno = EIO;
-                return -1;
-            }
-#endif
             return ::write(self->fd_, data, len);
         };
     }
@@ -367,9 +265,9 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
             // Log internally but do not expose e.what() to clients — it may
             // contain connection strings, file paths, or other internal detail.
             osodio::log().error("unhandled exception: ", e.what());
-            res_ptr->status(500).json({{"error", "Internal Server Error"}});
+            res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
         } catch (...) {
-            res_ptr->status(500).json({{"error", "Internal Server Error"}});
+            res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
         }
     }(req_ptr, res_ptr, dispatch_);
 
@@ -412,28 +310,11 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
         return;
     }
     if (!response.sendfile_path().empty()) {
-#ifdef OSODIO_HAS_TLS
-        if (ssl_) {
-            // TLS: sendfile(2) bypasses OpenSSL — must read file into userspace.
-            // Reject before allocating if the file would exceed the response cap.
-            if (response.sendfile_size() > kMaxResponseBytes) {
-                send_error(500, "File too large for encrypted transport");
-                return;
-            }
-            std::ifstream f(response.sendfile_path(), std::ios::binary);
-            if (!f) { send_error(500, "Cannot open file"); return; }
-            std::string file_body(
-                (std::istreambuf_iterator<char>(f)),
-                std::istreambuf_iterator<char>());
-            send_response(response.build() + file_body);
-            return;
-        }
-#endif
         // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             osodio::Response err;
-            err.status(500).json({{"error", "Cannot open file"}});
+            err.status(500).json_text(R"({"error":"Cannot open file"})");
             err.header("Connection", "close");
             keep_alive_ = false;
             send_response(err.build());
@@ -470,21 +351,6 @@ void HttpConnection::send_response(std::string data) {
 
     // Try immediate write
     ssize_t n;
-#ifdef OSODIO_HAS_TLS
-    if (ssl_) {
-        n = SSL_write(ssl_, data.data(), static_cast<int>(data.size()));
-        if (n <= 0) {
-            int err = SSL_get_error(ssl_, static_cast<int>(n));
-            if (err != SSL_ERROR_WANT_WRITE && err != SSL_ERROR_WANT_READ) {
-                close(); return;
-            }
-            write_buf_    = std::move(data);
-            write_offset_ = 0;
-            loop_.modify(fd_, EPOLLOUT);
-            return;
-        }
-    } else
-#endif
     {
         n = ::write(fd_, data.data(), data.size());
         if (n < 0) {
@@ -518,18 +384,6 @@ void HttpConnection::send_response(std::string data) {
 void HttpConnection::do_write() {
     while (write_offset_ < write_buf_.size()) {
         ssize_t n;
-#ifdef OSODIO_HAS_TLS
-        if (ssl_) {
-            n = SSL_write(ssl_,
-                          write_buf_.data()  + write_offset_,
-                          static_cast<int>(write_buf_.size() - write_offset_));
-            if (n <= 0) {
-                int err = SSL_get_error(ssl_, static_cast<int>(n));
-                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) return;
-                close(); return;
-            }
-        } else
-#endif
         {
             n = ::write(fd_,
                         write_buf_.data()  + write_offset_,
@@ -557,7 +411,7 @@ void HttpConnection::do_write() {
 }
 
 void HttpConnection::do_sendfile() {
-    // Only reachable when ssl_ is null (TLS path reads the file in finish_dispatch).
+    // Zero-copy kernel transfer, plaintext only.
     while (file_remaining_ > 0) {
         ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
                                std::min(file_remaining_, size_t{256 * 1024}));
@@ -591,6 +445,12 @@ void HttpConnection::on_write_complete() {
         return;
     }
 
+    // Dentro de feed() la pausa todavia no existe: aplazar el cierre de ciclo.
+    if (in_parser_) { cycle_pending_ = true; return; }
+    finish_cycle();
+}
+
+void HttpConnection::finish_cycle() {
     // Pipelining: drain any buffered bytes that belong to the next request.
     // Resume the parser, feed the saved bytes, and let the resulting dispatch
     // start a fresh response cycle.  We deliberately avoid re-arming EPOLLIN
@@ -643,7 +503,8 @@ void HttpConnection::on_write_complete() {
 
 void HttpConnection::send_error(int code, const char* msg) {
     osodio::Response r;
-    r.status(code).json({{"error", msg}});
+    // El mensaje viene de una lista fija del motor, sin comillas ni barras.
+    r.status(code).json_text(std::string(R"({"error":")") + msg + R"("})");
     r.header("Connection", "close");
     // send_error is only called for protocol-level errors; ignore keep-alive
     keep_alive_ = false;
@@ -673,13 +534,6 @@ void HttpConnection::close() {
     loop_.remove(fd_);
 
     // TLS shutdown: best-effort (non-blocking); we close the fd regardless.
-#ifdef OSODIO_HAS_TLS
-    if (ssl_) {
-        SSL_shutdown(ssl_);
-        SSL_free(ssl_);
-        ssl_ = nullptr;
-    }
-#endif
 
     ::close(fd_);
     if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }

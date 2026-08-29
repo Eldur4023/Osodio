@@ -4,7 +4,6 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
-#include <nlohmann/json.hpp>
 
 // ── Metrics ────────────────────────────────────────────────────────────────────
 //
@@ -73,19 +72,21 @@ public:
         return ss.str();
     }
 
-    // JSON-friendly summary for /health.
-    nlohmann::json to_health_json() const {
+    // Resumen de /health, ya en texto.  Son cuatro campos de tipos conocidos:
+    // montar un arbol JSON para esto era pasar por un intermediario que no
+    // aportaba nada.
+    std::string to_health_text() const {
         using Clock = std::chrono::steady_clock;
         double uptime = std::chrono::duration<double>(Clock::now() - started_at_).count();
         int    conns  = active_connections_
                         ? active_connections_->load(std::memory_order_relaxed)
                         : 0;
-        return {
-            {"status",             "ok"},
-            {"uptime_seconds",     uptime},
-            {"active_connections", conns},
-            {"requests_total",     requests_total_.load(std::memory_order_relaxed)},
-        };
+        std::ostringstream ss;
+        ss << "{\"status\":\"ok\",\"uptime_seconds\":" << uptime
+           << ",\"active_connections\":" << conns
+           << ",\"requests_total\":" << requests_total_.load(std::memory_order_relaxed)
+           << "}";
+        return ss.str();
     }
 
     // ── Framework-internal ──────────────────────────────────────────────────────

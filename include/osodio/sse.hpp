@@ -33,34 +33,18 @@ namespace osodio {
 //
 class SSEWriter {
 public:
-    // HTTP/1.1 path — writes through req._raw_write (TLS-aware) so SSE works
-    // identically over plaintext HTTP/1.1 and HTTPS+HTTP/1.1.
+    // Writes through req._raw_write, bypassing the buffered response pipeline
+    // so each event goes out as soon as it is produced.
     SSEWriter(std::function<ssize_t(const char*, size_t)> writer,
               std::shared_ptr<CancellationToken> token)
         : writer_(std::move(writer)), token_(std::move(token)) {}
 
-    // HTTP/2 path — routes through the nghttp2 DATA frame pipeline.
-    SSEWriter(std::shared_ptr<Request::H2SSEContext> ctx,
-              std::shared_ptr<CancellationToken>     token)
-        : token_(std::move(token)), h2_ctx_(std::move(ctx)) {}
-
-    // Non-copyable, movable — move clears h2_ctx_ so the destructor
-    // doesn't end the stream twice.
     SSEWriter(const SSEWriter&)            = delete;
     SSEWriter& operator=(const SSEWriter&) = delete;
     SSEWriter(SSEWriter&& o) noexcept
-        : writer_(std::move(o.writer_)), token_(std::move(o.token_)),
-          h2_ctx_(std::move(o.h2_ctx_)), ended_(o.ended_)
-    { o.ended_ = true; }
+        : writer_(std::move(o.writer_)), token_(std::move(o.token_))
+    {}
     SSEWriter& operator=(SSEWriter&&) = delete;
-
-    // On HTTP/2, closing the SSEWriter sends the DATA+END_STREAM frame.
-    ~SSEWriter() {
-        if (h2_ctx_ && !ended_) {
-            ended_ = true;
-            h2_ctx_->end();
-        }
-    }
 
     // Send a "data: <text>\n\n" event.
     // Returns false if the connection is gone.
@@ -88,9 +72,7 @@ public:
 
 private:
     std::function<ssize_t(const char*, size_t)> writer_;
-    std::shared_ptr<CancellationToken>     token_;
-    std::shared_ptr<Request::H2SSEContext> h2_ctx_;
-    bool ended_ = false;
+    std::shared_ptr<CancellationToken>          token_;
 
     // Strip CR/LF from a string_view to prevent SSE field injection.
     static std::string sanitize_field(std::string_view s) {
@@ -127,13 +109,6 @@ private:
     bool raw_write(const std::string& frame) {
         if (!is_open()) return false;
 
-        // HTTP/2 path: enqueue into the nghttp2 DATA provider.
-        if (h2_ctx_) {
-            h2_ctx_->push(frame);
-            return true;
-        }
-
-        // HTTP/1.1 path: write through the TLS-aware writer.
         // EAGAIN on the first byte → drop this event (no bytes sent yet, stream intact).
         // EAGAIN after a partial write → stream is corrupted; treat as fatal.
         if (!writer_) return false;
@@ -167,22 +142,10 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
        .header("Cache-Control",    "no-cache")
        .header("X-Accel-Buffering","no");  // disable nginx / proxy buffering
 
-    // ── HTTP/2 path ───────────────────────────────────────────────────────────
-    // Http2Connection sets _h2_sse_ctx on every stream.  We submit a HEADERS
-    // frame immediately (no END_STREAM) and hand back an SSEWriter that pushes
-    // DATA frames via the nghttp2 data provider.
-    if (req._h2_sse_ctx) {
-        req._h2_sse_ctx->begin();
-        res.mark_sse_started();
-        return SSEWriter(req._h2_sse_ctx, req.cancel_token);
-    }
-
-    // ── HTTP/1.1 path ─────────────────────────────────────────────────────────
     res.header("Connection", "keep-alive");
 
-    // Build and write headers through the TLS-aware writer — bypasses write_buf_
-    // so the headers go out immediately, but still respects TLS framing when
-    // running under HTTPS.
+    // Write the headers straight to the socket, bypassing write_buf_, so they
+    // go out before the first event is produced.
     std::string headers = res.build_sse_headers();
     if (req._raw_write) {
         size_t written = 0;

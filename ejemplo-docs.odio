@@ -1,0 +1,39 @@
+app:
+    name    "API de ejemplo"
+    version "2.0.0"
+    port    8085
+    docs
+
+class Articulo:
+    int     id
+    string  titulo
+    string? resumen
+    int     vistas
+
+    validate:
+        titulo != ""   "titulo: obligatorio"
+        vistas >= 0    "vistas: no puede ser negativo"
+
+get endpoint("/articulos", int page = 1, int limit = 20):
+    return { "page": page, "limit": limit }
+
+get endpoint("/articulos/:id", int id):
+    return { "id": id }
+
+post endpoint("/articulos", Articulo a):
+    return { "creado": a.id }
+
+group("/admin"):
+    require query("k", "") == "x" else status(403)
+
+    delete endpoint("/articulos/:id", int id):
+        return status(204)
+
+sse endpoint("/eventos"):
+    sse.send("hola")
+
+post endpoint("/subir", File f):
+    return { "n": f.filename }
+
+on error 404:
+    return { "no": true }

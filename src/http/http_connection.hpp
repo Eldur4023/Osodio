@@ -7,22 +7,13 @@
 #include <osodio/core/event_loop.hpp>
 #include "../../include/osodio/types.hpp"
 #include "../../include/osodio/cancel.hpp"
-#ifdef OSODIO_HAS_TLS
-#  include <openssl/ssl.h>
-#else
-   struct ssl_ctx_st; typedef struct ssl_ctx_st SSL_CTX;  // incomplete forward decls
-   struct ssl_st;     typedef struct ssl_st     SSL;
-#endif
 
 namespace osodio::http {
 
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
-    // ssl_ctx: when non-null, the connection performs a TLS handshake before
-    // parsing HTTP.  ssl_ctx is not owned; its lifetime must exceed this object.
     HttpConnection(int fd, core::EventLoop& loop, osodio::DispatchFn dispatch,
-                   std::shared_ptr<std::atomic<int>> conn_count = nullptr,
-                   SSL_CTX* ssl_ctx = nullptr);
+                   std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~HttpConnection();
 
     void start();
@@ -36,13 +27,6 @@ private:
     std::shared_ptr<osodio::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_         = false;
-
-    // ── TLS state ─────────────────────────────────────────────────────────────
-    // ssl_ is non-null only when app.tls() was configured.
-    // tls_handshaking_ is true from start() until SSL_accept() returns 1.
-    // During that window, on_event() routes all events to do_tls_handshake().
-    SSL* ssl_              = nullptr;
-    bool tls_handshaking_  = false;
 
     // Weak reference to the current request — used in WebSocket mode to route
     // do_read() bytes into the WS frame parser instead of the HTTP parser.
@@ -71,6 +55,15 @@ private:
     bool                       in_flight_ = false;
     static constexpr size_t    kMaxPendingBuf = 64 * 1024;  // 64 KB pipelined
 
+    // Un handler sincrono responde DENTRO de parser_.feed(): llhttp llama a
+    // on_message_complete, que dispatch()a, y la respuesta se escribe entera
+    // antes de que el callback devuelva HPE_PAUSED.  Si el cierre de ciclo
+    // corriera ahi, haria resume() sobre una pausa que aun no existe y la
+    // conexion se quedaria pausada para siempre.  Asi que se aplaza hasta que
+    // feed() retorna y la pausa ya esta puesta.
+    bool in_parser_     = false;
+    bool cycle_pending_ = false;
+
     // ── Timeouts ──────────────────────────────────────────────────────────────
     // kHeaderTimeoutMs: armed at construction; fires 408 if complete headers are
     //   not received within this window (Slowloris defence).
@@ -94,8 +87,11 @@ private:
     void do_read();
     void do_write();
     void do_sendfile();
-    void do_tls_handshake();
     void on_write_complete();
+
+    // Cierre del ciclo de respuesta: resume el parser, reproduce lo que hubiera
+    // llegado por pipelining, rearma el temporizador de cabeceras y EPOLLIN.
+    void finish_cycle();
 
     // Begin writing `data`; buffers any unsent remainder and arms EPOLLOUT.
     void send_response(std::string data);

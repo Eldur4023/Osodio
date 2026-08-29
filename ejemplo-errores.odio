@@ -1,0 +1,25 @@
+app:
+    port      8089
+    templates "./templates"
+
+get endpoint("/"):
+    return { "ok": true }
+
+get endpoint("/prohibido"):
+    return status(403)
+
+get endpoint("/revienta/:n", int n):
+    return { "malo": n + "texto" }
+
+
+# Pagina propia para el 404, con la ruta que se pidio.
+on error 404:
+    return render("404.html", ruta=request.path, metodo=request.method)
+
+# Manejador especifico por codigo.
+on error 403:
+    return { "error": "no puedes entrar aqui", "codigo": error.code }
+
+# Y el global para todo lo demas.
+on error:
+    return { "error": "algo se rompio", "codigo": error.code, "en": request.path }

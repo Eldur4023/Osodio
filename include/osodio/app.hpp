@@ -7,8 +7,6 @@
 #include "types.hpp"
 #include "router.hpp"
 #include "openapi.hpp"
-#include "di.hpp"
-#include "group.hpp"
 #include "websocket.hpp"
 #include "metrics.hpp"
 
@@ -21,15 +19,32 @@ public:
 
     // Route registration — support both :param and {param} styles.
     // Each registration also captures compile-time type info for OpenAPI generation.
-    template<typename F> App& get   (std::string path, F&& h) { register_route("GET",    path, h); router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& post  (std::string path, F&& h) { register_route("POST",   path, h); router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& put   (std::string path, F&& h) { register_route("PUT",    path, h); router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& patch (std::string path, F&& h) { register_route("PATCH",  path, h); router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& del   (std::string path, F&& h) { register_route("DELETE", path, h); router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& get   (std::string path, F&& h) { router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& post  (std::string path, F&& h) { router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& put   (std::string path, F&& h) { router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& patch (std::string path, F&& h) { router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
+    template<typename F> App& del   (std::string path, F&& h) { router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
     template<typename F> App& any   (std::string path, F&& h) {                                     router_.add("*",      std::move(path), std::forward<F>(h)); return *this; }
 
     // Middleware (applied in order for every request)
     App& use(Middleware m) { middlewares_.push_back(std::move(m)); return *this; }
+
+    // ── Cierre ───────────────────────────────────────────────────────────────
+    //
+    // Se invoca una vez, en el hilo del event loop principal, cuando las
+    // conexiones ya estan drenadas pero ANTES de parar los loops.
+    //
+    // Es el unico punto seguro para apagar cualquier cosa que tenga hilos
+    // propios posteando al loop —el pool de un modulo de base de datos, por
+    // ejemplo—: mientras corre, los loops siguen vivos, asi que un post() que
+    // llegue tarde todavia encuentra su destino.  Cuando vuelve, ya no puede
+    // quedar nadie posteando y parar los loops es seguro.
+    //
+    // Bloquea el cierre mientras dure, asi que debe terminar.
+    App& on_before_stop(std::function<void()> fn) {
+        before_stop_ = std::move(fn);
+        return *this;
+    }
 
     // Serve a directory of static files under a URL prefix.
     //   app.serve_static("/static", "./public")
@@ -77,71 +92,6 @@ public:
         return *this;
     }
 
-#ifdef OSODIO_HAS_TLS
-    // ── TLS ──────────────────────────────────────────────────────────────────
-    //
-    // Enable HTTPS.  Must be called before run().
-    //
-    //   app.tls("server.crt", "server.key").run(443);
-    //
-    // cert_path and key_path are PEM files.
-    // Throws std::runtime_error if the files can't be loaded or OpenSSL fails.
-    //
-    App& tls(std::string cert_path, std::string key_path) {
-        ssl_cert_ = std::move(cert_path);
-        ssl_key_  = std::move(key_path);
-        return *this;
-    }
-#endif
-
-    // ── OpenAPI / Swagger UI ─────────────────────────────────────────────────
-    //
-    // Opt-in: call enable_docs() to expose the spec and the Swagger UI.
-    //
-    //   app.enable_docs();                  // /openapi.json + /docs
-    //   app.enable_docs("/api.json", "/ui"); // custom paths
-    //
-    App& enable_docs(std::string spec_path = "/openapi.json",
-                     std::string ui_path   = "/docs") {
-        openapi_spec_path_ = std::move(spec_path);
-        openapi_ui_path_   = std::move(ui_path);
-        openapi_enabled_   = true;
-        return *this;
-    }
-
-    // ── Dependency injection ─────────────────────────────────────────────────
-    //
-    // Register a singleton — the same shared_ptr is returned for every request.
-    //   app.provide(std::make_shared<Database>(conn_str));
-    //
-    template<typename T>
-    App& provide(std::shared_ptr<T> instance) {
-        container_.singleton<T>(std::move(instance));
-        return *this;
-    }
-
-    // Register a transient factory — called once per Inject<T> resolution.
-    //   app.provide<Logger>([]{ return std::make_shared<Logger>(); });
-    //
-    template<typename T, typename F>
-    App& provide(F&& factory) {
-        container_.transient<T>(std::forward<F>(factory));
-        return *this;
-    }
-
-    // ── Route groups ─────────────────────────────────────────────────────────
-    //
-    // Creates a group with a URL prefix. Routes registered on the group are
-    // prefixed automatically. Middleware added via group.use() runs only for
-    // routes in that group, after global middlewares.
-    //
-    //   auto api = app.group("/api/v1");
-    //   api.use(auth);
-    //   api.get("/users", list_users);   // → GET /api/v1/users
-    //
-    RouteGroup group(std::string prefix) {
-        return RouteGroup(std::move(prefix), router_, openapi_routes_);
-    }
 
     // ── WebSocket ────────────────────────────────────────────────────────────
     //
@@ -181,8 +131,14 @@ public:
         return ws(std::move(path), std::forward<F>(fn), WSOptions{});
     }
 
+    // Construye el handler del upgrade sin registrarlo.  Lo usa ws() y tambien
+    // el frontend de Odio, que tiene su propio router y necesita la misma
+    // logica de handshake sin pasar por el router del motor.
+    //
+    // `fn` recibe la conexion ya establecida junto al Request y el Response de
+    // la peticion que la origino; tras el upgrade, el Response no debe tocarse.
     template<typename F>
-    App& ws(std::string path, F&& fn, WSOptions opts) {
+    static Handler make_ws_handler(F&& fn, WSOptions opts) {
         auto wrapper = [fn = std::forward<F>(fn), opts = std::move(opts)]
                        (Request& req, Response& res) mutable -> Task<void> {
 
@@ -196,34 +152,12 @@ public:
                     }
                 }
                 if (!ok) {
-                    res.status(403).json({{"error", "Origin not allowed"}});
+                    res.status(403).json_text(R"({"error":"Origin not allowed"})");
                     co_return;
                 }
             }
 
-            // ── HTTP/2 path (RFC 8441 — CONNECT + :protocol: websocket) ──────
-            if (req._h2_ws_ctx) {
-                auto ws_state = std::make_shared<detail::WSState>();
-                ws_state->token   = req.cancel_token;
-                ws_state->loop    = req.loop;
-                // Outgoing WS frames are sent as nghttp2 DATA chunks.
-                ws_state->send_fn = [ctx = req._h2_ws_ctx](std::string frame) {
-                    ctx->push(std::move(frame));
-                };
-                // begin() sends 200 HEADERS and wires incoming DATA → feed()
-                req._h2_ws_ctx->begin([ws_state](const uint8_t* data, size_t len) {
-                    ws_state->feed(data, len);
-                });
-                res.mark_ws_started();
-
-                WSConnection ws_conn(ws_state);
-                co_await fn(std::move(ws_conn));
-
-                req._h2_ws_ctx->close_stream();
-                co_return;
-            }
-
-            // ── HTTP/1.1 path (RFC 6455 — 101 Switching Protocols) ───────────
+            // ── RFC 6455 — 101 Switching Protocols ───────────────────────────
             auto upgrade = req.header("upgrade");
             auto key     = req.header("sec-websocket-key");
 
@@ -257,7 +191,7 @@ public:
             if (!upgrade || !has_websocket_token(*upgrade) || !key) {
                 res.status(426)
                    .header("Sec-WebSocket-Version", "13")
-                   .json({{"error","WebSocket upgrade required"}});
+                   .json_text(R"({"error":"WebSocket upgrade required"})");
                 co_return;
             }
 
@@ -267,12 +201,12 @@ public:
             if (!ws_ver || *ws_ver != "13") {
                 res.status(426)
                    .header("Sec-WebSocket-Version", "13")
-                   .json({{"error","Unsupported WebSocket version"}});
+                   .json_text(R"({"error":"Unsupported WebSocket version"})");
                 co_return;
             }
 
             if (!req._raw_write) {
-                res.status(500).json({{"error","no raw writer for WS upgrade"}});
+                res.status(500).json_text(R"({"error":"no raw writer for WS upgrade"})");
                 co_return;
             }
 
@@ -323,10 +257,20 @@ public:
             res.mark_ws_started();
 
             WSConnection ws_conn(ws_state);
-            co_await fn(std::move(ws_conn));
+            co_await fn(std::move(ws_conn), req, res);
         };
-        // HTTP/1.1 uses GET; HTTP/2 CONNECT is routed as GET by dispatch_stream
-        router_.add("GET", std::move(path), std::move(wrapper));
+        return Handler(std::move(wrapper));
+    }
+
+    template<typename F>
+    App& ws(std::string path, F&& fn, WSOptions opts) {
+        router_.add_internal("GET", std::move(path),
+            make_ws_handler(
+                [fn = std::forward<F>(fn)]
+                (WSConnection c, Request&, Response&) mutable -> Task<void> {
+                    co_await fn(std::move(c));
+                },
+                std::move(opts)));
         return *this;
     }
 
@@ -337,7 +281,8 @@ public:
     //
     App& enable_health(std::string path = "/health") {
         router_.add("GET", std::move(path), [](Request&, Response& res) {
-            res.json(Metrics::instance().to_health_json());
+            res.header("Content-Type", "application/json; charset=utf-8")
+               .send(Metrics::instance().to_health_text());
         });
         return *this;
     }
@@ -374,12 +319,6 @@ public:
     struct StaticMount { std::string prefix; std::string root; bool spa = false; };
 
 private:
-    // Called once per route registration to capture type metadata for OpenAPI.
-    template<typename F>
-    void register_route(const std::string& method, const std::string& path, const F&) {
-        openapi_routes_.push_back(DocBuilder<std::decay_t<F>>::build(method, path));
-    }
-
     Router                                    router_;
     std::vector<Middleware>                   middlewares_;
     std::vector<StaticMount>                  static_mounts_;
@@ -388,25 +327,12 @@ private:
     std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;
     AsyncErrorHandler                          catchall_async_error_handler_;
     std::string                               templates_dir_ = "./templates";
+    std::function<void()>                     before_stop_;
 
-    // OpenAPI state
-    std::vector<RouteDoc>                     openapi_routes_;
     std::string                               api_title_       = "Osodio API";
     std::string                               api_version_     = "0.1.0";
-    bool                                      openapi_enabled_ = false;
-    std::string                               openapi_spec_path_ = "/openapi.json";
-    std::string                               openapi_ui_path_   = "/docs";
-
-    // Service container — populated before run(), read-only after
-    ServiceContainer                          container_;
-
     int                                       max_connections_ = 10'000;
 
-#ifdef OSODIO_HAS_TLS
-    // TLS — empty means plain HTTP
-    std::string                               ssl_cert_;
-    std::string                               ssl_key_;
-#endif
 
     // Set to true by prepare() so docs routes are only registered once.
     bool                                      prepared_ = false;
