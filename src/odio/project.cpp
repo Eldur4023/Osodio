@@ -113,6 +113,47 @@ bool const_eval(const Expr& e, nlohmann::json& out) {
     }
 }
 
+// Igual, pero produciendo un Value en vez de un arbol nlohmann.
+//
+// La diferencia importa para el orden de las claves: nlohmann guarda sus
+// objetos en un std::map y las ordena alfabeticamente, mientras que el VM las
+// devuelve en el orden en que estan escritas.  Si las rutas declarativas usaran
+// nlohmann, dos rutas del mismo .odio ordenarian distinto.
+bool const_eval_valor(const Expr& e, Value& out) {
+    switch (e.kind) {
+        case ExprKind::StringLit: out = Value::str(e.text);          return true;
+        case ExprKind::IntLit:    out = Value::integer(e.int_value); return true;
+        case ExprKind::FloatLit:  out = Value::real(e.float_value);  return true;
+        case ExprKind::BoolLit:   out = Value::boolean(e.bool_value); return true;
+        case ExprKind::NullLit:   out = Value::null();               return true;
+
+        case ExprKind::ListLit: {
+            Value::List l;
+            l.reserve(e.items.size());
+            for (const auto& item : e.items) {
+                Value v;
+                if (!const_eval_valor(*item, v)) return false;
+                l.push_back(std::move(v));
+            }
+            out = Value::list(std::move(l));
+            return true;
+        }
+        case ExprKind::DictLit: {
+            Value::Dict d;
+            for (const auto& entry : e.entries) {
+                if (entry.key->kind != ExprKind::StringLit) return false;
+                Value v;
+                if (!const_eval_valor(*entry.value, v)) return false;
+                d[entry.key->text] = std::move(v);
+            }
+            out = Value::dict(std::move(d));
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 // Nombre de la funcion llamada, si es una llamada directa a un identificador.
 const std::string* callee_name(const Expr& e) {
     if (e.kind != ExprKind::Call || !e.object) return nullptr;
@@ -127,12 +168,12 @@ using Action = std::function<void(osodio::Request&, osodio::Response&)>;
 // evaluacion en runtime.
 Action compile_return(const Expr& e, DiagnosticBag& diags) {
     // return { ... }  /  return "literal"  → cuerpo JSON
-    nlohmann::json literal;
-    if (const_eval(e, literal)) {
+    Value literal;
+    if (const_eval_valor(e, literal)) {
         // El cuerpo se serializa AQUI, una vez.  Antes se guardaba el arbol
         // nlohmann y se hacia dump() en cada peticion: una ruta que se resuelve
         // entera al compilar no deberia serializar nada en caliente.
-        std::string cuerpo = literal.dump();
+        std::string cuerpo = literal.to_json_text();
         return [cuerpo](osodio::Request&, osodio::Response& res) {
             res.header("Content-Type", "application/json; charset=utf-8").send(cuerpo);
         };
@@ -234,12 +275,12 @@ Action compile_return(const Expr& e, DiagnosticBag& diags) {
             diags.error(e.loc, "json() espera un unico argumento");
             return {};
         }
-        nlohmann::json v;
-        if (!const_eval(*e.args[0].value, v)) {
+        Value v;
+        if (!const_eval_valor(*e.args[0].value, v)) {
             diags.error(e.loc, "json() con valor no constante: requiere el VM");
             return {};
         }
-        std::string cuerpo = v.dump();
+        std::string cuerpo = v.to_json_text();
         return [cuerpo](osodio::Request&, osodio::Response& res) {
             res.header("Content-Type", "application/json; charset=utf-8").send(cuerpo);
         };
