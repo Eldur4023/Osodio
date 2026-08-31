@@ -375,17 +375,19 @@ osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoi
 
 Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
 funcionan, están cubiertos por los ejemplos del repositorio (`ejemplo-*.odio`) y por una
-suite de regresión de 65 pruebas que ejerce el binario por el socket, tal y como se usa,
-más 25 del módulo de `mysql` contra un servidor real —que se saltan solas si no lo hay— y
-48 del motor de plantillas:
+**227 pruebas** repartidas en seis suites: 65 de regresión que ejercen el binario por el
+socket tal y como se usa, 48 del motor de plantillas, 19 de la traducción de marcadores, y
+37 + 26 + 32 de los módulos de `sqlite`, `mysql` y `postgres` contra motores reales —las de
+mysql y postgres se saltan solas si no hay servidor—:
 
 ```bash
 cmake --build build --target osodio-bin && ctest --test-dir build
 ```
 
 Los tres módulos de base de datos —`sqlite`, `postgres` y `mysql`— están probados contra
-motores reales, con una batería propia cada uno —25, 32 y 35 pruebas— que se salta sola si
-el servidor no está.
+motores reales, con una batería propia cada uno —37, 26 y 32 pruebas— que se salta sola si
+el servidor no está. Las tres pasan también bajo AddressSanitizer con detección de fugas, y
+bajo ThreadSanitizer con 60 clientes concurrentes.
 
 El diseño completo, con las decisiones tomadas y sus motivos, está en
 [OSODIO-2.0.md](OSODIO-2.0.md). La gramática formal del lenguaje, en

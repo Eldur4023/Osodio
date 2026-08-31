@@ -105,10 +105,20 @@ cd build && ctest --output-on-failure
 tests/run_tests.sh ~/osodio-build/osodio
 ```
 
-65 pruebas que levantan el binario contra ficheros `.odio` reales y comprueban las
-respuestas por el socket, más 48 del motor de plantillas. La suite de `mysql` —25 pruebas
-contra un servidor de verdad— se salta sola si no hay uno levantado; las instrucciones para
-montarlo están en la cabecera de `tests/run_mysql.sh`. La suite no enlaza nada del proyecto: prueba lo que se despliega,
+227 pruebas en seis suites:
+
+| suite | qué cubre | |
+|---|---|---|
+| `regresion` | el binario por el socket, con `.odio` reales | 65 |
+| `plantillas` | compilar y renderizar, en proceso | 48 |
+| `sqlite` | tipos, límites y caché de sentencias | 37 |
+| `postgres` | tipos, marcadores y transacciones | 32 |
+| `mysql` | ídem | 26 |
+| `marcadores` | la traducción de `?` a `$1` | 19 |
+
+Las de `mysql` y `postgres` necesitan un servidor y **se saltan solas** si no lo hay; las
+instrucciones para montarlo están en la cabecera de cada guion. La de `sqlite` crea su
+propio esquema y corre siempre. La suite no enlaza nada del proyecto: prueba lo que se despliega,
 no una versión instrumentada de ello.
 
 ---
