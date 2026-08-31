@@ -13,8 +13,8 @@
 >
 > Para la guía práctica de cómo montar una aplicación —estructura de proyecto, cómo se
 > arranca, qué prueba el binario de sí mismo— está [GUIDE.md](GUIDE.md). Para las decisiones
-> de diseño y sus motivos, [OSODIO-2.0.md](OSODIO-2.0.md). Este documento es el tercero: el
-> lenguaje en sí, de arriba abajo, sin dar nada por sabido.
+> de diseño y sus motivos, [README.md](README.md#decisiones-de-diseño). Este documento es el
+> tercero: el lenguaje en sí, de arriba abajo, sin dar nada por sabido.
 
 ---
 
@@ -757,10 +757,10 @@ de un bloque `group`, aunque en el fuente aparezcan entremezcladas con ellas.
 No existe concepto de *middleware* en Odio 2.0: `require expr else respuesta` (§27) es la
 única forma de interceptar una petición antes de que llegue al handler, y es una expresión
 condicional con una salida, no una cadena de funciones que se pueda componer arbitrariamente.
-La razón está en [OSODIO-2.0.md](OSODIO-2.0.md): CORS, compresión, *rate limiting* y cabeceras
-de seguridad se delegan al proxy inverso a propósito, y lo único que le quedaba al lenguaje
-por resolver era "¿puede esta petición seguir, o no?" — que es exactamente lo que expresa
-`require`.
+La razón está en [README.md](README.md#corre-detrás-de-un-reverse-proxy): CORS, compresión,
+*rate limiting* y cabeceras de seguridad se delegan al proxy inverso a propósito, y lo único
+que le quedaba al lenguaje por resolver era "¿puede esta petición seguir, o no?" — que es
+exactamente lo que expresa `require`.
 
 ## 20. `on error`
 
@@ -1406,7 +1406,7 @@ List<string> xs = []
 El `[]` de la derecha toma su tipo elemento (`string`) del `List<string>` de la izquierda.
 Sin esto habría que escribir algo como `List<string> xs = List<string>()`, que es
 exactamente la ceremonia que Odio intenta evitar en cada decisión de diseño del lenguaje —
-ver la discusión completa de "por qué" en [OSODIO-2.0.md](OSODIO-2.0.md).
+ver [README.md](README.md#decisiones-de-diseño) para el resto de decisiones y sus motivos.
 
 ---
 

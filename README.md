@@ -79,6 +79,14 @@ La versión anterior de este README despotricaba contra Node y Python por su ren
 Ese argumento sigue en pie, y por eso conviene ser preciso sobre qué se interpreta aquí y
 qué no.
 
+```
+osodio ./app          →  lex → parse → check → emitir
+                       ↓
+                    tabla de rutas + bytecode  (construido UNA vez, no por peticion)
+                       ↓
+                    N hilos, cada uno: event loop + VM propio, SO_REUSEPORT
+```
+
 **El stack de I/O sigue siendo nativo y multinúcleo.** Un event loop por core, `SO_REUSEPORT`,
 sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON lo lee y lo escribe Osodio, sin
 árbol intermedio; el servicio de estáticos es `sendfile(2)`. Nada de eso cambia.
@@ -178,6 +186,47 @@ Y donde el tipo se conoce, también lo es equivocarse de método o de campo: `no
 sobre un `string`, o `p.noexiste` sobre una clase, no llegan a arrancar. Eso alcanza al
 interior de las plantillas, porque `render()` le pasa los tipos de sus argumentos al
 compilador de plantillas.
+
+---
+
+## Decisiones de diseño
+
+| Tema | Decisión |
+|---|---|
+| Auth | HMAC-SHA256 vendorizado, HS256. Sin OpenSSL. Se pierde RS256 |
+| Tiempo real | SSE **y** WebSockets |
+| Transporte | HTTP/1.1 en claro. TLS y HTTP/2 al reverse proxy |
+| Ejecución | Bytecode sobre VM propio, un VM por hilo de event loop |
+| Compilación | Interna al binario. Sin toolchain externo, sin transpilación a C++ |
+| Persistencia | Módulos `sqlite`, `postgres` y `mysql` sobre pool de hilos y `await`. Marcador `?` en los tres —el driver de postgres lo traduce a `$1`— |
+| Plantillas | Motor propio, con la forma de Jinja2 y expresiones de Odio dentro |
+| Tipos | `class` para forma conocida y validada, `Json` para lo dinámico, contenedores para lo homogéneo — sin `Any`, que envenenaría el sistema de tipos entero |
+| Genéricos | Solo contenedores nativos, borrados en compilación. Sin clases genéricas de usuario |
+| Config | En Odio, bloque `app:`, una sola vez en el proyecto. Sin YAML ni TOML — un lenguaje que aprender, no dos, y un puerto mal escrito es error de compilación |
+| Layout | `osodio ./mi-app` lee el árbol recursivamente. Orden indiferente, compilación en dos pasadas |
+
+### Por qué un motor de plantillas propio
+
+La primera decisión fue Jinja2Cpp: implementa Jinja2 de verdad —la sintaxis que escribe la
+gente y la que generan por defecto los LLM—, no el subconjunto de una cabecera única. El
+coste se asumió a sabiendas: Boost, fmt, rapidjson y tres bibliotecas más, traídas con
+`FetchContent`, rompiendo la promesa de "cero red durante `cmake`" en el primer `configure`.
+
+Se revirtió. El motor es ahora propio: conserva la forma de Jinja2 —`{{ }}`, `{% if %}`,
+`{% for %}`, `{% include %}`, `{% extends %}`, `|safe`— pero lo que va dentro de las llaves
+son expresiones de Odio, compiladas por el mismo checker que el resto del lenguaje. Una
+errata en una plantilla es un error de `osodio --check`, con fichero y línea, no un fallo en
+producción. Ningún motor externo puede dar eso, porque no conoce el lenguaje de la app.
+
+| | Con Jinja2Cpp | Con motor propio |
+|---|---|---|
+| Binario | 7.951.752 B | **1.592.032 B** |
+| `build/_deps` | ~800 MB | **no existe** |
+| Compilar desde cero | minutos | **19 s** |
+| Red en el primer `cmake` | obligatoria | **ninguna** |
+
+Se pierde `{{ super() }}` y los filtros de Jinja2 (`|upper`, `|join`...), que aquí son
+métodos de Odio.
 
 ---
 
@@ -375,10 +424,11 @@ osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoi
 
 Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
 funcionan, están cubiertos por [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md) —con un programa completo
-comentado por cada caso de uso— y por una **230 pruebas** repartidas en seis suites: 68 de regresión que ejercen el binario por el
-socket tal y como se usa, 48 del motor de plantillas, 19 de la traducción de marcadores, y
-37 + 26 + 32 de los módulos de `sqlite`, `mysql` y `postgres` contra motores reales —las de
-mysql y postgres se saltan solas si no hay servidor—:
+comentado por cada caso de uso— y por una **246 pruebas** repartidas en seis suites: 79 de regresión que ejercen el binario por el
+socket tal y como se usa —incluida la matriz de enlace de parámetros de
+[bug-hunting.md](bug-hunting.md)—, 48 del motor de plantillas, 19 de la traducción de
+marcadores, y 37 + 29 + 34 de los módulos de `sqlite`, `mysql` y `postgres` contra motores
+reales —las de mysql y postgres se saltan solas si no hay servidor—:
 
 ```bash
 cmake --build build --target osodio-bin && ctest --test-dir build
@@ -389,6 +439,20 @@ motores reales, con una batería propia cada uno —37, 26 y 32 pruebas— que s
 el servidor no está. Las tres pasan también bajo AddressSanitizer con detección de fugas, y
 bajo ThreadSanitizer con 60 clientes concurrentes.
 
-El diseño completo, con las decisiones tomadas y sus motivos, está en
-[OSODIO-2.0.md](OSODIO-2.0.md). La gramática formal del lenguaje, en
-[ODIO-GRAMMAR.md](ODIO-GRAMMAR.md).
+Contra un PostgreSQL 18 real, con `pool 4` y consultas de 1 s, el pool satura en su propio
+tamaño y encola el resto sin perder ninguna petición —verificado, no solo diseñado—:
+
+| Concurrentes | Tiempo |
+|---|---|
+| 1 | 1016 ms |
+| 2 | 1015 ms |
+| 4 | 1039 ms |
+| 8 | 2015 ms (dos tandas) |
+| 16 | 4018 ms (cuatro tandas) |
+
+Y una ruta que no toca base de datos sigue respondiendo en 10 ms con el pool saturado por
+otras peticiones.
+
+Los fallos reales que ha ido sacando la disciplina de probar contra el motor de verdad, no
+solo compilar, están registrados en [bug-hunting.md](bug-hunting.md). La gramática formal
+del lenguaje, con un manual completo, en [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md).

@@ -2,7 +2,7 @@
 
 > Referencia práctica de Odio, el lenguaje que interpreta Osodio 2.0. La gramática formal
 > está en [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md); las decisiones de diseño y sus motivos, en
-> [OSODIO-2.0.md](OSODIO-2.0.md).
+> [README.md](README.md#decisiones-de-diseño).
 
 ## Índice
 
@@ -105,15 +105,15 @@ cd build && ctest --output-on-failure
 tests/run_tests.sh ~/osodio-build/osodio
 ```
 
-230 pruebas en seis suites:
+246 pruebas en seis suites:
 
 | suite | qué cubre | |
 |---|---|---|
-| `regresion` | el binario por el socket, con `.odio` reales | 68 |
+| `regresion` | el binario por el socket, con `.odio` reales | 79 |
 | `plantillas` | compilar y renderizar, en proceso | 48 |
 | `sqlite` | tipos, límites y caché de sentencias | 37 |
-| `postgres` | tipos, marcadores y transacciones | 32 |
-| `mysql` | ídem | 26 |
+| `postgres` | tipos, marcadores, transacciones y concurrencia con contenido comprobado | 34 |
+| `mysql` | ídem, más el byte nulo dentro de un texto | 29 |
 | `marcadores` | la traducción de `?` a `$1` | 19 |
 
 Las de `mysql` y `postgres` necesitan un servidor y **se saltan solas** si no lo hay; las
