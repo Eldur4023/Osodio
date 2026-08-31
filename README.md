@@ -381,9 +381,8 @@ suite de regresión de 65 pruebas que ejerce el binario por el socket, tal y com
 cmake --build build --target osodio-bin && ctest --test-dir build
 ```
 
-Los módulos de `sqlite` y `postgres` están probados contra motores reales. El de `mysql`
-compila y enlaza, pero **nunca se ha ejecutado contra un servidor**: hasta que eso pase, es
-código sin verificar.
+Los tres módulos de base de datos —`sqlite`, `postgres` y `mysql`— están probados contra
+motores reales.
 
 El diseño completo, con las decisiones tomadas y sus motivos, está en
 [OSODIO-2.0.md](OSODIO-2.0.md). La gramática formal del lenguaje, en

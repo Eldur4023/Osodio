@@ -419,9 +419,17 @@ concatenación desde Odio.
   `tests/run_tests.sh` es la suite de regresión del proyecto, que ejerce el binario por el
   socket.
 - (resuelto) `elif` y `else if` se admiten los dos.
-- **MySQL no se ha probado contra un servidor real.** Compila, enlaza y comparte el
-  camino de sqlite y postgres —que sí están probados—, pero no se ha levantado un `mysqld`
-  contra el que ejercerlo. Hasta que eso pase, el módulo es código sin verificar.
+- (resuelto) **MySQL ya se ha probado contra un servidor real**, y no era un trámite: el
+  módulo tenía cuatro fallos que solo aparecen ejecutándolo. Las transacciones no abrían
+  —MySQL no admite `BEGIN` por el protocolo de sentencias preparadas—, así que el
+  `ROLLBACK` devolvía éxito sin deshacer nada; los valores de más de 1023 bytes se
+  truncaban en silencio; un `BIGINT UNSIGNED` grande se quedaba clavado en `INT64_MAX`; y
+  los búferes de *bind* vivían en el driver, que es único y lo comparten los N workers del
+  pool. Este último solo se ve con un sanitizador de hilos: 406 apariciones del fichero en
+  los informes de carrera, ninguna después de arreglarlo.
+
+  De ahí una regla para el futuro: **un módulo que no se ha ejecutado contra su motor no
+  está escrito, está esbozado.** Compilar y enlazar no prueba nada de lo que importa.
 - (resuelto) **Los métodos HTTP son palabras reservadas en todo el fichero.** `get`,
   `post`, `put`, `patch`, `delete` y `any` no valen como nombre de variable, campo ni
   parámetro, aunque solo signifiquen algo delante de `endpoint`. Se podrían haber hecho
