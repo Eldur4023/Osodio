@@ -8,7 +8,7 @@
 #include <sstream>
 #include "request.hpp"
 
-namespace osodio {
+namespace lohin {
 
 // ─── MultipartPart ────────────────────────────────────────────────────────────
 //
@@ -39,7 +39,7 @@ struct MultipartPart {
 //   • Content-Type is not multipart/form-data
 //   • The boundary is missing or the body is malformed
 //
-//   auto parts = osodio::parse_multipart(req);
+//   auto parts = lohin::parse_multipart(req);
 //   if (!parts) { ... handle error ... }
 //   for (auto& p : *parts) { ... }
 
@@ -178,4 +178,4 @@ parse_multipart(const Request& req) {
     return parts;
 }
 
-} // namespace osodio
+} // namespace lohin

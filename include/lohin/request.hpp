@@ -5,11 +5,11 @@
 #include <memory>
 #include <algorithm>
 #include <cstdlib>
-#include <osodio/core/event_loop.hpp>
+#include <lohin/core/event_loop.hpp>
 #include "cancel.hpp"
 #include "cookies.hpp"
 
-namespace osodio {
+namespace lohin {
 
 class Request {
 public:
@@ -139,4 +139,4 @@ private:
     }
 };
 
-} // namespace osodio
+} // namespace lohin

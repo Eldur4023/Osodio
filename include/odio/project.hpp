@@ -6,7 +6,7 @@
 
 #include <map>
 
-#include <osodio/router.hpp>
+#include <lohin/router.hpp>
 #include "bytecode.hpp"
 #include "ast.hpp"
 #include "plantilla.hpp"
@@ -22,7 +22,7 @@ namespace odio {
 struct Module {
     std::vector<std::unique_ptr<SourceFile>> files;
     Program        program;
-    osodio::Router router;
+    lohin::Router router;
 
     // Funciones de usuario compiladas, indexadas por orden de declaracion.
     FunctionTable functions;
@@ -38,7 +38,7 @@ struct Module {
     // Manejadores de `on error`, por codigo.  La clave 0 es el global.
     std::map<int, std::shared_ptr<Chunk>> error_handlers;
 
-    // Reparto entre los dos niveles de ruta (ver OSODIO-2.0.md, seccion 2):
+    // Reparto entre los dos niveles de ruta (ver LOHIN-2.0.md, seccion 2):
     // las declarativas no ejecutan ni un paso de bytecode.
     int declarative_routes = 0;
     int vm_routes          = 0;

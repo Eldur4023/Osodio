@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Suite de regresion de Osodio 2.0.
+# Suite de regresion de LoHin 2.0.
 #
 # Levanta el binario contra ficheros .odio reales y comprueba las respuestas.
 # Esta escrita en shell a proposito: prueba el binario tal y como se usa, por el
@@ -12,10 +12,10 @@
 
 set -u
 
-OSODIO="${1:-$HOME/osodio-build/osodio}"
+LOHIN="${1:-$HOME/lohin-build/lohin}"
 AQUI="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PUERTO=${OSODIO_TEST_PORT:-8790}
+PUERTO=${LOHIN_TEST_PORT:-8790}
 SRV=""
 
 pasadas=0
@@ -39,7 +39,7 @@ fallo() {
 levantar() {
     parar
     PUERTO=$((PUERTO + 1))
-    "$OSODIO" --no-watch --port "$PUERTO" "$1" > "$TMP/srv.log" 2>&1 &
+    "$LOHIN" --no-watch --port "$PUERTO" "$1" > "$TMP/srv.log" 2>&1 &
     SRV=$!
     for _ in $(seq 1 60); do
         if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PUERTO/__ping__" 2>/dev/null; then
@@ -107,7 +107,7 @@ comprueba_mp() {
 no_compila() {
     local nombre="$1" fich="$2" trozo="$3"
     local salida
-    salida=$("$OSODIO" --check "$fich" 2>&1)
+    salida=$("$LOHIN" --check "$fich" 2>&1)
     if [ $? -eq 0 ]; then
         fallo "$nombre" "error de compilacion" "compilo sin quejarse"
         return
@@ -121,7 +121,7 @@ no_compila() {
 
 compila() {
     local nombre="$1" fich="$2"
-    if "$OSODIO" --check "$fich" > "$TMP/check" 2>&1; then
+    if "$LOHIN" --check "$fich" > "$TMP/check" 2>&1; then
         ok "$nombre"
     else
         fallo "$nombre" "que compile" "$(head -3 "$TMP/check")"

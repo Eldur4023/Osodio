@@ -1,7 +1,7 @@
-#include <osodio/core/io_uring_loop.hpp>
+#include <lohin/core/io_uring_loop.hpp>
 
-// Only compiled when OSODIO_IO_URING is defined (see CMakeLists.txt).
-#ifdef OSODIO_IO_URING
+// Only compiled when LOHIN_IO_URING is defined (see CMakeLists.txt).
+#ifdef LOHIN_IO_URING
 
 #include <linux/io_uring.h>
 #include <sys/epoll.h>
@@ -55,7 +55,7 @@ static inline uint32_t smp_load_acquire_u32(uint32_t* ptr) {
         std::memory_order_acquire);
 }
 
-namespace osodio::core {
+namespace lohin::core {
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
@@ -384,6 +384,6 @@ void IoUringLoop::stop() {
     (void)::write(wakeup_fd_, &val, sizeof(val));
 }
 
-} // namespace osodio::core
+} // namespace lohin::core
 
-#endif // OSODIO_IO_URING
+#endif // LOHIN_IO_URING

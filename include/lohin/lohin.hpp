@@ -1,7 +1,7 @@
 #pragma once
 
 // Single include for the entire library.
-// #include <osodio/osodio.hpp>  — that's all you need.
+// #include <lohin/lohin.hpp>  — that's all you need.
 
 #include "cancel.hpp"
 #include "logger.hpp"

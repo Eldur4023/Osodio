@@ -77,24 +77,24 @@ void DbPool::stop() {
 
 // Cada driver compilado se declara aqui.  Las funciones existen solo si su
 // opcion de cmake esta activada.
-#ifdef OSODIO_SQLITE
+#ifdef LOHIN_SQLITE
 std::unique_ptr<DbDriver> make_sqlite_driver();
 #endif
-#ifdef OSODIO_POSTGRES
+#ifdef LOHIN_POSTGRES
 std::unique_ptr<DbDriver> make_postgres_driver();
 #endif
-#ifdef OSODIO_MYSQL
+#ifdef LOHIN_MYSQL
 std::unique_ptr<DbDriver> make_mysql_driver();
 #endif
 
 DbRegistry::DbRegistry() {
-#ifdef OSODIO_SQLITE
+#ifdef LOHIN_SQLITE
     { Slot s; s.driver = make_sqlite_driver();   slots_["sqlite"]   = std::move(s); }
 #endif
-#ifdef OSODIO_POSTGRES
+#ifdef LOHIN_POSTGRES
     { Slot s; s.driver = make_postgres_driver(); slots_["postgres"] = std::move(s); }
 #endif
-#ifdef OSODIO_MYSQL
+#ifdef LOHIN_MYSQL
     { Slot s; s.driver = make_mysql_driver();    slots_["mysql"]    = std::move(s); }
 #endif
 }

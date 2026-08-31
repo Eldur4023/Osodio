@@ -11,7 +11,7 @@
 
 #include <coroutine>
 
-#include <osodio/core/event_loop.hpp>
+#include <lohin/core/event_loop.hpp>
 #include "value.hpp"
 
 namespace odio {
@@ -143,7 +143,7 @@ private:
 // desde fuera, que no son seguras para eso.
 struct DbAwaitable {
     DbPool*                        pool;
-    osodio::core::EventLoop*       loop;
+    lohin::core::EventLoop*       loop;
     std::function<void(size_t)>    work;   // recibe el worker: elige la conexion
     int                            pinned = -1;   // >= 0 dentro de una transaccion
 

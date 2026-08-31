@@ -1,7 +1,7 @@
 #pragma once
 #include <utility>
 
-namespace osodio {
+namespace lohin {
 
 // RAII wrapper that runs a callable when it goes out of scope.
 //
@@ -27,4 +27,4 @@ public:
 template<typename F>
 ScopeExit<F> defer(F&& fn) { return ScopeExit<F>(std::forward<F>(fn)); }
 
-} // namespace osodio
+} // namespace lohin

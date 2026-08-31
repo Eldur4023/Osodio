@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <string>
 
-namespace osodio {
+namespace lohin {
 
 // La pagina de Swagger UI, y nada mas.
 //
@@ -46,7 +46,7 @@ inline std::string swagger_ui_html(const std::string& spec_url = "/openapi.json"
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>Osodio — API Docs</title>
+  <title>LoHin — API Docs</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
   <style>body { margin: 0; }</style>
 </head>
@@ -66,4 +66,4 @@ inline std::string swagger_ui_html(const std::string& spec_url = "/openapi.json"
 </html>)";
 }
 
-} // namespace osodio
+} // namespace lohin

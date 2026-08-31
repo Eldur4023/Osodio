@@ -1,4 +1,4 @@
-# Osodio
+# LoHin
 
 Un binario. Lee ficheros `.odio` y sirve.
 
@@ -46,9 +46,9 @@ group("/admin"):
 ```
 
 ```
-$ osodio ./mi-blog
-osodio: 3 fichero(s), 5 ruta(s) — 2 declarativa(s), 3 con logica
-Osodio running on http://0.0.0.0:8080 (threads=16, press CTRL+C to quit)
+$ lohin ./mi-blog
+lohin: 3 fichero(s), 5 ruta(s) — 2 declarativa(s), 3 con logica
+LoHin running on http://0.0.0.0:8080 (threads=16, press CTRL+C to quit)
 ```
 
 Guardas el fichero y se recarga. Sin recompilar, sin reiniciar, sin CMake.
@@ -57,7 +57,7 @@ Guardas el fichero y se recarga. Sin recompilar, sin reiniciar, sin CMake.
 
 ## Por qué existe
 
-Osodio empezó siendo un framework de C++ con la ergonomía de FastAPI. Funcionaba, y
+LoHin empezó siendo un framework de C++ con la ergonomía de FastAPI. Funcionaba, y
 seguía teniendo tres problemas que ninguna cantidad de plantillas iba a arreglar:
 
 **Cambiar un endpoint obligaba a recompilar.** El ciclo de trabajo de un framework web no
@@ -70,7 +70,7 @@ nginx ya hace mejor.
 **Seguía siendo verboso.** Macros para declarar esquemas, plantillas para extraer
 parámetros, firmas de lambda de tres líneas.
 
-Osodio 2.0 responde a los tres a la vez: la declaración de endpoints se hace en **Odio**,
+LoHin 2.0 responde a los tres a la vez: la declaración de endpoints se hace en **Odio**,
 un lenguaje propio, y el binario lo compila al arrancar y cuando detecta un cambio.
 
 ### "¿No era que los intérpretes eran lentos?"
@@ -80,7 +80,7 @@ Ese argumento sigue en pie, y por eso conviene ser preciso sobre qué se interpr
 qué no.
 
 ```
-osodio ./app          →  lex → parse → check → emitir
+lohin ./app          →  lex → parse → check → emitir
                        ↓
                     tabla de rutas + bytecode  (construido UNA vez, no por peticion)
                        ↓
@@ -88,7 +88,7 @@ osodio ./app          →  lex → parse → check → emitir
 ```
 
 **El stack de I/O sigue siendo nativo y multinúcleo.** Un event loop por core, `SO_REUSEPORT`,
-sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON lo lee y lo escribe Osodio, sin
+sin GIL, sin GC global. El parseo HTTP es llhttp; el JSON lo lee y lo escribe LoHin, sin
 árbol intermedio; el servicio de estáticos es `sendfile(2)`. Nada de eso cambia.
 
 **El bytecode solo ejecuta pegamento.** Resolver un nombre, llamar a un builtin nativo,
@@ -113,8 +113,8 @@ número a una cadena hay que decirlo: `"n = " + str(n)`.
 
 ### Corre detrás de un reverse proxy
 
-Osodio 2.0 no habla TLS ni HTTP/2. Los hace nginx o Caddy, mejor y desde hace años. El
-proxy es dueño del transporte; Osodio es dueño de la aplicación. Eso es lo que permite que
+LoHin 2.0 no habla TLS ni HTTP/2. Los hace nginx o Caddy, mejor y desde hace años. El
+proxy es dueño del transporte; LoHin es dueño de la aplicación. Eso es lo que permite que
 el binario no enlace OpenSSL ni nghttp2.
 
 ---
@@ -203,7 +203,7 @@ compilador de plantillas.
 | Tipos | `class` para forma conocida y validada, `Json` para lo dinámico, contenedores para lo homogéneo — sin `Any`, que envenenaría el sistema de tipos entero |
 | Genéricos | Solo contenedores nativos, borrados en compilación. Sin clases genéricas de usuario |
 | Config | En Odio, bloque `app:`, una sola vez en el proyecto. Sin YAML ni TOML — un lenguaje que aprender, no dos, y un puerto mal escrito es error de compilación |
-| Layout | `osodio ./mi-app` lee el árbol recursivamente. Orden indiferente, compilación en dos pasadas |
+| Layout | `lohin ./mi-app` lee el árbol recursivamente. Orden indiferente, compilación en dos pasadas |
 
 ### Por qué un motor de plantillas propio
 
@@ -215,7 +215,7 @@ coste se asumió a sabiendas: Boost, fmt, rapidjson y tres bibliotecas más, tra
 Se revirtió. El motor es ahora propio: conserva la forma de Jinja2 —`{{ }}`, `{% if %}`,
 `{% for %}`, `{% include %}`, `{% extends %}`, `|safe`— pero lo que va dentro de las llaves
 son expresiones de Odio, compiladas por el mismo checker que el resto del lenguaje. Una
-errata en una plantilla es un error de `osodio --check`, con fichero y línea, no un fallo en
+errata en una plantilla es un error de `lohin --check`, con fichero y línea, no un fallo en
 producción. Ningún motor externo puede dar eso, porque no conoce el lenguaje de la app.
 
 | | Con Jinja2Cpp | Con motor propio |
@@ -409,20 +409,20 @@ sudo apt install libjemalloc-dev     # opcional
 ```
 
 ```bash
-osodio ./mi-app          # todos los .odio del directorio, recursivamente
-osodio app.odio          # solo ese fichero
-osodio a.odio b.odio     # solo esos
-osodio ./app --check     # compila y sale
-osodio ./app --no-watch  # sin recarga en caliente
-osodio ./app --verbose   # una linea de log por peticion
-osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoints
+lohin ./mi-app          # todos los .odio del directorio, recursivamente
+lohin app.odio          # solo ese fichero
+lohin a.odio b.odio     # solo esos
+lohin ./app --check     # compila y sale
+lohin ./app --no-watch  # sin recarga en caliente
+lohin ./app --verbose   # una linea de log por peticion
+lohin ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoints
 ```
 
 ---
 
 ## Estado
 
-Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
+LoHin 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
 funcionan, están cubiertos por [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md) —con un programa completo
 comentado por cada caso de uso— y por una **246 pruebas** repartidas en seis suites: 79 de regresión que ejercen el binario por el
 socket tal y como se usa —incluida la matriz de enlace de parámetros de
@@ -431,7 +431,7 @@ marcadores, y 37 + 29 + 34 de los módulos de `sqlite`, `mysql` y `postgres` con
 reales —las de mysql y postgres se saltan solas si no hay servidor—:
 
 ```bash
-cmake --build build --target osodio-bin && ctest --test-dir build
+cmake --build build --target lohin-bin && ctest --test-dir build
 ```
 
 Los tres módulos de base de datos —`sqlite`, `postgres` y `mysql`— están probados contra

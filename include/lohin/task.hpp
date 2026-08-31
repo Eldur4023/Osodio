@@ -5,10 +5,10 @@
 #include <functional>
 #include <memory>
 #include <iostream>
-#include <osodio/core/event_loop.hpp>
+#include <lohin/core/event_loop.hpp>
 #include "cancel.hpp"
 
-namespace osodio {
+namespace lohin {
 
 // ─── Task<T> ─────────────────────────────────────────────────────────────────
 //
@@ -67,9 +67,9 @@ struct Task {
             if (!continuation) {
                 try { std::rethrow_exception(exception); }
                 catch (const std::exception& e) {
-                    std::cerr << "[osodio] unhandled exception in detached task: " << e.what() << '\n';
+                    std::cerr << "[lohin] unhandled exception in detached task: " << e.what() << '\n';
                 } catch (...) {
-                    std::cerr << "[osodio] unknown exception in detached task\n";
+                    std::cerr << "[lohin] unknown exception in detached task\n";
                 }
             }
         }
@@ -151,9 +151,9 @@ struct Task<void> {
             if (!continuation) {
                 try { std::rethrow_exception(exception); }
                 catch (const std::exception& e) {
-                    std::cerr << "[osodio] unhandled exception in detached task: " << e.what() << '\n';
+                    std::cerr << "[lohin] unhandled exception in detached task: " << e.what() << '\n';
                 } catch (...) {
-                    std::cerr << "[osodio] unknown exception in detached task\n";
+                    std::cerr << "[lohin] unknown exception in detached task\n";
                 }
             }
         }
@@ -238,4 +238,4 @@ inline SleepAwaitable sleep(int ms) {
     return {ms, detail::current_loop, detail::current_token};
 }
 
-} // namespace osodio
+} // namespace lohin

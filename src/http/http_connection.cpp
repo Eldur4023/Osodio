@@ -1,9 +1,9 @@
 #include "http_connection.hpp"
-#include "../../include/osodio/request.hpp"
-#include "../../include/osodio/response.hpp"
-#include "../../include/osodio/task.hpp"
-#include "../../include/osodio/metrics.hpp"
-#include "../../include/osodio/logger.hpp"
+#include "../../include/lohin/request.hpp"
+#include "../../include/lohin/response.hpp"
+#include "../../include/lohin/task.hpp"
+#include "../../include/lohin/metrics.hpp"
+#include "../../include/lohin/logger.hpp"
 
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -20,7 +20,7 @@
 #include <algorithm>
 #include <sstream>
 
-namespace osodio::http {
+namespace lohin::http {
 
 // ── URL helpers ───────────────────────────────────────────────────────────────
 
@@ -66,7 +66,7 @@ static void parse_query(const std::string& qs,
 // ── HttpConnection ────────────────────────────────────────────────────────────
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
-                               osodio::DispatchFn dispatch,
+                               lohin::DispatchFn dispatch,
                                std::shared_ptr<std::atomic<int>> conn_count)
     : fd_(fd)
     , loop_(loop)
@@ -189,14 +189,14 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     in_flight_ = true;
 
     // Fresh cancellation token for this request.
-    cancel_token_ = std::make_shared<osodio::CancellationToken>();
+    cancel_token_ = std::make_shared<lohin::CancellationToken>();
 
     // Set thread-locals so handlers can call sleep(ms) without explicit args.
-    osodio::detail::current_loop  = &loop_;
-    osodio::detail::current_token = cancel_token_;
+    lohin::detail::current_loop  = &loop_;
+    lohin::detail::current_token = cancel_token_;
 
-    auto req_ptr = std::make_shared<osodio::Request>();
-    auto res_ptr = std::make_shared<osodio::Response>();
+    auto req_ptr = std::make_shared<lohin::Request>();
+    auto res_ptr = std::make_shared<lohin::Response>();
 
     req_ptr->method       = req_parsed.method;
     req_ptr->path         = req_parsed.path;
@@ -257,15 +257,15 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
         }
     });
 
-    auto wrapper_task = [](std::shared_ptr<osodio::Request> req_ptr,
-                           std::shared_ptr<osodio::Response> res_ptr,
-                           osodio::DispatchFn disp) -> osodio::Task<void> {
+    auto wrapper_task = [](std::shared_ptr<lohin::Request> req_ptr,
+                           std::shared_ptr<lohin::Response> res_ptr,
+                           lohin::DispatchFn disp) -> lohin::Task<void> {
         try {
             co_await disp(*req_ptr, *res_ptr);
         } catch (const std::exception& e) {
             // Log internally but do not expose e.what() to clients — it may
             // contain connection strings, file paths, or other internal detail.
-            osodio::log().error("unhandled exception: ", e.what());
+            lohin::log().error("unhandled exception: ", e.what());
             res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
         } catch (...) {
             res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
@@ -283,10 +283,10 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     h.resume();
 }
 
-void HttpConnection::finish_dispatch(osodio::Request& request,
-                                     osodio::Response& response) {
+void HttpConnection::finish_dispatch(lohin::Request& request,
+                                     lohin::Response& response) {
     // Record the request in the global metrics counter.
-    osodio::Metrics::instance().record(response.status_code());
+    lohin::Metrics::instance().record(response.status_code());
 
     // Determine keep-alive before building the response
     keep_alive_ = (request.version == "HTTP/1.1");
@@ -314,7 +314,7 @@ void HttpConnection::finish_dispatch(osodio::Request& request,
         // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
-            osodio::Response err;
+            lohin::Response err;
             err.status(500).json_text(R"({"error":"Cannot open file"})");
             err.header("Connection", "close");
             keep_alive_ = false;
@@ -504,7 +504,7 @@ void HttpConnection::finish_cycle() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 void HttpConnection::send_error(int code, const char* msg) {
-    osodio::Response r;
+    lohin::Response r;
     // El mensaje viene de una lista fija del motor, sin comillas ni barras.
     r.status(code).json_text(std::string(R"({"error":")") + msg + R"("})");
     r.header("Connection", "close");
@@ -542,4 +542,4 @@ void HttpConnection::close() {
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
 }
 
-} // namespace osodio::http
+} // namespace lohin::http

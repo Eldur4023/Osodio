@@ -6,7 +6,7 @@
 #include <atomic>
 #include <mutex>
 
-namespace osodio::core {
+namespace lohin::core {
 
 // ── EpollLoop ─────────────────────────────────────────────────────────────────
 //
@@ -47,16 +47,16 @@ private:
     std::mutex queue_mutex_;
 };
 
-} // namespace osodio::core
+} // namespace lohin::core
 
 // ── Backend alias ─────────────────────────────────────────────────────────────
 //
-// When OSODIO_IO_URING is defined, EventLoop resolves to IoUringLoop.
+// When LOHIN_IO_URING is defined, EventLoop resolves to IoUringLoop.
 // All connection and server code uses core::EventLoop without any changes.
 
-#ifdef OSODIO_IO_URING
+#ifdef LOHIN_IO_URING
 #  include "io_uring_loop.hpp"
-   namespace osodio::core { using EventLoop = IoUringLoop; }
+   namespace lohin::core { using EventLoop = IoUringLoop; }
 #else
-   namespace osodio::core { using EventLoop = EpollLoop; }
+   namespace lohin::core { using EventLoop = EpollLoop; }
 #endif

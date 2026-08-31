@@ -5,12 +5,12 @@
 #include <vector>
 #include <mutex>
 
-namespace osodio::core {
+namespace lohin::core {
 
 // ── IoUringLoop ───────────────────────────────────────────────────────────────
 //
 // io_uring-based event loop backend.  Same public interface as EpollLoop.
-// Enabled at compile time with -DOSODIO_IO_URING.
+// Enabled at compile time with -DLOHIN_IO_URING.
 //
 // Implementation notes:
 //  • Uses IORING_POLL_ADD_MULTI (persistent multishot poll) — one SQE per fd,
@@ -95,4 +95,4 @@ private:
     uint64_t alloc_token   () { return next_token_++; }
 };
 
-} // namespace osodio::core
+} // namespace lohin::core

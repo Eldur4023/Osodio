@@ -13,7 +13,7 @@ get endpoint("/__ping__"):
 # ── Esquema ──────────────────────────────────────────────────────────────────
 #
 # Se crea desde aqui y no con el CLI de sqlite3, para que la suite necesite solo
-# el binario de Osodio.
+# el binario de LoHin.
 
 get endpoint("/crear"):
     await sqlite.exec("drop table if exists articulos")

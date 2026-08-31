@@ -7,7 +7,7 @@
 #include <iostream>
 #include <algorithm>
 
-namespace osodio {
+namespace lohin {
 
 // ─── SameSite ────────────────────────────────────────────────────────────────
 //
@@ -65,7 +65,7 @@ inline std::string build_set_cookie(std::string name, std::string value,
     // Browsers silently drop SameSite=None without Secure.  Auto-correct so the
     // cookie actually reaches the client.
     if (opts.same_site == SameSite::None && !opts.secure) {
-        std::cerr << "[osodio] cookie '" << name
+        std::cerr << "[lohin] cookie '" << name
                   << "': SameSite=None requires Secure — auto-enabling Secure.\n";
         opts.secure = true;
     }
@@ -120,4 +120,4 @@ parse_cookie_header(std::string_view header) {
     return out;
 }
 
-} // namespace osodio
+} // namespace lohin

@@ -6,7 +6,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace osodio::http {
+namespace lohin::http {
 
 // ── Per-connection parse state ─────────────────────────────────────────────
 
@@ -207,4 +207,4 @@ void HttpParser::reset() {
     llhttp_reset(parser_.get());
 }
 
-} // namespace osodio::http
+} // namespace lohin::http

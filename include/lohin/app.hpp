@@ -10,7 +10,7 @@
 #include "websocket.hpp"
 #include "metrics.hpp"
 
-namespace osodio {
+namespace lohin {
 
 class App {
 public:
@@ -125,7 +125,7 @@ public:
         // to this endpoint and inherit the user's cookies (CSWSH).
         // Safe only for unauthenticated / public endpoints.
         // Suppress this warning with: app.ws(path, fn, {.allowed_origins = {"https://your-app.com"}})
-        std::cerr << "[osodio] ws(\"" << path << "\"): no allowed_origins set — "
+        std::cerr << "[lohin] ws(\"" << path << "\"): no allowed_origins set — "
                      "cross-site WebSocket hijacking possible on cookie-authenticated endpoints. "
                      "Use ws(path, fn, {.allowed_origins = {\"https://your-app.com\"}}) to restrict.\n";
         return ws(std::move(path), std::forward<F>(fn), WSOptions{});
@@ -329,7 +329,7 @@ private:
     std::string                               templates_dir_ = "./templates";
     std::function<void()>                     before_stop_;
 
-    std::string                               api_title_       = "Osodio API";
+    std::string                               api_title_       = "LoHin API";
     std::string                               api_version_     = "0.1.0";
     int                                       max_connections_ = 10'000;
 
@@ -338,4 +338,4 @@ private:
     bool                                      prepared_ = false;
 };
 
-} // namespace osodio
+} // namespace lohin

@@ -7,7 +7,7 @@
 #include "types.hpp"
 #include "handler_traits.hpp"
 
-namespace osodio {
+namespace lohin {
 
 struct RouteMatch {
     bool    found   = false;
@@ -59,4 +59,4 @@ private:
         Handler& out_handler) const;
 };
 
-} // namespace osodio
+} // namespace lohin

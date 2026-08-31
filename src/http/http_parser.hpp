@@ -12,7 +12,7 @@ typedef struct llhttp__internal_s llhttp_t;
 struct llhttp_settings_s;
 typedef struct llhttp_settings_s llhttp_settings_t;
 
-namespace osodio::http {
+namespace lohin::http {
 
 // Parsed representation of one complete HTTP/1.1 request.
 struct ParsedRequest {
@@ -80,4 +80,4 @@ private:
     size_t      last_len_  = 0;
 };
 
-} // namespace osodio::http
+} // namespace lohin::http

@@ -1068,7 +1068,7 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
     //
     // El emisor tiene delante el nombre del fichero y las claves que se le
     // pasan, que es exactamente lo que hace falta.  Compilar ahora convierte
-    // una errata dentro de un {{ }} en un error de `osodio --check`.
+    // una errata dentro de un {{ }} en un error de `lohin --check`.
     //
     // Si el nombre no es literal —render(variable)— no hay nada que compilar
     // por adelantado y se sigue por la via antigua.

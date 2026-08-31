@@ -2,7 +2,7 @@
 #include <functional>
 #include "task.hpp"   // Task<T>
 
-namespace osodio {
+namespace lohin {
 
 class Request;
 class Response;
@@ -26,4 +26,4 @@ using ErrorHandler = std::function<void(int code, Request&, Response&)>;
 // Async error handler — use when error handling needs to co_await (e.g. DB logging).
 using AsyncErrorHandler = std::function<Task<void>(int code, Request&, Response&)>;
 
-} // namespace osodio
+} // namespace lohin

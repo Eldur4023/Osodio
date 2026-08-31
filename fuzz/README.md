@@ -15,21 +15,21 @@ aparte.
 - **`fuzz_lenguaje`** — lexer, parser y checker de Odio. Semillas: todos los
   `.odio` de un directorio (por defecto `tests/casos`). Cada caso se escribe a
   un fichero temporal y se compila con `odio::compile()`, la misma función
-  que usa `osodio --check` — se prueba el camino real.
+  que usa `lohin --check` — se prueba el camino real.
 - **`fuzz_http`** — el parser HTTP (llhttp de por medio) y el parser
   multipart, los dos en proceso, sin socket. `http_parser.hpp` es interno a
-  `osodio` (vive en `src/`, no en `include/`); el arnés lo incluye directo,
+  `lohin` (vive en `src/`, no en `include/`); el arnés lo incluye directo,
   como ya hace `tests/marcadores.cpp` con el driver de postgres.
 
 ## Compilar
 
 Aparte del build normal: para que ASan/UBSan sirvan de algo tienen que
-instrumentar también `odio`/`osodio`, no solo los dos `.cpp` del arnés, así
+instrumentar también `odio`/`lohin`, no solo los dos `.cpp` del arnés, así
 que van en los flags de la configuración entera, no en el target.
 
 ```bash
 mkdir -p build-fuzz && cd build-fuzz
-cmake -S .. -B . -DCMAKE_BUILD_TYPE=Debug -DOSODIO_FUZZ=ON -DOSODIO_JEMALLOC=OFF \
+cmake -S .. -B . -DCMAKE_BUILD_TYPE=Debug -DLOHIN_FUZZ=ON -DLOHIN_JEMALLOC=OFF \
     -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 cmake --build . -j"$(nproc)" --target fuzz_lenguaje fuzz_http

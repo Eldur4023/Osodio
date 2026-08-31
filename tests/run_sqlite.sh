@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Bateria de tipos del modulo sqlite de Osodio 2.0.
+# Bateria de tipos del modulo sqlite de LoHin 2.0.
 #
 # Va aparte de run_tests.sh —que ya ejerce sqlite en el uso normal— porque esto
 # es otra cosa: los limites de los tipos, lo que sqlite guarda de verdad frente a
@@ -13,13 +13,13 @@
 
 set -u
 
-OSODIO="${1:-$HOME/osodio-build/osodio}"
+LOHIN="${1:-$HOME/lohin-build/lohin}"
 # A ruta absoluta antes de nada: mas abajo se cambia de directorio para que el
 # fichero .db caiga en la raiz del repo, y una ruta relativa dejaria de valer.
-case "$OSODIO" in /*) ;; *) OSODIO="$(cd "$(dirname "$OSODIO")" && pwd)/$(basename "$OSODIO")" ;; esac
+case "$LOHIN" in /*) ;; *) LOHIN="$(cd "$(dirname "$LOHIN")" && pwd)/$(basename "$LOHIN")" ;; esac
 AQUI="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PUERTO=${OSODIO_TEST_SQLITE_PORT:-8820}
+PUERTO=${LOHIN_TEST_SQLITE_PORT:-8820}
 SRV=""
 
 pasadas=0
@@ -44,7 +44,7 @@ parar() {
 }
 trap 'parar; rm -rf "$TMP" "$AQUI/../pruebas-sqlite-tipos.db"* 2>/dev/null' EXIT
 
-if ! "$OSODIO" --check "$AQUI/casos/sqlite.odio" > "$TMP/check" 2>&1; then
+if ! "$LOHIN" --check "$AQUI/casos/sqlite.odio" > "$TMP/check" 2>&1; then
     if grep -q "sqlite" "$TMP/check" && grep -q "import" "$TMP/check"; then
         gris "sqlite: el binario se compilo sin el modulo — suite omitida"
         exit 77
@@ -84,7 +84,7 @@ rm -f "$AQUI/../pruebas-sqlite-tipos.db"*
 
 echo "== arranque =="
 cd "$AQUI/.."
-"$OSODIO" --no-watch --port "$PUERTO" "$AQUI/casos/sqlite.odio" > "$TMP/srv.log" 2>&1 &
+"$LOHIN" --no-watch --port "$PUERTO" "$AQUI/casos/sqlite.odio" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PUERTO/__ping__" 2>/dev/null && break
