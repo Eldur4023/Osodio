@@ -760,6 +760,26 @@ Json  List<T>  Dict<K,V>  File                clases nativas, en mayúscula
 `T?` marca que el valor puede faltar. Los genéricos son **borrados**: el checker los verifica
 y desaparecen antes del bytecode. No hay clases genéricas de usuario.
 
+### Cadenas de varias líneas
+
+Tres comillas, para SQL o HTML sin pelearse con los saltos de línea:
+
+```odio
+get endpoint("/posts"):
+    return await sqlite.query("""
+        select id, titulo
+        from posts
+        order by fecha desc
+        """)
+```
+
+El margen no forma parte de la cadena: es indentación del fichero, no del texto. Se quita
+un salto de línea justo detrás de la apertura, la línea del cierre si va sola, y la sangría
+**común** al resto — con lo que la sangría relativa entre líneas se conserva. Lo de arriba
+vale exactamente `select id, titulo\nfrom posts\norder by fecha desc`.
+
+Los escapes son los mismos que en una cadena normal: `\n`, `\t`, `\r`, `\0`, `\"`, `\\`.
+
 ### Veracidad
 
 Son **falsos** `null`, `false`, `0`, `0.0`, `""`, y la lista y el diccionario vacíos. Es la

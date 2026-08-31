@@ -115,6 +115,9 @@ echo "== lenguaje =="
 levantar "$AQUI/casos/lenguaje.odio" || exit 1
 comprueba "aritmetica"          GET /aritmetica       200 '"suma":7'
 comprueba "cadenas"             GET /cadenas          200 '"mayus":"HOLA"'
+comprueba "multilinea sin margen" GET /multilinea     200 '"sql":"SELECT id\nFROM posts"'
+comprueba "multilinea de una"   GET /multilinea       200 '"suelta":"en una linea"'
+comprueba "multilinea escapes"  GET /multilinea       200 '"escapes":"con \"comillas\""'
 comprueba "veracidad"           GET /veracidad        200 '"cero":false'
 comprueba "sin coercion"        GET /coercion         500 'no se puede sumar'
 comprueba "condicional elif"    GET /clasifica/0      200 '"r":"cero"'

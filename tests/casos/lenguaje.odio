@@ -11,6 +11,14 @@ get endpoint("/cadenas"):
     string s = "hola"
     return { "mayus": s.upper(), "empieza": s.starts_with("ho"), "limpio": "  x  ".trim() }
 
+get endpoint("/multilinea"):
+    string sql = """
+        SELECT id
+        FROM posts
+        """
+    string suelta = """en una linea"""
+    return { "sql": sql, "suelta": suelta, "escapes": """con \"comillas\"""" }
+
 get endpoint("/veracidad"):
     List<int> vacia = []
     return { "cero": 0 ? true : false, "vacia": vacia ? true : false,

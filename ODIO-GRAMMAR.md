@@ -45,13 +45,40 @@ Existen sin declararse, solo dentro del contexto que los define.
 ```
 INT      ::= dígito { dígito }
 FLOAT    ::= dígito { dígito } "." dígito { dígito }
-STRING   ::= '"' { carácter } '"'
+STRING   ::= '"' { carácter } '"' | '"""' { carácter | salto } '"""'
 BOOL     ::= "true" | "false"
 NULL     ::= "null"
 IDENT    ::= ( letra | "_" ) { letra | dígito | "_" }
 ```
 
 `letra` incluye Unicode: `contraseña` es un identificador válido.
+
+Escapes, iguales en las dos formas: `\n`, `\t`, `\r`, `\0`, `\"`, `\\`.
+
+### Cadenas de tres comillas
+Ocupan varias líneas, para SQL o HTML:
+
+```odio
+string q = """
+    SELECT id, titulo
+    FROM posts
+    WHERE autor = ?
+    """
+```
+
+El margen no forma parte de la cadena. Es indentación del fichero, no del texto, así que
+se quita con tres reglas:
+
+- un salto de línea justo detrás de la apertura no cuenta;
+- si el cierre está solo en su línea, esa línea tampoco;
+- del resto se quita la sangría **común** a todas las líneas con contenido, con lo que la
+  sangría relativa entre ellas se conserva.
+
+El ejemplo de arriba vale `SELECT id, titulo\nFROM posts\nWHERE autor = ?`, sin salto al
+principio ni al final.
+
+Solo se miran espacios: una línea que empiece por tabulador deja el margen en cero y no se
+recorta nada, que es preferible a adivinar cuánto ocupa un tabulador.
 
 ### Nota de lexado: `>>`
 El lexer **no fusiona** `>` `>` en un token de desplazamiento. `List<Dict<string,int>>`
