@@ -384,7 +384,8 @@ cmake --build build --target osodio-bin && ctest --test-dir build
 ```
 
 Los tres módulos de base de datos —`sqlite`, `postgres` y `mysql`— están probados contra
-motores reales, con una batería propia cada uno que se salta sola si el servidor no está.
+motores reales, con una batería propia cada uno —25, 32 y 35 pruebas— que se salta sola si
+el servidor no está.
 
 El diseño completo, con las decisiones tomadas y sus motivos, está en
 [OSODIO-2.0.md](OSODIO-2.0.md). La gramática formal del lenguaje, en

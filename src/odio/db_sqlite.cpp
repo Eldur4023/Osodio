@@ -1,6 +1,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <odio/db.hpp>
+#include <odio/crypto.hpp>
 
 #include <sqlite3.h>
 
@@ -231,6 +232,20 @@ private:
             case SQLITE_NULL:    return Value::null();
             case SQLITE_INTEGER: return Value::integer(sqlite3_column_int64(stmt, i));
             case SQLITE_FLOAT:   return Value::real(sqlite3_column_double(stmt, i));
+
+            // Un BLOB no es texto: son bytes cualesquiera.  Devolverlos como
+            // cadena dejaba la respuesta sin ser UTF-8 valido —un x'FF' se
+            // colaba crudo— y entonces el fallo no es de la peticion sino del
+            // cliente que la recibe, que es peor porque aparece lejos.
+            // Base64 es como se mete un binario en un JSON.
+            case SQLITE_BLOB: {
+                const void* p = sqlite3_column_blob(stmt, i);
+                int         n = sqlite3_column_bytes(stmt, i);
+                if (!p || n <= 0) return Value::str("");
+                return Value::str(crypto::base64_encode(
+                    std::string_view(static_cast<const char*>(p), static_cast<size_t>(n))));
+            }
+
             default: {
                 const auto* txt = sqlite3_column_text(stmt, i);
                 int         len = sqlite3_column_bytes(stmt, i);

@@ -438,6 +438,21 @@ concatenación desde Odio.
   tipos, transacciones, texto largo y concurrencia. También se corrigió la guía, que
   prometía un `last_id()` que postgres no tiene y que el driver ya rechazaba con un mensaje
   correcto.
+
+- (resuelto) **Y la de sqlite** sacó el tercero de la misma familia: un `BLOB` se devolvía
+  como cadena, así que sus bytes salían crudos al JSON y la respuesta dejaba de ser UTF-8
+  válido. Es un error de tipo antes que de codificación —un blob no es texto— y se arregló
+  devolviéndolo en base64, en sqlite y en mysql, que lo tenían igual. Postgres se libraba
+  por casualidad: libpq entrega `bytea` ya en hexadecimal.
+
+  Los tres fallos son el mismo patrón: **el módulo contestaba 200 con un cuerpo que ningún
+  cliente puede leer.** No falla la petición, falla quien la recibe, y eso aparece lejos del
+  origen. Merece la pena buscarlos a propósito.
+
+  Queda uno vivo y a sabiendas: **una columna de texto con UTF-8 inválido** sigue produciendo
+  un documento inválido. Taparlo pide validar UTF-8 dentro del escapador de JSON, que es la
+  función más caliente del sistema —era el 24% del perfil antes de optimizarla—, así que la
+  decisión no se toma de pasada.
 - (resuelto) **Los métodos HTTP son palabras reservadas en todo el fichero.** `get`,
   `post`, `put`, `patch`, `delete` y `any` no valen como nombre de variable, campo ni
   parámetro, aunque solo signifiquen algo delante de `endpoint`. Se podrían haber hecho

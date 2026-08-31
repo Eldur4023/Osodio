@@ -1,4 +1,5 @@
 #include <odio/db.hpp>
+#include <odio/crypto.hpp>
 
 #include <mysql.h>
 
@@ -189,7 +190,8 @@ public:
             for (unsigned i = 0; i < cols; ++i) {
                 if (nulls[i]) { row[fields[i].name] = Value::null(); continue; }
                 std::string text(bufs[i].data(), std::min<size_t>(lens[i], bufs[i].size()));
-                row[fields[i].name] = typed(fields[i].type, fields[i].flags, text);
+                row[fields[i].name] = typed(fields[i].type, fields[i].flags,
+                                            fields[i].charsetnr, text);
             }
             rows.push_back(Value::dict(std::move(row)));
         }
@@ -325,7 +327,22 @@ private:
         return true;
     }
 
-    static Value typed(enum_field_types t, unsigned flags, const std::string& text) {
+    // `charsetnr == 63` es el juego binary: eso distingue un BLOB de un TEXT,
+    // que en MySQL comparten tipo y solo se diferencian en la codificacion.
+    static constexpr unsigned kBinario = 63;
+
+    static Value typed(enum_field_types t, unsigned flags, unsigned charset,
+                       const std::string& text) {
+        // Un BLOB no es texto: son bytes cualesquiera.  Devolverlos como cadena
+        // dejaba la respuesta sin ser UTF-8 valido, y entonces el fallo no es de
+        // la peticion sino del cliente que la recibe.  Base64 es como se mete un
+        // binario en un JSON.
+        if (charset == kBinario &&
+            (t == MYSQL_TYPE_BLOB      || t == MYSQL_TYPE_TINY_BLOB ||
+             t == MYSQL_TYPE_MEDIUM_BLOB || t == MYSQL_TYPE_LONG_BLOB ||
+             t == MYSQL_TYPE_STRING    || t == MYSQL_TYPE_VAR_STRING))
+            return Value::str(crypto::base64_encode(text));
+
         switch (t) {
             case MYSQL_TYPE_TINY:  case MYSQL_TYPE_SHORT:
             case MYSQL_TYPE_LONG:  case MYSQL_TYPE_LONGLONG:

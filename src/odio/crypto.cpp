@@ -160,6 +160,38 @@ std::string base64url_encode(std::string_view raw) {
     return out;
 }
 
+std::string base64_encode(std::string_view raw) {
+    static const char kStd[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((raw.size() + 2) / 3 * 4);
+
+    size_t i = 0;
+    for (; i + 2 < raw.size(); i += 3) {
+        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
+                     (uint32_t(uint8_t(raw[i + 1])) << 8) |
+                      uint32_t(uint8_t(raw[i + 2]));
+        out += kStd[(v >> 18) & 0x3F];
+        out += kStd[(v >> 12) & 0x3F];
+        out += kStd[(v >> 6) & 0x3F];
+        out += kStd[v & 0x3F];
+    }
+    if (i + 1 == raw.size()) {
+        uint32_t v = uint32_t(uint8_t(raw[i])) << 16;
+        out += kStd[(v >> 18) & 0x3F];
+        out += kStd[(v >> 12) & 0x3F];
+        out += "==";
+    } else if (i + 2 == raw.size()) {
+        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
+                     (uint32_t(uint8_t(raw[i + 1])) << 8);
+        out += kStd[(v >> 18) & 0x3F];
+        out += kStd[(v >> 12) & 0x3F];
+        out += kStd[(v >> 6) & 0x3F];
+        out += '=';
+    }
+    return out;
+}
+
 bool base64url_decode(std::string_view text, std::string& out) {
     out.clear();
     out.reserve(text.size() * 3 / 4);

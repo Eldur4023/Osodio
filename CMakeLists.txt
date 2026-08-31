@@ -207,6 +207,13 @@ add_test(NAME mysql
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(mysql PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
+# La bateria de tipos de sqlite no necesita servidor —el esquema lo crea el
+# propio .odio— asi que corre siempre.
+add_test(NAME sqlite
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:osodio-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
 # Idem para postgres.
 add_test(NAME postgres
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_postgres.sh $<TARGET_FILE:osodio-bin>

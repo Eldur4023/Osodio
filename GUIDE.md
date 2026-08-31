@@ -510,6 +510,11 @@ get endpoint("/articulos/:id", int id):
 `query()` devuelve `List<Json>`: una lista de diccionarios, con los tipos del motor
 convertidos a los de Odio —entero, decimal, booleano, cadena y `null`—.
 
+Las columnas binarias —`BLOB` en sqlite y mysql— llegan en **base64**, no como cadena. No
+es una preferencia: un blob son bytes cualesquiera, y devolverlos como texto dejaba la
+respuesta sin ser UTF-8 válido, con lo que fallaba el cliente que la recibía en vez de la
+petición. En postgres un `bytea` llega en el hexadecimal de libpq (`h656c6c6f`).
+
 ```odio
 post endpoint("/articulos", Articulo a):
     int filas = await sqlite.exec(

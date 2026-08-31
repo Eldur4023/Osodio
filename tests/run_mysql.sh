@@ -131,6 +131,9 @@ comprueba "cadena utf8mb4"     GET /tipos 200 'emoji'
 comprueba "fecha"              GET /tipos 200 '"t_date":"2026-08-31"'
 comprueba "json"               GET /tipos 200 '"t_json"'
 comprueba "nulo"               GET /tipos 200 '"t_nulo":null'
+# Un BLOB son bytes cualesquiera, no texto: sale en base64 para que la respuesta
+# siga siendo UTF-8 valido.  'bytes' -> 'Ynl0ZXM='.
+comprueba "el blob sale en base64" GET /tipos 200 '"t_blob":"Ynl0ZXM="'
 # Por encima de 2^63 un BIGINT UNSIGNED no cabe en el entero de Odio y cae a
 # decimal, igual que en el parser de JSON: se pierde el ultimo digito.  Antes se
 # quedaba clavado en INT64_MAX, que es la mitad del valor.
