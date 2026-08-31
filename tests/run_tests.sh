@@ -119,6 +119,24 @@ comprueba "multilinea sin margen" GET /multilinea     200 '"sql":"SELECT id\nFRO
 comprueba "multilinea de una"   GET /multilinea       200 '"suelta":"en una linea"'
 comprueba "multilinea escapes"  GET /multilinea       200 '"escapes":"con \"comillas\""'
 comprueba "veracidad"           GET /veracidad        200 '"cero":false'
+
+# JSON tiene que ser UTF-8 (RFC 8259).  Un 0xFF suelto llega desde la red por
+# varias vias, y sin sanear producia una respuesta que ni el cliente que la
+# mando podia parsear: no falla la peticion, falla quien la recibe.
+json_utf8() {
+    local nombre="$1"; shift
+    curl -sS --max-time 10 -o "$TMP/body" "$@" 2>/dev/null
+    if python3 -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))"             "$TMP/body" 2>/dev/null; then
+        ok "$nombre"
+    else
+        fallo "$nombre" "JSON valido en UTF-8" "$(head -c 120 "$TMP/body" | cat -v)"
+    fi
+}
+json_utf8 "utf8 roto en la query"    "http://127.0.0.1:$PUERTO/eco_query?q=a%FFb"
+json_utf8 "utf8 roto en la cabecera" -H "$(printf 'X-Prueba: aÿb')"           "http://127.0.0.1:$PUERTO/eco_cabecera"
+# Y lo que si es valido tiene que salir INTACTO: sanear no puede estropear texto
+# bueno, que es la mitad que de verdad importa.
+comprueba "utf8 valido intacto" GET /eco_valido 200 '"eco":"añoñó 🐻 ñ"'
 comprueba "sin coercion"        GET /coercion         500 'no se puede sumar'
 comprueba "condicional elif"    GET /clasifica/0      200 '"r":"cero"'
 comprueba "condicional else"    GET /clasifica/99     200 '"r":"grande"'

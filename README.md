@@ -375,7 +375,7 @@ osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoi
 
 Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
 funcionan, están cubiertos por los ejemplos del repositorio (`ejemplo-*.odio`) y por una
-**227 pruebas** repartidas en seis suites: 65 de regresión que ejercen el binario por el
+**230 pruebas** repartidas en seis suites: 68 de regresión que ejercen el binario por el
 socket tal y como se usa, 48 del motor de plantillas, 19 de la traducción de marcadores, y
 37 + 26 + 32 de los módulos de `sqlite`, `mysql` y `postgres` contra motores reales —las de
 mysql y postgres se saltan solas si no hay servidor—:

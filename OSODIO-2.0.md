@@ -449,10 +449,16 @@ concatenación desde Odio.
   cliente puede leer.** No falla la petición, falla quien la recibe, y eso aparece lejos del
   origen. Merece la pena buscarlos a propósito.
 
-  Queda uno vivo y a sabiendas: **una columna de texto con UTF-8 inválido** sigue produciendo
-  un documento inválido. Taparlo pide validar UTF-8 dentro del escapador de JSON, que es la
-  función más caliente del sistema —era el 24% del perfil antes de optimizarla—, así que la
-  decisión no se toma de pasada.
+- (resuelto) **El UTF-8 inválido**, que se creía un caso raro de sqlite, resultó alcanzable
+  desde la red por tres vías comprobadas: cuerpo JSON, query y cabeceras. Un cliente mandaba
+  un byte suelto, Osodio contestaba 200, y el propio cliente no podía leer la respuesta.
+
+  Se ataja en la salida —un sitio en vez de cinco, y cubre también lo que ya estaba en la
+  base de datos— con una pasada de validación **aparte** del bucle de escapado, que no se
+  toca. Lleva el mismo atajo de ocho bytes: mientras sean ASCII se salta el bloque entero.
+  Medido con tres repeticiones alternadas de cada versión: **+0,1% en el JSON de 57 KB y
+  −1,5% en el detalle de 2 KB.** Las dos primeras medidas de una sola pasada decían −5,9% y
+  −10,1%, y eran ruido.
 - (resuelto) **Los métodos HTTP son palabras reservadas en todo el fichero.** `get`,
   `post`, `put`, `patch`, `delete` y `any` no valen como nombre de variable, campo ni
   parámetro, aunque solo signifiquen algo delante de `endpoint`. Se podrían haber hecho

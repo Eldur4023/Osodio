@@ -105,11 +105,11 @@ cd build && ctest --output-on-failure
 tests/run_tests.sh ~/osodio-build/osodio
 ```
 
-227 pruebas en seis suites:
+230 pruebas en seis suites:
 
 | suite | qué cubre | |
 |---|---|---|
-| `regresion` | el binario por el socket, con `.odio` reales | 65 |
+| `regresion` | el binario por el socket, con `.odio` reales | 68 |
 | `plantillas` | compilar y renderizar, en proceso | 48 |
 | `sqlite` | tipos, límites y caché de sentencias | 37 |
 | `postgres` | tipos, marcadores y transacciones | 32 |
