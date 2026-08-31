@@ -106,7 +106,9 @@ tests/run_tests.sh ~/osodio-build/osodio
 ```
 
 65 pruebas que levantan el binario contra ficheros `.odio` reales y comprueban las
-respuestas por el socket. La suite no enlaza nada del proyecto: prueba lo que se despliega,
+respuestas por el socket, más 48 del motor de plantillas. La suite de `mysql` —25 pruebas
+contra un servidor de verdad— se salta sola si no hay uno levantado; las instrucciones para
+montarlo están en la cabecera de `tests/run_mysql.sh`. La suite no enlaza nada del proyecto: prueba lo que se despliega,
 no una versión instrumentada de ello.
 
 ---

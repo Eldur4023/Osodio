@@ -190,6 +190,14 @@ add_test(NAME regresion
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(regresion PROPERTIES TIMEOUT 300)
 
+# El modulo de mysql necesita un servidor, asi que su suite se salta sola —codigo
+# 77— cuando no lo hay, en vez de poner en rojo una maquina donde no aplica.
+# Las instrucciones para montar el entorno estan en la cabecera del guion.
+add_test(NAME mysql
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mysql.sh $<TARGET_FILE:osodio-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(mysql PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
 # ── Ejemplos ──────────────────────────────────────────────────────────────────
 if(OSODIO_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
     file(GLOB OSODIO_EXAMPLE_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp)

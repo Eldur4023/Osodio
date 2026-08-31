@@ -375,7 +375,9 @@ osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoi
 
 Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
 funcionan, están cubiertos por los ejemplos del repositorio (`ejemplo-*.odio`) y por una
-suite de regresión de 65 pruebas que ejerce el binario por el socket, tal y como se usa:
+suite de regresión de 65 pruebas que ejerce el binario por el socket, tal y como se usa,
+más 25 del módulo de `mysql` contra un servidor real —que se saltan solas si no lo hay— y
+48 del motor de plantillas:
 
 ```bash
 cmake --build build --target osodio-bin && ctest --test-dir build
