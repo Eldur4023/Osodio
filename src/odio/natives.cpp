@@ -66,7 +66,7 @@ Value fn_render_tpl(NativeCtx& ctx, std::vector<Value>& args, std::string& error
     const bool hay = args.size() > 1 && args[1].is_dict();
     for (const auto& n : p.nombres) {
         if (!hay) { valores.push_back(Value::null()); continue; }
-        auto it = args[1].as_dict().find(n);
+        auto it = args[1].as_dict().find(n.nombre);
         valores.push_back(it == args[1].as_dict().end() ? Value::null() : it->second);
     }
 
@@ -634,6 +634,46 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
     error = std::string("los valores de tipo ") + recv.type_name() +
             " no tienen metodos";
     return Value::null();
+}
+
+// La cara de compilacion de call_method().
+//
+// Lo que el VM rechazaria al ejecutar se puede rechazar antes si el tipo del
+// receptor se conoce: `nombre.mayusculas()` sobre un string es una errata, y
+// una errata no deberia esperar a que alguien pida la pagina para salir.
+//
+// Si se anade un metodo arriba hay que anadirlo aqui: son la misma lista vista
+// desde los dos lados.
+const std::vector<MetodoBuiltin>* metodos_de(const std::string& tipo) {
+    // Los tres modificadores de respuesta se encadenan sobre CUALQUIER valor
+    // —`return {...}.status(201)`—, asi que aparecen en todas las listas.
+    static const std::vector<MetodoBuiltin> kComunes = {
+        {"status", 1, 1, nullptr}, {"header", 2, 2, nullptr}, {"cookie", 2, 3, nullptr},
+    };
+    static const auto con = [](std::initializer_list<MetodoBuiltin> propios) {
+        std::vector<MetodoBuiltin> v = kComunes;
+        v.insert(v.end(), propios);
+        return v;
+    };
+
+    static const std::vector<MetodoBuiltin> kString = con({
+        {"starts_with", 1, 1, "bool"}, {"ends_with", 1, 1, "bool"},
+        {"contains", 1, 1, "bool"},    {"upper", 0, 0, "string"},
+        {"lower", 0, 0, "string"},     {"trim", 0, 0, "string"},
+    });
+    static const std::vector<MetodoBuiltin> kList = con({{"add", 1, 1, nullptr}});
+    static const std::vector<MetodoBuiltin> kDict = con({
+        {"has", 1, 1, "bool"}, {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
+    });
+
+    if (tipo == "string") return &kString;
+    if (tipo == "List")   return &kList;
+    if (tipo == "Dict")   return &kDict;
+    // Los numeros y los bool no tienen nada propio: solo lo comun.
+    if (tipo == "int" || tipo == "long" || tipo == "float" ||
+        tipo == "double" || tipo == "bool")
+        return &kComunes;
+    return nullptr;
 }
 
 namespace {

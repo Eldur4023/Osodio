@@ -29,7 +29,7 @@ static void comprobar(const char* nombre, const std::string& obtenido,
 
 // Compila y renderiza; devuelve "" y deja `err` si algo falla.
 static std::string pintar(const std::string& fuente,
-                          const std::vector<std::string>& nombres,
+                          const std::vector<odio::NombreTipado>& nombres,
                           std::vector<Value> valores, std::string& err) {
     odio::DiagnosticBag diags;
     Plantilla p;
@@ -48,7 +48,7 @@ static std::string pintar(const std::string& fuente,
 }
 
 static void caso(const char* nombre, const std::string& fuente,
-                 const std::vector<std::string>& nombres,
+                 const std::vector<odio::NombreTipado>& nombres,
                  std::vector<Value> valores, const std::string& esperado) {
     std::string err;
     const std::string got = pintar(fuente, nombres, std::move(valores), err);
@@ -62,7 +62,7 @@ static void caso(const char* nombre, const std::string& fuente,
 
 // Casos que TIENEN que fallar al compilar, con el motivo esperado.
 static void no_compila(const char* nombre, const std::string& fuente,
-                       const std::vector<std::string>& nombres,
+                       const std::vector<odio::NombreTipado>& nombres,
                        const std::string& trozo) {
     std::string err;
     const std::string got = pintar(fuente, nombres, {}, err);
@@ -217,6 +217,25 @@ int main() {
         dir_tpl = ".";
         fs::remove_all(d);
     }
+
+    // Cuando render() sabe el tipo de lo que pasa, la plantilla se comprueba
+    // contra el: una errata dentro de un {{ }} deja de ser una pagina rota.
+    std::printf("== tipos ==\n");
+    caso("metodo que existe", "{{ s.upper().trim() }}", {{"s", "string"}},
+         {Value::str(" ana ")}, "ANA");
+    no_compila("metodo que no existe", "{{ s.mayusculas() }}", {{"s", "string"}},
+               "no tienen el metodo");
+    no_compila("metodo con argumentos de mas", "{{ s.upper(1) }}", {{"s", "string"}},
+               "espera 0 argumento(s)");
+    no_compila("metodo tras encadenar", "{{ s.upper().recortar() }}", {{"s", "string"}},
+               "no tienen el metodo");
+    no_compila("campo sobre un numero", "{{ n.campo }}", {{"n", "int"}},
+               "no tiene campos");
+
+    // Sin tipo no hay nada que comprobar, y eso tiene que seguir compilando:
+    // es lo que le pasa a la variable de un {% for %}.
+    caso("sin tipo no se comprueba", "{% for x in xs %}{{ x.upper() }}{% endfor %}",
+         {"xs"}, {Value::list({Value::str("a")})}, "A");
 
     std::printf("\n%s\n", fallos ? "HAY FALLOS" : "todas pasan");
     return fallos ? 1 : 0;

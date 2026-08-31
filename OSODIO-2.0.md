@@ -90,7 +90,7 @@ Esto es el contrato: todo lo que Odio tiene que saber expresar, y nada más.
 
 ### Salida
 - `json` · `html` (inline o fichero) · `text` · `send` crudo
-- `render(plantilla, datos)` — Jinja2 vía **Jinja2Cpp** (ver §9)
+- `render(plantilla, datos)` — motor de plantillas propio (ver §9)
 - `send_file` — zero-copy `sendfile(2)`
 - `status`, cabeceras, cookies (`Secure`, `HttpOnly`, `SameSite`, `Max-Age`)
 - Redirección
@@ -187,7 +187,7 @@ compartido entre VMs y `state.x = state.x + 1` sería una carrera.
 mi-app/
   app.odio           configuración
   rutas/*.odio       el orden entre ficheros es indiferente
-  templates/         plantillas Jinja2
+  templates/         plantillas de Odio
   public/            estáticos
 ```
 
@@ -311,7 +311,7 @@ frontend al leer el `.odio`, una vez, con los nombres y los tipos delante.
 | Ejecución | Bytecode sobre VM propio, un VM por hilo de event loop |
 | Compilación | Interna al binario. Sin toolchain externo, sin transpilación a C++ |
 | Persistencia | Módulos `sqlite`, `postgres` y `mysql`, sobre pool de hilos y `await` |
-| Plantillas | **Jinja2Cpp**, no inja. Jinja2 de verdad, no un subconjunto |
+| Plantillas | Motor propio, con la forma de Jinja2 y expresiones de Odio dentro |
 | Sintaxis | Bloques por indentación (Python), tipado estático (C++), rutas (Flask), entrada por firma (FastAPI) |
 | Genéricos | Solo contenedores nativos, borrados en compilación. Sin clases genéricas de usuario |
 | Config | En Odio, bloque `app:`. Sin YAML ni TOML |
@@ -319,33 +319,43 @@ frontend al leer el `.odio`, una vez, con los nombres y los tipos delante.
 
 ---
 
-### Por qué Jinja2Cpp y no inja
+### Plantillas: de Jinja2Cpp a un motor propio
 
-inja es una sola cabecera sin dependencias, y sobre el papel encaja mejor con la filosofía de
-vendorizado. Se descartó igualmente: **implementa un subconjunto de Jinja2 y diverge en
-detalles**. Jinja2Cpp implementa Jinja2 de verdad — la sintaxis de Flask, que es la que
-escribe la gente y la que generan por defecto los LLM cuando les pides una plantilla.
+La primera decisión fue **Jinja2Cpp**, y el motivo era bueno: inja, que es una sola cabecera
+sin dependencias, implementa un *subconjunto* de Jinja2 y diverge en detalles, mientras que
+Jinja2Cpp implementa Jinja2 de verdad — la sintaxis de Flask, que es la que escribe la gente
+y la que generan por defecto los LLM.
 
-El coste es real y hay que asumirlo: Jinja2Cpp no está empaquetado en apt, no es cabecera
-única y arrastra **Boost, fmt, rapidjson, expected-lite, optional-lite, variant-lite y
-string-view-lite**. Se trae con `FetchContent` y un tag fijado (1.3.2), lo que **rompe la
-promesa de "cero red durante cmake"** en el primer configure. Es la única dependencia en esa
-situación.
+El coste se asumió a sabiendas: no está empaquetado en apt, no es cabecera única, y arrastra
+**Boost, fmt, rapidjson, expected-lite, optional-lite, variant-lite y string-view-lite**. Se
+traía con `FetchContent` y un tag fijado, lo que **rompía la promesa de "cero red durante
+cmake"** en el primer configure. Era la única dependencia en esa situación.
 
-Medido tras el hito 0, el coste está **enteramente en tiempo de compilación**:
+**Se revirtió.** El motor de plantillas es ahora propio: conserva la forma de Jinja2 —`{{ }}`,
+`{% if %}`, `{% for %}`, `{% include %}`, `{% extends %}`, `{% block %}`, `|safe`— pero lo
+que va dentro de las llaves son **expresiones de Odio**, parseadas por el mismo parser y
+ejecutadas por el mismo VM que el resto del lenguaje.
 
-| | |
-|---|---|
-| `_deps` en disco | 836 MB (648 MB solo Boost) |
-| `libjinja2cpp.a` | 23,9 MB |
-| `libosodio.a` (el motor) | **0,8 MB** |
-| Binario final | 6,6 MB · **3,3 MB con `strip`** |
-| Bibliotecas dinámicas | libstdc++, libm, libgcc, libc — **ninguna de Boost** |
+Los dos motivos, en orden de peso:
 
-Boost se usa como cabeceras: no aparece en `ldd` del binario. O sea que la objeción del
-README a Boost.Asio — 200 MB de cabeceras que engordan la compilación — **sigue siendo
-cierta aquí**, pero no toca lo que se despliega. Lo que se envía son 3,3 MB que solo
-dependen del runtime de C++.
+1. **Una errata en una plantilla pasa a ser un error de compilación.** La plantilla se
+   compila cuando el emisor ve el `render("x.html", k=v)`, contra esas claves y sus tipos.
+   `{{ quien.mayusculas() }}` sale en `osodio --check`, con fichero y línea, en vez de en
+   producción. Ningún motor externo puede dar eso, porque no conoce el lenguaje de la app.
+2. **El precio de la dependencia.** Medido al quitarla:
+
+| | Con Jinja2Cpp | Con motor propio |
+|---|---|---|
+| Binario | 7.951.752 B | **1.592.032 B** |
+| `build/_deps` | ~800 MB | **no existe** |
+| Compilar desde cero | minutos | **19 s** |
+| Red en el primer `cmake` | obligatoria | **ninguna** |
+
+El rendimiento apenas entró en la decisión: renderizar 500 filas mejoró un 11%, y esa mejora
+vino de cambiar de motor, no de quitar la biblioteca.
+
+Lo que se pierde: los filtros de Jinja2 (`|upper`, `|join`, ...), que aquí son métodos de
+Odio, y `{{ super() }}`, que no está.
 
 ---
 

@@ -105,7 +105,7 @@ cd build && ctest --output-on-failure
 tests/run_tests.sh ~/osodio-build/osodio
 ```
 
-60 pruebas que levantan el binario contra ficheros `.odio` reales y comprueban las
+65 pruebas que levantan el binario contra ficheros `.odio` reales y comprueban las
 respuestas por el socket. La suite no enlaza nada del proyecto: prueba lo que se despliega,
 no una versión instrumentada de ello.
 
@@ -119,7 +119,7 @@ mi-app/
   rutas/
     publico.odio
     admin.odio
-  templates/         plantillas Jinja2
+  templates/         plantillas de Odio
   public/            estáticos
 ```
 
@@ -334,7 +334,7 @@ Todo sale por `return`. No hay objeto `response` que arrastrar.
 ```odio
 return { "clave": "valor" }              # 200, JSON
 return [1, 2, 3]                         # 200, JSON
-return render("pagina.html", k=v)        # HTML con Jinja2
+return render("pagina.html", k=v)        # HTML con plantillas de Odio
 return text("hola")                      # text/plain
 return html("<h1>hola</h1>")             # text/html
 return send_file("/var/f.pdf")           # sendfile(2)
@@ -851,7 +851,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 | | |
 |---|---|
 | `text(v)` `html(v)` `json(v)` | Escriben la respuesta |
-| `render(plantilla, k=v, ...)` | Renderiza con Jinja2 |
+| `render(plantilla, k=v, ...)` | Renderiza una plantilla de Odio |
 | `status(código)` `redirect(destino[, código])` `send_file(ruta)` | |
 | `len(v)` | Tamaño de string, List o Dict |
 | `str(v)` `int(v)` | Conversión explícita |
@@ -887,6 +887,25 @@ base de datos son asíncronos: se llaman con `await`.
 | `List` | `add(v)` |
 | `Dict` | `has(clave)` `keys()` |
 | `File` | `save(directorio)` |
+
+Cuando el tipo del receptor se conoce al compilar —un parámetro declarado, una variable con
+tipo, un literal— el nombre y el número de argumentos se comprueban **ahí**, no al ejecutar:
+
+```
+error: los valores de tipo string no tienen el metodo 'mayusculas';
+       tienen status, header, cookie, starts_with, ends_with, contains, upper, lower, trim
+```
+
+La comprobación sigue por la cadena, porque cada método sabe lo que devuelve:
+`s.upper().recortar()` también falla al compilar. Lo mismo con los campos de una clase:
+`p.noexiste` dice qué campos tiene `p` en vez de devolver `null` en silencio.
+
+Esto llega también **dentro de las plantillas**, porque `render()` le pasa los tipos de sus
+argumentos al compilador de plantillas: `{{ quien.mayusculas() }}` es un error de
+`osodio --check`, con el fichero y la línea de la plantilla.
+
+Donde el tipo no se conoce —la variable de un `{% for %}`, un campo de un `Json`— no se
+comprueba nada y el despacho sigue siendo en ejecución, como antes.
 
 ---
 

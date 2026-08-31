@@ -75,8 +75,8 @@ post endpoint("/upload/documento", File fichero, string titulo):
 # borrados — el checker los comprueba y desaparecen antes del bytecode,
 # así que el VM nunca ve un List<File>, solo una lista.
 post endpoint("/upload/galeria", List<File> imagenes, string album):
-    require imagenes.size > 0  else status(422)
-    require imagenes.size <= 20 else status(413)
+    require len(imagenes) > 0  else status(422)
+    require len(imagenes) <= 20 else status(413)
 
     List<string> guardadas = []
 

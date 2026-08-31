@@ -173,7 +173,7 @@ bool Emitter::emit_ctor(const std::string& cls, const std::vector<std::string>& 
     return !failed_;
 }
 
-bool Emitter::emit_condition(const Expr& e, const std::vector<std::string>& names,
+bool Emitter::emit_condition(const Expr& e, const std::vector<NombreTipado>& names,
                              Chunk& out) {
     chunk_        = &out;
     route_method_ = {};
@@ -182,7 +182,7 @@ bool Emitter::emit_condition(const Expr& e, const std::vector<std::string>& name
     loops_.clear();
     scope_depth_ = 0;
 
-    for (const auto& n : names) declare_local(n, e.loc);
+    for (const auto& n : names) declare_local(n.nombre, e.loc, n.tipo);
 
     emit_expr(e);
     out.emit(Op::Return, e.loc);
@@ -258,6 +258,7 @@ void Emitter::emit_stmt(const Stmt& s) {
 
             // `this.campo = v` y `objeto.campo = v`.
             if (s.target->kind == ExprKind::Member) {
+                if (!comprobar_campo(*s.target->object, s.target->text, s.loc)) return;
                 emit_expr(*s.target->object);
                 emit_expr(*s.value);
                 chunk_->emit(Op::SetMember, s.loc,
@@ -577,6 +578,8 @@ void Emitter::emit_expr(const Expr& e) {
                              static_cast<uint32_t>(id) << 8);
                 return;
             }
+            if (!comprobar_campo(*e.object, e.text, e.loc)) return;
+
             emit_expr(*e.object);
             chunk_->emit(Op::GetMember, e.loc,
                          chunk_->add_constant(Value::str(e.text)));
@@ -703,6 +706,100 @@ void Emitter::emit_expr(const Expr& e) {
             break;
         }
     }
+}
+
+// Un campo sobre un receptor de tipo conocido.  Vale tanto para leerlo como
+// para escribirlo: los campos de una clase son los declarados, y si no se
+// comprobara la escritura se podria crear uno que luego no se deja leer.
+//
+// Sin la comprobacion, leer un campo que no existe devuelve null en silencio y
+// el fallo aparece paginas mas adelante, lejos de la errata.
+bool Emitter::comprobar_campo(const Expr& objeto, const std::string& campo,
+                              SourceLoc loc) {
+    const std::string tr = tipo_de(objeto);
+    if (tr.empty()) return true;
+
+    if (classes_) {
+        auto it = classes_->find(tr);
+        if (it != classes_->end()) {
+            const auto& f = it->second.fields;
+            if (std::find(f.begin(), f.end(), campo) != f.end()) return true;
+            if (it->second.methods.count(campo)) {
+                error(loc, "'" + tr + "." + campo + "' es un metodo: "
+                           "hay que llamarlo con ()");
+            } else {
+                std::string hay;
+                for (const auto& n : f) hay += (hay.empty() ? "" : ", ") + n;
+                error(loc, "'" + tr + "' no tiene un campo '" + campo + "'" +
+                           (hay.empty() ? "" : "; tiene " + hay));
+            }
+            return false;
+        }
+    }
+    // Un escalar o una List no tienen campos, se llame como se llame lo que se
+    // les pida.  Un Dict si: ahi cualquier clave es valida.
+    if (metodos_de(tr) && tr != "Dict") {
+        error(loc, "'" + campo + "' sobre " + tr + ", que no tiene campos");
+        return false;
+    }
+    return true;
+}
+
+// Solo lo evidente: un literal, o una variable con tipo declarado.  No hay
+// inferencia, asi que ante la duda devuelve "" y no se comprueba nada.
+std::string Emitter::tipo_de(const Expr& e) const {
+    switch (e.kind) {
+        case ExprKind::StringLit: return "string";
+        case ExprKind::IntLit:    return "int";
+        case ExprKind::FloatLit:  return "float";
+        case ExprKind::BoolLit:   return "bool";
+        case ExprKind::Ident:     return local_type(e.text);
+        case ExprKind::This:      return local_type("this");
+        // Metodo builtin sobre un receptor de tipo conocido: la cadena sigue.
+        case ExprKind::Call: {
+            if (!e.object || e.object->kind != ExprKind::Member) return {};
+            const std::string recv = tipo_de(*e.object->object);
+            const auto* lista = metodos_de(recv);
+            if (!lista) return {};
+            for (const auto& m : *lista)
+                if (e.object->text == m.nombre)
+                    return m.devuelve ? m.devuelve : recv;
+            return {};
+        }
+        default:                  return {};
+    }
+}
+
+bool Emitter::comprobar_metodo_builtin(const Expr& e) {
+    const auto* lista = metodos_de(tipo_de(*e.object->object));
+    if (!lista) return true;                  // tipo sin lista cerrada
+
+    const std::string& metodo = e.object->text;
+    const MetodoBuiltin* def = nullptr;
+    for (const auto& m : *lista)
+        if (metodo == m.nombre) { def = &m; break; }
+
+    if (!def) {
+        std::string hay;
+        for (const auto& m : *lista) hay += (hay.empty() ? "" : ", ") + std::string(m.nombre);
+        error(e.object->loc, "los valores de tipo " + tipo_de(*e.object->object) +
+                             " no tienen el metodo '" + metodo + "'; tienen " + hay);
+        return false;
+    }
+
+    size_t argc = 0, named = 0;
+    for (const auto& a : e.args) (a.name.empty() ? argc : named)++;
+    if (named > 0) ++argc;                    // van agrupados en un Dict
+
+    if (static_cast<int>(argc) < def->min_args ||
+        static_cast<int>(argc) > def->max_args) {
+        std::string espera = std::to_string(def->min_args);
+        if (def->max_args != def->min_args) espera += "-" + std::to_string(def->max_args);
+        error(e.loc, "'" + metodo + "()' espera " + espera +
+                     " argumento(s), pero recibe " + std::to_string(argc));
+        return false;
+    }
+    return true;
 }
 
 void Emitter::emit_method_call_dynamic(const Expr& e) {
@@ -928,10 +1025,12 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
                 return;
             }
         }
+        if (!comprobar_metodo_builtin(e)) return;
         emit_method_call_dynamic(e);
         return;
     }
     else if (e.object->kind == ExprKind::Member) {
+        if (!comprobar_metodo_builtin(e)) return;
         emit_method_call_dynamic(e);
         return;
     }
@@ -1037,10 +1136,13 @@ void Emitter::emitir_render_compilado(const Expr& e) {
         return;
     }
 
-    std::vector<std::string> claves;
+    // Cada clave viaja con el tipo de lo que se le pasa: es lo que permite que
+    // dentro de la plantilla `{{ titulo.mayusculas() }}` sea un error aqui y no
+    // una pagina rota en produccion.
+    std::vector<NombreTipado> claves;
     for (const auto& a : e.args) {
         if (a.name.empty()) continue;
-        claves.push_back(a.name);
+        claves.push_back({a.name, tipo_de(*a.value)});
     }
 
     const std::filesystem::path ruta =

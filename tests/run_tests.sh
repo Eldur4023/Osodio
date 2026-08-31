@@ -190,9 +190,12 @@ no_compila "objeto fuera de sitio" "$AQUI/casos/malos/sse.odio"      "solo exist
 no_compila "ws sin origins"        "$AQUI/casos/malos/ws.odio"       "necesita origins"
 no_compila "campo inexistente"     "$AQUI/casos/malos/validate.odio" "no esta declarada"
 no_compila "metodo inexistente"    "$AQUI/casos/malos/metodo.odio"   "no tiene un metodo"
+no_compila "metodo de un string"   "$AQUI/casos/malos/metodo_tipo.odio" "no tienen el metodo"
+no_compila "campo de una clase"    "$AQUI/casos/malos/campo_tipo.odio"  "no tiene un campo"
 no_compila "modulo sin importar"   "$AQUI/casos/malos/import.odio"   "falta 'import sqlite'"
-# Los tipos de las expresiones se comprueban en EJECUCION, no al compilar:
-# el compilador verifica nombres, aridad y contexto, no que `s - 1` cuadre.
+# Los tipos de las expresiones se comprueban en EJECUCION: el compilador
+# verifica nombres, aridad, contexto, y los metodos y campos de un receptor
+# cuyo tipo conoce -- pero no que `s - 1` cuadre.
 # Eso ya lo cubre la prueba "sin coercion" de la suite de lenguaje.
 
 # ─── Resumen ─────────────────────────────────────────────────────────────────

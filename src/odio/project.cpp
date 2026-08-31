@@ -82,6 +82,21 @@ std::string format_errors(const DiagnosticBag& diags,
 
 namespace {
 
+// Nombre de tipo de Odio para un valor ya construido.  Se usa donde los datos
+// son constantes y por tanto su tipo es exacto.
+std::string tipo_odio_de(const Value& v) {
+    switch (v.type()) {
+        case Value::Type::Str:   return "string";
+        case Value::Type::Int:   return "int";
+        case Value::Type::Float: return "float";
+        case Value::Type::Bool:  return "bool";
+        case Value::Type::List:  return "List";
+        case Value::Type::Dict:  return "Dict";
+        default:                 return {};
+    }
+}
+
+
 
 // Igual, pero produciendo un Value en vez de un arbol nlohmann.
 //
@@ -231,9 +246,14 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         const std::string fuente((std::istreambuf_iterator<char>(f)),
                                  std::istreambuf_iterator<char>());
 
-        std::vector<std::string> claves;
-        std::vector<Value>       valores;
-        for (const auto& [k, v] : data) { claves.push_back(k); valores.push_back(v); }
+        // Aqui los datos son CONSTANTES, asi que el tipo de cada clave se sabe
+        // exacto: la plantilla se comprueba contra los valores de verdad.
+        std::vector<NombreTipado> claves;
+        std::vector<Value>        valores;
+        for (const auto& [k, v] : data) {
+            claves.push_back({k, tipo_odio_de(v)});
+            valores.push_back(v);
+        }
 
         Plantilla tpl_c;
         if (!compilar_plantilla(fuente, name, tpl_dir, claves, diags, tpl_c)) return {};
@@ -523,7 +543,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         auto info  = std::make_shared<ClassInfo>();
         info->name = c.name;
 
-        std::vector<std::string> field_names;
+        std::vector<NombreTipado> field_names;
         bool ok = true;
 
         for (const auto& f : c.fields) {
@@ -535,7 +555,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
                 continue;
             }
             info->fields.push_back({f.name, f.type.name, f.type.optional});
-            field_names.push_back(f.name);
+            field_names.push_back({f.name, f.type.name});
         }
         if (!ok) continue;
 

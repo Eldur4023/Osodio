@@ -34,6 +34,23 @@ using ClassSigs = std::map<std::string, ClassSig>;
 
 struct Plantilla;
 
+// Un nombre visible dentro de una expresion suelta, con su tipo declarado.
+//
+// El tipo puede ir vacio y entonces no se comprueba nada sobre el: es lo que
+// pasa con la variable de un {% for %}, cuyo tipo depende de lo que lleve
+// dentro la lista.
+struct NombreTipado {
+    std::string nombre;
+    std::string tipo;
+
+    // Sin tipo es el caso normal, asi que se escribe solo el nombre.  El
+    // literal necesita su propio constructor: de const char* a NombreTipado
+    // hay dos conversiones y el compilador solo hace una.
+    NombreTipado(std::string n, std::string t = {})
+        : nombre(std::move(n)), tipo(std::move(t)) {}
+    NombreTipado(const char* n) : nombre(n) {}
+};
+
 // Donde estan las plantillas y donde se guardan ya compiladas.
 //
 // Cuando el emisor ve un render("x.html", k=v) con el nombre literal, compila
@@ -69,9 +86,14 @@ public:
                    const CtorDecl& ct, Chunk& out);
 
     // Compila una expresion suelta con `names` ya declarados como locales, en
-    // ese orden.  Lo usan las reglas de `validate`: cada una se convierte en un
-    // chunk diminuto que recibe los campos y devuelve un booleano.
-    bool emit_condition(const Expr& e, const std::vector<std::string>& names,
+    // ese orden.  Lo usan las reglas de `validate` —cada una se convierte en un
+    // chunk diminuto que recibe los campos y devuelve un booleano— y las
+    // expresiones de dentro de un {{ }} en una plantilla.
+    //
+    // Los tipos viajan con los nombres para que `nombre.mayusculas()` se pueda
+    // rechazar aqui: sin ellos el emisor no sabe que `nombre` es un string y
+    // la errata se descubre en produccion.
+    bool emit_condition(const Expr& e, const std::vector<NombreTipado>& names,
                         Chunk& out);
 
     // Cuerpo de un `on error`: sin parametros, con el objeto `error` disponible.
@@ -123,6 +145,14 @@ private:
     void emit_stmt(const Stmt& s);
     void emit_expr(const Expr& e);
     void emitir_render_compilado(const Expr& e);
+    // Tipo estatico de una expresion, o "" si no se puede saber.  Solo mira lo
+    // que es evidente sin inferencia: un literal, o una variable declarada.
+    std::string tipo_de(const Expr& e) const;
+    // Comprueba un metodo contra la lista cerrada del tipo del receptor.
+    // Devuelve false —y ya ha dado el error— si ese metodo no existe.
+    bool comprobar_metodo_builtin(const Expr& e);
+    // Idem para un campo, al leerlo y al escribirlo.
+    bool comprobar_campo(const Expr& objeto, const std::string& campo, SourceLoc loc);
     void emit_call(const Expr& e, bool awaited);
     // Metodo cuyo receptor no tiene tipo conocido al compilar: se apila y el
     // despacho por tipo lo hace el VM.

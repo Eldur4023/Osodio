@@ -63,7 +63,7 @@ public:
         : dir_(dir), diags_(diags), out_(out) {}
 
     bool compilar(const std::string& fuente, const std::string& fichero,
-                  const std::vector<std::string>& datos) {
+                  const std::vector<NombreTipado>& datos) {
         out_.nombres = datos;
 
         // Herencia: se sube por la cadena de {% extends %} recogiendo bloques.
@@ -113,11 +113,11 @@ private:
     // bucle, que es exactamente lo que significa sombrear.
     void tapar(const std::string& nombre, std::vector<std::pair<size_t, std::string>>& tapados) {
         for (size_t i = out_.nombres.size(); i-- > 0;) {
-            if (out_.nombres[i] == nombre) {
-                tapados.emplace_back(i, out_.nombres[i]);
+            if (out_.nombres[i].nombre == nombre) {
+                tapados.emplace_back(i, out_.nombres[i].nombre);
                 // El marcador lleva la ranura para que dos nombres tapados no
                 // choquen entre si: el emisor tampoco admite eso.
-                out_.nombres[i] = " tapado" + std::to_string(i);
+                out_.nombres[i].nombre = " tapado" + std::to_string(i);
                 break;
             }
         }
@@ -427,9 +427,11 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
             tapar("loop", tapados);
 
             const uint32_t slot = static_cast<uint32_t>(out_.nombres.size());
-            out_.nombres.push_back(var);
+            // La variable del bucle no lleva tipo: depende de lo que haya
+            // dentro de la lista, y eso no se sabe aqui.
+            out_.nombres.push_back({var, {}});
             const uint32_t slot_loop = static_cast<uint32_t>(out_.nombres.size());
-            out_.nombres.push_back("loop");
+            out_.nombres.push_back({"loop", {}});
 
             out_.code.push_back({Plantilla::Op::BucleInicio,
                                  static_cast<uint32_t>(k), 0, slot, slot_loop, loc});
@@ -443,7 +445,7 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
             }
             Abierto ab = std::move(abiertos_.back());
             abiertos_.pop_back();
-            for (const auto& [idx, nom] : ab.tapados) out_.nombres[idx] = nom;
+            for (const auto& [idx, nom] : ab.tapados) out_.nombres[idx].nombre = nom;
             const auto& ini = out_.code[ab.inicio];
             out_.code.push_back({Plantilla::Op::BucleSiguiente, 0,
                                  static_cast<uint32_t>(ab.inicio + 1),
@@ -511,7 +513,7 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
 
 bool compilar_plantilla(const std::string& fuente, const std::string& fichero,
                         const std::string& dir,
-                        const std::vector<std::string>& datos,
+                        const std::vector<NombreTipado>& datos,
                         DiagnosticBag& diags, Plantilla& out) {
     Compilador c(dir, diags, out);
     return c.compilar(fuente, fichero, datos);

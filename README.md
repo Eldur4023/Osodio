@@ -135,7 +135,7 @@ y 422 automáticos. Uno de tipo `File` o `List<File>`, a las partes multipart.
 | | |
 |---|---|
 | `return { "a": 1 }` | 200, JSON |
-| `return render("x.html", k=v)` | HTML con Jinja2 |
+| `return render("x.html", k=v)` | HTML con plantillas de Odio |
 | `return text("hola")` / `html(...)` | texto plano / HTML |
 | `return send_file(ruta)` | fichero, `sendfile(2)` |
 | `return redirect("/otro")` | 302 |
@@ -173,6 +173,11 @@ Existen sin declararse, dentro del contexto que los define.
 | `error` | bloques `on error` | `code`, `message` |
 
 Usar `sse` en una ruta `get`, o `error` fuera de un `on error`, es error **de compilación**.
+
+Y donde el tipo se conoce, también lo es equivocarse de método o de campo: `nombre.mayusculas()`
+sobre un `string`, o `p.noexiste` sobre una clase, no llegan a arrancar. Eso alcanza al
+interior de las plantillas, porque `render()` le pasa los tipos de sus argumentos al
+compilador de plantillas.
 
 ---
 
@@ -292,7 +297,8 @@ línea, columna y cursor:
 
 Y se comprueba al compilar mucho más de lo que parece: un campo inexistente en una regla de
 `validate`, un `await` que falta o que sobra, un `sse` fuera de su ruta, una clase
-duplicada, dos cuerpos en la misma ruta, un `ws` sin `origins`.
+duplicada, dos cuerpos en la misma ruta, un `ws` sin `origins`, un método que ese tipo no
+tiene.
 
 **Si el fichero que guardas no compila, se sigue sirviendo la versión anterior.** Un typo
 no tumba el servidor.
@@ -369,7 +375,7 @@ osodio ./app --autotest  # tras arrancar y tras cada recarga, recorre los endpoi
 
 Osodio 2.0 está en desarrollo. El motor, el lenguaje y toda la superficie descrita aquí
 funcionan, están cubiertos por los ejemplos del repositorio (`ejemplo-*.odio`) y por una
-suite de regresión de 60 pruebas que ejerce el binario por el socket, tal y como se usa:
+suite de regresión de 65 pruebas que ejerce el binario por el socket, tal y como se usa:
 
 ```bash
 cmake --build build --target osodio-bin && ctest --test-dir build
