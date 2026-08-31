@@ -58,6 +58,13 @@ VALUES
    '2026-08-31', '13:45:59', '2026-08-31 13:45:59', '2026-08-31 13:45:59',
    2026, 'bytes', '{"a": 1, "b": [2, 3]}', NULL);
 
+-- Fila para el byte nulo dentro de un texto: LENGTH() de MySQL cuenta bytes de
+-- verdad, sin pararse en el primer NUL como sqlite. Lo que esto comprueba es
+-- que el DRIVER no trunca al convertir el resultado a std::string -- ya se
+-- arreglo una vez para el texto largo (STMT_ATTR_UPDATE_MAX_LENGTH), y esto es
+-- la version corta del mismo riesgo: un limite de tamano mal calculado.
+INSERT INTO tipos (id, t_text) VALUES (2, CAST(x'6100620063' AS CHAR));
+
 -- Fila con el texto largo: 4000 caracteres, muy por encima del buffer de 1024.
 INSERT INTO articulos (titulo, cuerpo, autor, vistas)
 VALUES ('largo', REPEAT('0123456789', 400), 'Ana', 1);

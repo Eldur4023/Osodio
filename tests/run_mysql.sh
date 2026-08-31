@@ -95,6 +95,20 @@ comprueba() {
     ok "$nombre"
 }
 
+# JSON valido de verdad, UTF-8 incluido.  El BLOB de /tipos es exactamente el
+# tipo de dato que ya rompio esto una vez -- comprobar solo el valor esperado
+# no basta, porque no cazaria una regresion en OTRA columna de la misma fila.
+json_valido() {
+    local nombre="$1" ruta="$2"
+    curl -sS --max-time 10 -o "$TMP/body" "http://127.0.0.1:$PUERTO$ruta" 2>/dev/null
+    if python3 -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" \
+            "$TMP/body" 2>/dev/null; then
+        ok "$nombre"
+    else
+        fallo "$nombre" "JSON valido en UTF-8" "$(head -c 200 "$TMP/body" | cat -v)"
+    fi
+}
+
 # ─── Arranque ────────────────────────────────────────────────────────────────
 
 mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NOMBRE" \
@@ -138,6 +152,11 @@ comprueba "el blob sale en base64" GET /tipos 200 '"t_blob":"Ynl0ZXM="'
 # decimal, igual que en el parser de JSON: se pierde el ultimo digito.  Antes se
 # quedaba clavado en INT64_MAX, que es la mitad del valor.
 comprueba "bigint sin signo"   GET /tipos 200 '"t_ubig":1844674407370955'
+json_valido "la fila de tipos entera es JSON valido" /tipos
+
+echo "== byte nulo dentro de un texto =="
+comprueba "el driver devuelve los 5 bytes" GET /nulo_en_texto 200 '"bytes":5'
+json_valido "y el JSON sigue siendo valido" /nulo_en_texto
 
 echo "== parametros =="
 comprueba "eco de parametros"  GET '/eco?n=42&s=abc' 200 '"entero"'
@@ -167,8 +186,10 @@ comprueba "tabla que no existe"  GET /tabla_mala          200 "no_existe"
 comprueba "parametros de menos"  GET /parametros_de_menos 200 "parametro"
 
 # Los buffers de bind vivian en el driver, que es unico y lo comparten los N
-# workers del pool.  Esto no basta para destapar una carrera —lo que la destapa
-# es ThreadSanitizer— pero si para cazar un cuelgue o una respuesta rota.
+# workers del pool: la carrera real ya se caza con ThreadSanitizer, pero un
+# 200 no basta aqui -- una peticion contestando con la fila de OTRA es
+# exactamente la forma que tenia ese fallo antes de arreglarlo, y solo se ve
+# comparando el contenido, no solo el codigo.
 echo "== concurrencia (pool 8) =="
 fallos_conc=0
 pids=""
@@ -180,9 +201,14 @@ done
 for p in $pids; do wait "$p" 2>/dev/null; done
 for i in $(seq 1 40); do
     [ "$(cat "$TMP/s$i" 2>/dev/null)" = "200" ] || fallos_conc=$((fallos_conc + 1))
+    case $(( (i % 3) + 1 )) in
+        1) grep -q 'largo'   "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+        2) grep -q 'corto'   "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+        3) grep -q 'unicode' "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+    esac
 done
-if [ "$fallos_conc" -eq 0 ]; then ok "40 peticiones simultaneas"
-else fallo "40 peticiones simultaneas" "40 respuestas 200" "$fallos_conc fallaron"; fi
+if [ "$fallos_conc" -eq 0 ]; then ok "40 simultaneas, cada una con su resultado"
+else fallo "40 simultaneas, cada una con su resultado" "40 correctas" "$fallos_conc mal"; fi
 
 kill -0 "$SRV" 2>/dev/null && ok "el servidor sigue vivo" \
                            || fallo "el servidor sigue vivo" "vivo" "muerto"

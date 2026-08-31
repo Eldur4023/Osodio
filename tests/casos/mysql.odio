@@ -41,6 +41,11 @@ get endpoint("/tipos"):
         return status(404)
     return filas[0]
 
+# length() de MySQL cuenta bytes de verdad; lo que se comprueba es que el
+# driver no trunca al convertir el resultado a std::string.
+get endpoint("/nulo_en_texto"):
+    return await mysql.query("select id, t_text, length(t_text) as bytes from tipos where id = 2")
+
 # ── Parametros: tipos de entrada y NULL ──────────────────────────────────────
 
 get endpoint("/eco", int n = 7, string s = "hola"):

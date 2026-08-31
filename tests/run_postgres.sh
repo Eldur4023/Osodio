@@ -145,6 +145,11 @@ comprueba "json y jsonb"       GET /tipos 200 '"t_jsonb"'
 comprueba "uuid"               GET /tipos 200 '0000-0000-0000-000000000001'
 comprueba "array"              GET /tipos 200 '"t_array":"{1,2,3}"'
 comprueba "nulo"               GET /tipos 200 '"t_nulo":null'
+# bytea: libpq lo entrega ya en el hexadecimal de postgres, asi que el driver
+# no necesita decodificarlo aparte para que sea JSON valido -- lo que se
+# comprueba es que eso siga siendo cierto y no una casualidad silenciosa.
+comprueba "bytea en hexadecimal" GET /tipos 200 '"t_bytea":"\\x68656c6c6f"'
+json_valido "la fila de tipos entera es JSON valido" /tipos
 
 # NaN e Infinity son validos en postgres y JSON no los sabe escribir.
 echo "== valores especiales de coma flotante =="
@@ -172,6 +177,9 @@ comprueba "tabla que no existe"    GET /tabla_mala          200 "no_existe"
 comprueba "marcadores de menos"    GET /marcadores_de_menos 200 "marcador"
 comprueba "mezclar ? y \$1"        GET /mezcla              200 "mezcla"
 
+# Un 200 no basta: una peticion contestando con la fila de OTRA es exactamente
+# la forma que tenia el fallo de bind compartido que ya se caza en mysql -- ahi
+# solo se ve comparando el contenido, no solo el codigo.
 echo "== concurrencia (pool 8) =="
 fallos_conc=0
 pids=""
@@ -183,9 +191,14 @@ done
 for p in $pids; do wait "$p" 2>/dev/null; done
 for i in $(seq 1 40); do
     [ "$(cat "$TMP/s$i" 2>/dev/null)" = "200" ] || fallos_conc=$((fallos_conc + 1))
+    case $(( (i % 3) + 1 )) in
+        1) grep -q 'largo'   "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+        2) grep -q 'corto'   "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+        3) grep -q 'unicode' "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+    esac
 done
-if [ "$fallos_conc" -eq 0 ]; then ok "40 peticiones simultaneas"
-else fallo "40 peticiones simultaneas" "40 respuestas 200" "$fallos_conc fallaron"; fi
+if [ "$fallos_conc" -eq 0 ]; then ok "40 simultaneas, cada una con su resultado"
+else fallo "40 simultaneas, cada una con su resultado" "40 correctas" "$fallos_conc mal"; fi
 
 kill -0 "$SRV" 2>/dev/null && ok "el servidor sigue vivo" \
                            || fallo "el servidor sigue vivo" "vivo" "muerto"
