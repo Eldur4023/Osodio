@@ -306,7 +306,7 @@ no tumba el servidor.
 | **Rutas** | Radix tree, `:param`, `{param}`, `*`, grupos anidados |
 | **Entrada** | Ruta, query con defecto, cuerpo JSON tipado, multipart, cabeceras, cookies, formularios |
 | **Validación** | Bloque `validate:` por clase → 422 automático con todos los mensajes |
-| **Salida** | JSON, HTML, texto, plantillas Jinja2, ficheros, redirecciones, códigos |
+| **Salida** | JSON, HTML, texto, plantillas propias con `{% extends %}`, ficheros, redirecciones, códigos |
 | **Async** | `await sleep(ms)`, `await ws.recv()`, cancelación al desconectar |
 | **Tiempo real** | SSE con `id:` para reconexión, WebSockets RFC 6455 |
 | **Auth** | `session` en cookie firmada, JWT HS256 con verificación de `alg`, `exp` e `iss` |
@@ -336,16 +336,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-Única dependencia vendorizada en `third_party/`: **llhttp**, 360 KB de C sin dependencias
-propias. El JSON lo lee y lo escribe Osodio.
+**No se baja nada de la red.** La única dependencia vendorizada es **llhttp** —360 KB de C
+sin dependencias propias, para parsear HTTP—. El JSON, las plantillas y la criptografía son
+de casa. El árbol entero compila desde cero en unos veinte segundos y el binario son
+**1,5 MB**.
 
-**Jinja2Cpp es la excepción, y es cara**: no está empaquetado, no es cabecera única y
-arrastra siete proyectos —Boost, fmt, rapidjson, expected-lite, optional-lite, variant-lite
-y string-view-lite—, unos 800 MB en `build/_deps`. Se trae con `FetchContent` y un tag
-fijado, así que es **el único motivo** por el que el primer configure necesita red. Se
-eligió sobre inja porque implementa Jinja2 de verdad —la sintaxis de Flask— en vez de un
-subconjunto. El coste es de disco y de tiempo de compilación: el binario final son ~7,6 MB
-y no enlaza nada de Boost, que se usa solo en cabeceras.
+Del sistema solo hacen falta los clientes de las bases de datos que quieras, y cada módulo
+se compila solo si el suyo está: `libsqlite3-dev`, `libpq-dev`, `libmysqlclient-dev`.
 
 **jemalloc, opcional pero recomendado.** Con varios event loops y un pool de base de datos,
 el `malloc` de glibc serializa en sus arenas y se convierte en el cuello de botella: en

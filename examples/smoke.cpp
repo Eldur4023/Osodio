@@ -14,9 +14,8 @@ int main() {
         res.json_text(R"({"ok":true,"engine":"osodio-2.0"})");
     });
 
-    app.get("/tpl", [](Response& res) {
-        res.render("hello.html", {{"nombre", "Osodio"}, {"version", "2.0"}});
-    });
+    // Las plantillas ya no se renderizan desde C++: viven en Odio, se compilan
+    // al arrancar y se piden con render() desde un .odio.  Ver ejemplo/.
 
     app.serve_static("/static", "./public");
 

@@ -11,9 +11,6 @@
 #include <cerrno>
 #include <iostream>
 #include <vector>
-#include <jinja2cpp/template_env.h>
-#include <jinja2cpp/filesystem_handler.h>
-#include <jinja2cpp/value.h>
 #include "cookies.hpp"
 
 namespace osodio {
@@ -190,74 +187,15 @@ public:
         return *this;
     }
 
-    // Render a Jinja2 template from the templates directory.
-    // Uses Jinja2Cpp; the TemplateEnv is cached per thread per templates_dir.
+    // Las plantillas ya no se renderizan aqui.
     //
-    //   res.render("index.html", datos);
+    // El motor vive en el frontend de Odio (src/odio/plantilla.cpp): compila la
+    // plantilla al arrancar contra las claves de cada render(), y en caliente
+    // solo queda recorrer una lista de instrucciones.  El resultado llega a
+    // Response como HTML ya hecho, por header().send().
     //
-    // Los datos llegan ya como valores de Jinja2.  Antes se recibia un arbol
-    // nlohmann que habia que convertir aqui: un intermediario que solo servia
-    // para ir de un arbol a otro.
-    Response& render(const std::string& template_name,
-                     jinja2::ValuesMap data = {}) {
-        if (state_->body_committed) {
-            std::cerr << "[osodio] Response.render() called after body already committed — ignoring\n";
-            return *this;
-        }
-        // Reject traversal/absolute paths before handing to Jinja2Cpp.
-        {
-            std::filesystem::path requested(template_name);
-            if (requested.is_absolute()) {
-                state_->status_code = 403;
-                state_->body = R"({"error":"Forbidden"})";
-                state_->headers["Content-Type"] = "application/json; charset=utf-8";
-                state_->body_committed = true;
-                return *this;
-            }
-            for (const auto& comp : requested) {
-                if (comp == "..") {
-                    state_->status_code = 403;
-                    state_->body = R"({"error":"Forbidden"})";
-                    state_->headers["Content-Type"] = "application/json; charset=utf-8";
-                    state_->body_committed = true;
-                    return *this;
-                }
-            }
-        }
-        header("Content-Type", "text/html; charset=utf-8");
-        // One TemplateEnv per (thread × templates_dir): Jinja2Cpp caches parsed
-        // templates inside the environment, same pattern as the old inja setup.
-        thread_local std::unordered_map<std::string,
-                                        std::unique_ptr<jinja2::TemplateEnv>> envs;
-        auto it = envs.find(state_->templates_dir);
-        if (it == envs.end()) {
-            auto env = std::make_unique<jinja2::TemplateEnv>();
-            env->AddFilesystemHandler(
-                "", std::make_shared<jinja2::RealFileSystem>(state_->templates_dir));
-            it = envs.emplace(state_->templates_dir, std::move(env)).first;
-        }
-        state_->body_committed = true;
-        auto tmpl = it->second->LoadTemplate(template_name);
-        if (!tmpl) {
-            std::cerr << "[osodio] template load error: "
-                      << tmpl.error().ToString() << '\n';
-            state_->status_code = 500;
-            state_->body = R"({"error":"Internal Server Error"})";
-            state_->headers["Content-Type"] = "application/json; charset=utf-8";
-            return *this;
-        }
-        auto result = tmpl->RenderAsString(data);
-        if (!result) {
-            std::cerr << "[osodio] template render error: "
-                      << result.error().ToString() << '\n';
-            state_->status_code = 500;
-            state_->body = R"({"error":"Internal Server Error"})";
-            state_->headers["Content-Type"] = "application/json; charset=utf-8";
-            return *this;
-        }
-        state_->body = std::move(result.value());
-        return *this;
-    }
+    // Eso quito Jinja2Cpp de encima, y con el Boost, fmt, rapidjson y cuatro
+    // bibliotecas mas.
 
     // Zero-copy static file: instead of reading the file into the body,
     // record the path and let the connection layer use sendfile(2).

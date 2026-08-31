@@ -973,9 +973,23 @@ void Emitter::emit_call(const Expr& e, bool awaited) {
     //
     // Si el nombre no es literal —render(variable)— no hay nada que compilar
     // por adelantado y se sigue por la via antigua.
-    if (name == "render" && plantillas_ && plantillas_->tabla &&
-        !e.args.empty() && e.args[0].name.empty() &&
-        e.args[0].value->kind == ExprKind::StringLit) {
+    if (name == "render") {
+        if (e.args.empty() || !e.args[0].name.empty() ||
+            e.args[0].value->kind != ExprKind::StringLit) {
+            // El nombre tiene que estar escrito.  Si no, no hay nada que
+            // compilar por adelantado, y una plantilla que solo se comprueba
+            // cuando alguien pide la pagina no vale para nada: la mitad de la
+            // gracia de tenerlas en Odio es que sus erratas son errores de
+            // compilacion.
+            error(e.loc, "render() necesita el nombre de la plantilla escrito, no una "
+                         "variable. Para elegir entre varias, usa un if con nombres "
+                         "literales: cada rama queda comprobada al compilar");
+            return;
+        }
+        if (!plantillas_ || !plantillas_->tabla) {
+            error(e.loc, "render() no se puede usar aqui");
+            return;
+        }
         emitir_render_compilado(e);
         return;
     }
