@@ -81,6 +81,28 @@ comprueba() {
     ok "$nombre"
 }
 
+# comprueba_mp <nombre> <ruta> <codigo-esperado> <subcadena-esperada> -- <flags -F de curl...>
+# Aparte de comprueba(): un cuerpo multipart no es una cadena que se pueda pasar
+# con -d, son partes con nombre, y curl las arma con -F por campo.
+comprueba_mp() {
+    local nombre="$1" ruta="$2" cod="$3" trozo="${4:-}"; shift 4
+    local got
+    got=$(curl -sS --max-time 10 -X POST -o "$TMP/body" -w '%{http_code}' "$@" \
+          "http://127.0.0.1:$PUERTO$ruta" 2>/dev/null)
+    local body
+    body=$(cat "$TMP/body" 2>/dev/null)
+
+    if [ "$got" != "$cod" ]; then
+        fallo "$nombre" "codigo $cod" "codigo $got — $body"
+        return
+    fi
+    if [ -n "$trozo" ] && ! grep -qF "$trozo" "$TMP/body"; then
+        fallo "$nombre" "que contenga '$trozo'" "$body"
+        return
+    fi
+    ok "$nombre"
+}
+
 # no_compila <nombre> <fichero> <subcadena-del-error>
 no_compila() {
     local nombre="$1" fich="$2" trozo="$3"
@@ -160,6 +182,44 @@ comprueba "grupo con prefijo"   GET /api/v1/hola      200 '"v":1'
 comprueba "guarda deniega"      GET /admin/panel      403
 comprueba "guarda permite"      GET '/admin/panel?k=abre' 200 '"panel":true'
 comprueba "manejador 404"       GET /tampoco          404 '"ruta":"/tampoco"'
+
+# ── Matriz de enlace de parametros ──────────────────────────────────────────
+# Origen (ruta / query / multipart) x tipo (escalar, File, List<File>) x
+# presencia (falta, mal tipado, en dos sitios a la vez).  Ver casos/parametros.odio:
+# el bug real fue un parametro de texto SIEMPRE vacio en una ruta con ficheros,
+# y solo aparece cuando los dos conviven en la misma ruta -- probar query y
+# multipart cada uno por separado, como hacia el resto de la suite, no lo cazaba.
+echo "== enlace de parametros =="
+levantar "$AQUI/casos/parametros.odio" || exit 1
+
+comprueba "query ausente sin defecto da el cero del tipo" GET /query 200 '"q":""'
+
+comprueba_mp "multipart: texto junto a un fichero" /mp/uno 200 '"titulo":"hola"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "titulo=hola"
+comprueba_mp "multipart: el fichero tambien llega" /mp/uno 200 '"filename":"a.txt"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "titulo=hola"
+
+comprueba_mp "multipart: string"  /mp/tipos 200 '"s":"hola"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "s=hola" -F "n=7" -F "b=true"
+comprueba_mp "multipart: int"     /mp/tipos 200 '"n":7' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "s=hola" -F "n=7" -F "b=true"
+comprueba_mp "multipart: bool"    /mp/tipos 200 '"b":true' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "s=hola" -F "n=7" -F "b=true"
+
+comprueba_mp "multipart: texto junto a List<File>" /mp/lista 200 '"album":"vacaciones"' \
+    -F "fs=@$AQUI/casos/parametros.odio;filename=a.txt" -F "album=vacaciones"
+comprueba_mp "multipart: cuenta los ficheros de la lista" /mp/lista 200 '"n":2' \
+    -F "fs=@$AQUI/casos/parametros.odio;filename=a.txt" \
+    -F "fs=@$AQUI/casos/parametros.odio;filename=b.txt" -F "album=x"
+
+comprueba_mp "multipart: campo ausente cae al defecto" /mp/defecto 200 '"etiqueta":"sin-etiqueta"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt"
+
+comprueba_mp "multipart: la query gana al campo del formulario" "/mp/prioridad?origen=query" 200 '"origen":"query"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "origen=formulario"
+
+comprueba_mp "multipart: escalar mal tipado da 400" /mp/malo 400 'parametro invalido' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "n=no-es-un-numero"
 
 echo "== clases y validacion =="
 levantar "$AQUI/casos/clases.odio" || exit 1
