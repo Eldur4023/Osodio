@@ -408,8 +408,17 @@ void App::run(const std::string& host, uint16_t port) {
 
     g_initiate_drain = [this, &main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
         {
+            // Cada servidor deja de aceptar EN SU PROPIO loop.  Hacerlo desde
+            // aqui —que es el hilo del loop principal— tocaba el mapa de
+            // manejadores de los otros N loops mientras ellos lo estaban
+            // leyendo.  Cuatro lineas mas abajo ya se usa post() para lo suyo:
+            // es el mismo mecanismo, aplicado a todos.
+            //
+            // El desfase es de una vuelta de loop, en la que un worker todavia
+            // podria aceptar una conexion.  Da igual: el drenaje espera hasta
+            // 30 segundos a que no quede ninguna.
             std::lock_guard<std::mutex> lk(all_mutex);
-            for (auto* s : all_servers) s->stop_accepting();
+            for (auto* s : all_servers) s->pedir_parada();
         }
 
         main_loop.post([this, &main_loop, shared_conn_count, &all_loops, &all_mutex]() {

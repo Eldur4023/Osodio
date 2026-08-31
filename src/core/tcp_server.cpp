@@ -75,6 +75,10 @@ TcpServer::~TcpServer() {
     stop_accepting();
 }
 
+void TcpServer::pedir_parada() {
+    loop_.post([this] { stop_accepting(); });
+}
+
 void TcpServer::stop_accepting() {
     if (listen_fd_ >= 0) {
         loop_.remove(listen_fd_);
