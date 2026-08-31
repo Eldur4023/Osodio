@@ -2,11 +2,167 @@
 
 #include <libpq-fe.h>
 
+#include <cctype>
 #include <cstdlib>
+#include <string>
 
 namespace odio {
 
 namespace {
+
+// ─── Marcadores de parametro ─────────────────────────────────────────────────
+//
+// En Odio el marcador es `?`, el de sqlite y mysql, para que la MISMA consulta
+// valga en los tres motores.  Postgres es el unico que los numera, asi que la
+// traduccion vive aqui: el driver es quien conoce su dialecto, y asi cambiar de
+// motor no obliga a reescribir todas las consultas de la aplicacion.
+//
+// Reglas, y cada una tiene su motivo:
+//
+//   • Solo se traduce si la consulta lleva parametros.  Sin ellos no hay nada
+//     que sustituir, y un `?` suelto en postgres es el operador de JSONB
+//     —`datos ? 'clave'`—, que hay que dejar en paz.
+//   • Una consulta escrita con $1 no tiene ningun `?`, asi que sale intacta.
+//     El codigo anterior a esto sigue funcionando sin tocarlo.
+//   • Lo que hay dentro de una cadena, de un identificador entrecomillado, de
+//     un comentario o de un bloque $etiqueta$ no es un marcador.
+//   • `??` es un `?` literal, para poder usar el operador de JSONB en una
+//     consulta que ademas lleva parametros.
+//
+// Devuelve false —y deja el motivo en `error`— si la consulta mezcla los dos
+// estilos o si los marcadores no cuadran con los argumentos.
+bool traducir_marcadores(const std::string& sql, size_t nargs,
+                         std::string& out, std::string& error) {
+    // Sin parametros no hay nada que sustituir, y cualquier `?` de la consulta
+    // es el operador de JSONB.  Se sale antes de mirar siquiera.
+    if (nargs == 0) { out = sql; return true; }
+
+    auto ident = [](unsigned char c) { return std::isalnum(c) || c == '_'; };
+
+    std::string res;
+    res.reserve(sql.size() + 8);
+    size_t i = 0;
+    int    n = 0;              // marcadores `?` encontrados
+    bool   numerado = false;   // se vio un $1, $2...
+
+    while (i < sql.size()) {
+        const char c = sql[i];
+
+        // Comentario de linea.
+        if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+            while (i < sql.size() && sql[i] != '\n') res += sql[i++];
+            continue;
+        }
+
+        // Comentario de bloque.  En postgres anidan, asi que se cuenta.
+        if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+            int prof = 0;
+            while (i < sql.size()) {
+                if (sql[i] == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+                    ++prof; res += sql[i++]; res += sql[i++]; continue;
+                }
+                if (sql[i] == '*' && i + 1 < sql.size() && sql[i + 1] == '/') {
+                    --prof; res += sql[i++]; res += sql[i++];
+                    if (prof == 0) break;
+                    continue;
+                }
+                res += sql[i++];
+            }
+            continue;
+        }
+
+        // Cadena.  Dentro, '' es una comilla escapada; si la cadena viene
+        // precedida de E, la barra tambien escapa.
+        if (c == '\'') {
+            const bool con_barra = !res.empty() && (res.back() == 'E' || res.back() == 'e');
+            res += sql[i++];
+            while (i < sql.size()) {
+                if (con_barra && sql[i] == '\\' && i + 1 < sql.size()) {
+                    res += sql[i++]; res += sql[i++]; continue;
+                }
+                if (sql[i] == '\'') {
+                    if (i + 1 < sql.size() && sql[i + 1] == '\'') {
+                        res += sql[i++]; res += sql[i++]; continue;
+                    }
+                    res += sql[i++];
+                    break;
+                }
+                res += sql[i++];
+            }
+            continue;
+        }
+
+        // Identificador entrecomillado.
+        if (c == '"') {
+            res += sql[i++];
+            while (i < sql.size()) {
+                if (sql[i] == '"') {
+                    if (i + 1 < sql.size() && sql[i + 1] == '"') {
+                        res += sql[i++]; res += sql[i++]; continue;
+                    }
+                    res += sql[i++];
+                    break;
+                }
+                res += sql[i++];
+            }
+            continue;
+        }
+
+        if (c == '$') {
+            // $1, $2...: la consulta ya viene numerada.
+            if (i + 1 < sql.size() && std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
+                numerado = true;
+                res += sql[i++];
+                continue;
+            }
+            // $etiqueta$ ... $etiqueta$: nada de dentro es un marcador.
+            size_t j = i + 1;
+            while (j < sql.size() && ident(static_cast<unsigned char>(sql[j]))) ++j;
+            if (j < sql.size() && sql[j] == '$') {
+                const std::string tag = sql.substr(i, j - i + 1);
+                const size_t fin = sql.find(tag, j + 1);
+                const size_t hasta = (fin == std::string::npos) ? sql.size() : fin + tag.size();
+                res.append(sql, i, hasta - i);
+                i = hasta;
+                continue;
+            }
+            res += sql[i++];
+            continue;
+        }
+
+        if (c == '?') {
+            if (i + 1 < sql.size() && sql[i + 1] == '?') {   // `??` -> `?`
+                res += '?';
+                i += 2;
+                continue;
+            }
+            res += '$';
+            res += std::to_string(++n);
+            ++i;
+            continue;
+        }
+
+        res += sql[i++];
+    }
+
+    // Ni un solo `?`: la consulta esta escrita al estilo de postgres y se manda
+    // tal cual, sin tocar siquiera los `??` que pudiera llevar.
+    if (n == 0) { out = sql; return true; }
+
+    if (numerado) {
+        error = "postgres: la consulta mezcla marcadores '?' y '$1'; usa solo uno "
+                "de los dos estilos";
+        return false;
+    }
+    if (static_cast<size_t>(n) != nargs) {
+        error = "postgres: la consulta tiene " + std::to_string(n) +
+                " marcador(es) '?' y se pasaron " + std::to_string(nargs) +
+                " argumento(s)";
+        return false;
+    }
+    out = std::move(res);
+    return true;
+}
 
 // Driver de PostgreSQL sobre libpq.
 //
@@ -127,6 +283,9 @@ private:
                   std::string& error) {
         PGconn* c = conns_[worker];
 
+        std::string sql_pg;
+        if (!traducir_marcadores(sql, args.size(), sql_pg, error)) return nullptr;
+
         std::vector<std::string> store;
         std::vector<const char*> ptrs;
         store.reserve(args.size());
@@ -140,7 +299,7 @@ private:
         for (size_t i = 0, j = 0; i < args.size(); ++i)
             if (!args[i].is_null()) { ptrs[i] = store[i].c_str(); ++j; }
 
-        PGresult* res = PQexecParams(c, sql.c_str(), static_cast<int>(args.size()),
+        PGresult* res = PQexecParams(c, sql_pg.c_str(), static_cast<int>(args.size()),
                                      nullptr, ptrs.data(), nullptr, nullptr, 0);
         auto status = res ? PQresultStatus(res) : PGRES_FATAL_ERROR;
         if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {

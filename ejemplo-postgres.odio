@@ -1,3 +1,8 @@
+# Este ejemplo usa los marcadores numerados de postgres, $1 y $2, a proposito:
+# desde que el driver traduce los `?` sigue valiendo tal cual, y aqui sirve de
+# prueba de que el codigo escrito antes no hay que tocarlo.  Para codigo nuevo,
+# `?` es lo recomendado porque vale igual en los tres motores.
+
 import postgres
 
 app:

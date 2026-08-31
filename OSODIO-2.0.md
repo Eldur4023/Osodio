@@ -310,7 +310,7 @@ frontend al leer el `.odio`, una vez, con los nombres y los tipos delante.
 | Transporte | HTTP/1.1 en claro. TLS y HTTP/2 al reverse proxy |
 | Ejecución | Bytecode sobre VM propio, un VM por hilo de event loop |
 | Compilación | Interna al binario. Sin toolchain externo, sin transpilación a C++ |
-| Persistencia | Módulos `sqlite`, `postgres` y `mysql`, sobre pool de hilos y `await` |
+| Persistencia | Módulos `sqlite`, `postgres` y `mysql`, sobre pool de hilos y `await`. Marcador `?` en los tres: el driver de postgres lo traduce a `$1` |
 | Plantillas | Motor propio, con la forma de Jinja2 y expresiones de Odio dentro |
 | Sintaxis | Bloques por indentación (Python), tipado estático (C++), rutas (Flask), entrada por firma (FastAPI) |
 | Genéricos | Solo contenedores nativos, borrados en compilación. Sin clases genéricas de usuario |

@@ -185,6 +185,15 @@ add_executable(prueba_plantillas tests/plantillas.cpp)
 target_link_libraries(prueba_plantillas PRIVATE odio)
 add_test(NAME plantillas COMMAND prueba_plantillas)
 
+# El traductor de marcadores de postgres es una funcion pura: se prueba sin
+# servidor incluyendo el .cpp del driver, para probar EL codigo y no una copia.
+if(OSODIO_POSTGRES AND PQ_INC AND PQ_LIB)
+    add_executable(prueba_marcadores tests/marcadores.cpp)
+    target_include_directories(prueba_marcadores PRIVATE ${PQ_INC})
+    target_link_libraries(prueba_marcadores PRIVATE odio ${PQ_LIB})
+    add_test(NAME marcadores COMMAND prueba_marcadores)
+endif()
+
 add_test(NAME regresion
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:osodio-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

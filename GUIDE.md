@@ -501,7 +501,7 @@ get endpoint("/articulos"):
     return await postgres.query("select id, titulo from articulos order by id")
 
 get endpoint("/articulos/:id", int id):
-    List<Json> filas = await postgres.query("select titulo from articulos where id = $1", id)
+    List<Json> filas = await postgres.query("select titulo from articulos where id = ?", id)
     if len(filas) == 0:
         return status(404)
     return filas[0]
@@ -513,7 +513,7 @@ convertidos a los de Odio —entero, decimal, booleano, cadena y `null`—.
 ```odio
 post endpoint("/articulos", Articulo a):
     int filas = await postgres.exec(
-        "insert into articulos (titulo, vistas) values ($1, $2)", a.titulo, a.vistas)
+        "insert into articulos (titulo, vistas) values (?, ?)", a.titulo, a.vistas)
     int id = await postgres.last_id()
     return { "id": id }.status(201)
 ```
@@ -521,9 +521,30 @@ post endpoint("/articulos", Articulo a):
 `exec()` devuelve el número de filas afectadas. `last_id()` devuelve el último id
 autogenerado.
 
-**Los parámetros van siempre aparte, nunca concatenados.** El marcador depende del motor:
-`?` en sqlite y mysql, `$1`, `$2`… en postgres. Concatenar la consulta a mano es la única
-forma de abrirse a una inyección, y el lenguaje no te la pone fácil.
+**Los parámetros van siempre aparte, nunca concatenados.** Concatenar la consulta a mano es
+la única forma de abrirse a una inyección, y el lenguaje no te la pone fácil.
+
+El marcador es **`?` en los tres motores**. Postgres numera los suyos —`$1`, `$2`…— pero de
+eso se encarga su driver, así que la misma consulta vale para sqlite, mysql y postgres sin
+tocar una letra:
+
+```odio
+await sqlite.query(  "select titulo from articulos where id = ?", id)
+await mysql.query(   "select titulo from articulos where id = ?", id)
+await postgres.query("select titulo from articulos where id = ?", id)
+```
+
+Tres detalles de la traducción, que solo importan en postgres:
+
+- Una consulta escrita con `$1` sale intacta, así que el código anterior a esto sigue
+  funcionando.
+- Un `?` dentro de una cadena, de un identificador entrecomillado, de un comentario o de un
+  bloque `$$…$$` no es un marcador y no se toca.
+- `?` es además el operador de JSONB de postgres —`datos ? 'clave'`—. Si la consulta **no
+  lleva parámetros** no se traduce nada y el operador funciona tal cual; si los lleva, se
+  escribe `??` para decir «este es el operador, no un marcador».
+
+Mezclar `?` y `$1` en la misma consulta es un error, porque la numeración chocaría.
 
 ### Transacciones
 
