@@ -55,6 +55,10 @@ public:
     // True if the most recent feed() stopped because a request completed.
     bool is_paused() const;
 
+    // True if feed() returned false specifically because the body exceeded
+    // kMaxBodySize — lets the caller answer 413 instead of a generic 400.
+    bool body_too_large() const;
+
     // Bytes from the most recent feed() that the parser did NOT consume.
     // Only meaningful while paused — they belong to the next pipelined request.
     size_t unconsumed() const;

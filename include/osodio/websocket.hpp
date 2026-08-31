@@ -1,4 +1,5 @@
 #pragma once
+#include <utility>      // std::exchange
 #include <string>
 #include <string_view>
 #include <optional>

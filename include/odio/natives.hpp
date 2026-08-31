@@ -128,6 +128,29 @@ int              member_native_id(const std::string& object, const std::string& 
 // que el despacho es por tipo dentro del VM.
 Value call_method(NativeCtx& ctx, Value& receiver, const std::string& name,
                   std::vector<Value>& args, std::string& error);
+
+// Uno de los metodos que call_method() reconoce, con los argumentos que admite
+// y lo que devuelve.
+struct MetodoBuiltin {
+    const char* nombre;
+    int         min_args;
+    int         max_args;
+    // Tipo del resultado, o nullptr si devuelve el propio receptor —es lo que
+    // hacen los que se encadenan: .status(), .add()...—.  Saberlo permite
+    // seguir comprobando despues del punto: s.upper().recortar() tambien falla
+    // al compilar.
+    const char* devuelve;
+};
+
+// Los metodos que existen para un tipo de Odio: "string", "int", "List", ...
+//
+// Devuelve nullptr cuando el tipo no tiene una lista cerrada —una clase de
+// usuario, o un valor cuyo tipo solo se sabe al ejecutar—, y entonces no hay
+// nada que comprobar al compilar.
+//
+// La lista vive pegada a call_method() a proposito: son las dos caras de lo
+// mismo, y anadir un metodo tiene que ser tocar un sitio.
+const std::vector<MetodoBuiltin>* metodos_de(const std::string& tipo);
 bool             is_reserved_object(const std::string& name);
 bool             is_db_module(const std::string& name);
 

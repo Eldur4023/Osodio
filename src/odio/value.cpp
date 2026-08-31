@@ -56,7 +56,90 @@ inline bool bloque_sucio(uint64_t w) {
                      | ((c2 - UNOS) & ~c2 & ALTOS)) != 0;
 }
 
-void escapar(const std::string& in, std::string& out) {
+// ─── UTF-8 ───────────────────────────────────────────────────────────────────
+//
+// JSON tiene que ser UTF-8 (RFC 8259).  Un byte suelto que no forme una
+// secuencia valida deja el documento ilegible para cualquier cliente, y eso es
+// peor que un error: no falla la peticion, falla quien la recibe, y el fallo
+// aparece lejos del origen.
+//
+// Llega de fuera por tres vias comprobadas —cuerpo JSON, query y cabeceras— y
+// tambien de una base de datos que no valide la codificacion, como sqlite.  Por
+// eso se ataja aqui, en la salida, y no en cada puerta de entrada: es un sitio
+// en vez de cinco, y cubre tambien lo que ya estaba guardado.
+//
+// La validacion va en su propia pasada para NO tocar el bucle de escapado, que
+// es lo mas caliente del sistema.  Tiene el mismo atajo: mientras los ocho
+// bytes sean ASCII se salta el bloque entero, asi que el texto normal no paga
+// casi nada.
+
+// Longitud de la secuencia que empieza en `i`, o 0 si no es valida.  Rechaza lo
+// mismo que el estandar: continuaciones sueltas, sobrelargos, subrogados y todo
+// lo que pase de U+10FFFF.
+inline size_t largo_utf8(const unsigned char* p, size_t n, size_t i) {
+    const unsigned char c = p[i];
+    auto cont = [&](size_t k) { return i + k < n && (p[i + k] & 0xC0) == 0x80; };
+
+    if (c < 0x80) return 1;
+    if (c < 0xC2) return 0;                       // continuacion suelta o sobrelargo
+    if (c < 0xE0) return cont(1) ? 2 : 0;
+    if (c < 0xF0) {
+        if (!cont(1) || !cont(2)) return 0;
+        if (c == 0xE0 && p[i + 1] < 0xA0) return 0;               // sobrelargo
+        if (c == 0xED && p[i + 1] >= 0xA0) return 0;              // subrogado
+        return 3;
+    }
+    if (c < 0xF5) {
+        if (!cont(1) || !cont(2) || !cont(3)) return 0;
+        if (c == 0xF0 && p[i + 1] < 0x90) return 0;               // sobrelargo
+        if (c == 0xF4 && p[i + 1] >= 0x90) return 0;              // > U+10FFFF
+        return 4;
+    }
+    return 0;
+}
+
+bool utf8_valido(const char* p, size_t n) {
+    const auto* u = reinterpret_cast<const unsigned char*>(p);
+    size_t i = 0;
+    while (i < n) {
+        // Mientras los ocho bytes sean ASCII no hay nada que validar.
+        while (i + 8 <= n) {
+            uint64_t w;
+            std::memcpy(&w, p + i, 8);
+            if (w & 0x8080808080808080ULL) break;
+            i += 8;
+        }
+        if (i >= n) break;
+        if (u[i] < 0x80) { ++i; continue; }
+        const size_t l = largo_utf8(u, n, i);
+        if (l == 0) return false;
+        i += l;
+    }
+    return true;
+}
+
+// Copia sustituyendo por U+FFFD cada byte que rompe la codificacion, que es lo
+// que hace tambien el encoding/json de Go.  Solo se recorre si la validacion ya
+// dijo que hay algo malo, asi que este camino no lo pisa el texto normal.
+void sanear_utf8(const std::string& in, std::string& out) {
+    const auto* u = reinterpret_cast<const unsigned char*>(in.data());
+    const size_t n = in.size();
+    out.clear();
+    out.reserve(n);
+    size_t i = 0;
+    while (i < n) {
+        const size_t l = largo_utf8(u, n, i);
+        if (l == 0) {
+            out += "\xEF\xBF\xBD";                // U+FFFD, un byte a un rombo
+            ++i;
+        } else {
+            out.append(in, i, l);
+            i += l;
+        }
+    }
+}
+
+void escapar_valido(const std::string& in, std::string& out) {
     // El texto real —el cuerpo de un articulo, un resumen— no lleva casi nada
     // que escapar, asi que se avanza de ocho en ocho bytes mientras el bloque
     // este limpio y solo se baja a mirar byte a byte cuando hay algo.  Con las
@@ -104,16 +187,30 @@ void escapar(const std::string& in, std::string& out) {
     out.push_back('"');
 }
 
+void escapar(const std::string& in, std::string& out) {
+    if (utf8_valido(in.data(), in.size())) { escapar_valido(in, out); return; }
+    std::string limpio;
+    sanear_utf8(in, limpio);
+    escapar_valido(limpio, out);
+}
+
 void escribir_double(double d, std::string& out) {
+    // JSON no sabe escribir NaN ni infinito: no son tokens del formato.  Se
+    // escriben como null, que es lo que hace JSON.stringify y lo unico que
+    // todos los clientes saben leer.
+    //
+    // No es teorico: postgres admite 'NaN' e 'Infinity' en un double precision,
+    // y sin esto una fila con uno de esos valores producia un documento que
+    // ningun parser acepta —`{"d":inf}`— en vez de un error visible.
+    if (!std::isfinite(d)) { out += "null"; return; }
+
     char buf[32];
     auto r = std::to_chars(buf, buf + sizeof(buf), d);
     if (r.ec != std::errc{}) { out += "0"; return; }
     std::string t(buf, r.ptr);
     // Un double entero sale como "3"; JSON lo leeria como entero, asi que se le
     // pone el ".0" igual que hacia nlohmann.
-    if (t.find_first_of(".eE") == std::string::npos &&
-        t.find("inf") == std::string::npos && t.find("nan") == std::string::npos)
-        t += ".0";
+    if (t.find_first_of(".eE") == std::string::npos) t += ".0";
     out += t;
 }
 

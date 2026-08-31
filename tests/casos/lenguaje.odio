@@ -11,6 +11,27 @@ get endpoint("/cadenas"):
     string s = "hola"
     return { "mayus": s.upper(), "empieza": s.starts_with("ho"), "limpio": "  x  ".trim() }
 
+# JSON tiene que ser UTF-8.  Un byte suelto entra por el cuerpo, por la query o
+# por una cabecera, y sin sanear dejaba la respuesta ilegible para el cliente que
+# la habia mandado.  Estas rutas devuelven lo que entra, para comprobar las dos
+# mitades: que lo roto se sanea y que lo valido NO se toca.
+get endpoint("/eco_query", string q = "vacio"):
+    return { "eco": q }
+
+get endpoint("/eco_cabecera"):
+    return { "eco": header("X-Prueba") }
+
+get endpoint("/eco_valido"):
+    return { "eco": "añoñó 🐻 ñ" }
+
+get endpoint("/multilinea"):
+    string sql = """
+        SELECT id
+        FROM posts
+        """
+    string suelta = """en una linea"""
+    return { "sql": sql, "suelta": suelta, "escapes": """con \"comillas\"""" }
+
 get endpoint("/veracidad"):
     List<int> vacia = []
     return { "cero": 0 ? true : false, "vacia": vacia ? true : false,

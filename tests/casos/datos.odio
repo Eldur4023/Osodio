@@ -21,7 +21,11 @@ post endpoint("/alta/:nombre", string nombre):
     return { "id": id }.status(201)
 
 get endpoint("/todos"):
-    return await sqlite.query("select id, nombre, saldo from cuentas order by id")
+    return await sqlite.query("""
+        select id, nombre, saldo
+        from cuentas
+        order by id
+        """)
 
 get endpoint("/uno/:id", int id):
     List<Json> filas = await sqlite.query("select nombre from cuentas where id = ?", id)

@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <cstdint>
 #include <vector>
+#include <atomic>
 #include <mutex>
 
 namespace osodio::core {
@@ -36,7 +37,10 @@ private:
 
     int  epoll_fd_  = -1;
     int  wakeup_fd_ = -1;
-    bool running_   = false;
+    // Atomico porque stop() lo escribe desde OTRO hilo —el del apagado— y el
+    // loop lo lee en cada vuelta.  Como bool corriente era una carrera, aunque
+    // en la practica el compilador no llegara a morderla.
+    std::atomic<bool> running_{false};
 
     std::unordered_map<int, Callback> callbacks_;
     std::vector<std::function<void()>> task_queue_;

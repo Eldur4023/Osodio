@@ -23,6 +23,12 @@ std::string hmac_sha256(std::string_view key, std::string_view message);
 std::string base64url_encode(std::string_view raw);
 bool        base64url_decode(std::string_view text, std::string& out);
 
+// Base64 del alfabeto estandar, con relleno (RFC 4648).  Es como se mete un
+// binario en un JSON: los modulos de base de datos la usan para las columnas
+// que no son texto, porque un blob crudo en la respuesta la dejaria sin ser
+// UTF-8 valido y ningun cliente sabria leerla.
+std::string base64_encode(std::string_view raw);
+
 // Comparacion en tiempo constante.  Comparar firmas con == filtra por el
 // tiempo de respuesta cuantos bytes iniciales acerto el atacante, que es
 // suficiente para reconstruir la firma byte a byte.

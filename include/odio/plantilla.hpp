@@ -4,6 +4,7 @@
 
 #include "bytecode.hpp"
 #include "diagnostic.hpp"
+#include "emitter.hpp"
 #include "natives.hpp"
 #include "value.hpp"
 
@@ -50,17 +51,21 @@ struct Plantilla {
 
     // Nombres de las ranuras, en orden.  Las primeras son los datos que la
     // ruta pasa a render(); las siguientes, las variables de los bucles.
-    std::vector<std::string> nombres;
+    //
+    // Llevan el tipo pegado porque las expresiones de dentro se compilan contra
+    // ellos: es lo que permite que `{{ quien.mayusculas() }}` sobre un string
+    // sea un error de compilacion y no una pagina rota.
+    std::vector<NombreTipado> nombres;
 };
 
 // Compila el fuente de una plantilla.
 //
-// `datos` son los nombres que la ruta va a pasar a render(), y ocupan las
-// primeras ranuras.  `dir` es la carpeta de plantillas, para resolver
-// {% include %}.  Devuelve false si hubo errores; van en `diags`.
+// `datos` son los nombres —con su tipo, si se conoce— que la ruta va a pasar a
+// render(), y ocupan las primeras ranuras.  `dir` es la carpeta de plantillas,
+// para resolver {% include %}.  Devuelve false si hubo errores; van en `diags`.
 bool compilar_plantilla(const std::string& fuente, const std::string& fichero,
                         const std::string& dir,
-                        const std::vector<std::string>& datos,
+                        const std::vector<NombreTipado>& datos,
                         DiagnosticBag& diags, Plantilla& out);
 
 // Renderiza.  `valores` llega en el mismo orden que los `datos` con los que se

@@ -16,6 +16,11 @@ endif()
 option(OSODIO_IO_URING "Backend io_uring en lugar de epoll (Linux 5.1+)" OFF)
 option(OSODIO_EXAMPLES "Compilar los ejemplos de examples/"              ON)
 
+# Arneses de fuzzing manuales -- ver fuzz/chaos.hpp para el motivo de no usar
+# libFuzzer (necesita clang; este toolchain es gcc).  Apagado por defecto: no
+# es parte de la build normal ni de ctest, se lanza a mano.
+option(OSODIO_FUZZ "Compilar los arneses de fuzzing de fuzz/" OFF)
+
 # Modulos de persistencia.  Cada uno se compila solo si su cliente esta
 # presente: `import sqlite` en un binario sin el da un error claro al compilar
 # el .odio, no un fallo raro en produccion.
@@ -51,33 +56,9 @@ if(OSODIO_JEMALLOC)
     endif()
 endif()
 
-# ── Jinja2Cpp ─────────────────────────────────────────────────────────────────
-# Motor de plantillas.  Se usa Jinja2Cpp y no inja porque implementa Jinja2 de
-# verdad: es la sintaxis de Flask, y la que generan por defecto tanto la gente
-# como los LLM.  inja soporta un subconjunto y diverge en detalles.
+# Sin dependencias que traer de la red: llhttp esta vendorizado y todo lo demas
+# —JSON, plantillas, criptografia— es de casa.
 #
-# No esta empaquetado en apt ni es cabecera unica, asi que se trae con
-# FetchContent y un tag fijado.  Requiere red en el PRIMER configure; despues
-# queda cacheado en build/_deps.
-include(FetchContent)
-FetchContent_Declare(Jinja2Cpp
-    GIT_REPOSITORY https://github.com/jinja2cpp/Jinja2Cpp.git
-    GIT_TAG        1.3.2
-    GIT_SHALLOW    TRUE
-)
-set(JINJA2CPP_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
-set(JINJA2CPP_BUILD_SHARED     OFF CACHE BOOL "" FORCE)
-set(JINJA2CPP_INSTALL          OFF CACHE BOOL "" FORCE)
-set(JINJA2CPP_STRICT_WARNINGS  OFF CACHE BOOL "" FORCE)
-
-# rapidjson (dependencia transitiva de Jinja2Cpp) declara un
-# cmake_minimum_required anterior a 3.5, que CMake >= 4 ya rechaza.  Esta es la
-# via de compatibilidad documentada; solo afecta a las dependencias traídas
-# aqui, no al proyecto.
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
-
-FetchContent_MakeAvailable(Jinja2Cpp)
-
 # ── third_party (vendorizado, sin red durante cmake) ──────────────────────────
 add_library(osodio_llhttp STATIC
     third_party/llhttp/src/api.c
@@ -111,7 +92,6 @@ target_include_directories(osodio PUBLIC
 target_link_libraries(osodio PUBLIC
     osodio_llhttp
     Threads::Threads
-    jinja2cpp
     ${OSODIO_ALLOC}
 )
 
@@ -133,7 +113,6 @@ add_library(odio STATIC
     src/odio/db.cpp
     src/odio/value.cpp
     src/odio/json_parse.cpp
-    src/odio/jinja_puente.cpp
     src/odio/plantilla.cpp
     src/odio/natives.cpp
     src/odio/emitter.cpp
@@ -211,10 +190,55 @@ add_executable(prueba_plantillas tests/plantillas.cpp)
 target_link_libraries(prueba_plantillas PRIVATE odio)
 add_test(NAME plantillas COMMAND prueba_plantillas)
 
+# El traductor de marcadores de postgres es una funcion pura: se prueba sin
+# servidor incluyendo el .cpp del driver, para probar EL codigo y no una copia.
+if(OSODIO_POSTGRES AND PQ_INC AND PQ_LIB)
+    add_executable(prueba_marcadores tests/marcadores.cpp)
+    target_include_directories(prueba_marcadores PRIVATE ${PQ_INC})
+    target_link_libraries(prueba_marcadores PRIVATE odio ${PQ_LIB})
+    add_test(NAME marcadores COMMAND prueba_marcadores)
+endif()
+
 add_test(NAME regresion
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:osodio-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(regresion PROPERTIES TIMEOUT 300)
+
+# El modulo de mysql necesita un servidor, asi que su suite se salta sola —codigo
+# 77— cuando no lo hay, en vez de poner en rojo una maquina donde no aplica.
+# Las instrucciones para montar el entorno estan en la cabecera del guion.
+add_test(NAME mysql
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mysql.sh $<TARGET_FILE:osodio-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(mysql PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# La bateria de tipos de sqlite no necesita servidor —el esquema lo crea el
+# propio .odio— asi que corre siempre.
+add_test(NAME sqlite
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:osodio-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# Idem para postgres.
+add_test(NAME postgres
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_postgres.sh $<TARGET_FILE:osodio-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(postgres PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# ── Fuzzing ───────────────────────────────────────────────────────────────────
+# Sin flags de sanitizador aqui a proposito: para que ASan/UBSan sirvan de algo
+# tienen que instrumentar tambien odio/osodio, no solo estos dos .cpp, asi que
+# van en CMAKE_CXX_FLAGS de la configuracion entera -- ver fuzz/README.md.
+# Cada caso corre en un hijo (fuzz/chaos.hpp): un abort de sanitizador tumba
+# solo ese hijo, la campana sigue.
+if(OSODIO_FUZZ)
+    add_executable(fuzz_lenguaje fuzz/fuzz_lenguaje.cpp)
+    target_link_libraries(fuzz_lenguaje PRIVATE odio)
+
+    add_executable(fuzz_http fuzz/fuzz_http.cpp)
+    target_include_directories(fuzz_http PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(fuzz_http PRIVATE odio)
+endif()
 
 # ── Ejemplos ──────────────────────────────────────────────────────────────────
 if(OSODIO_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)

@@ -81,6 +81,28 @@ comprueba() {
     ok "$nombre"
 }
 
+# comprueba_mp <nombre> <ruta> <codigo-esperado> <subcadena-esperada> -- <flags -F de curl...>
+# Aparte de comprueba(): un cuerpo multipart no es una cadena que se pueda pasar
+# con -d, son partes con nombre, y curl las arma con -F por campo.
+comprueba_mp() {
+    local nombre="$1" ruta="$2" cod="$3" trozo="${4:-}"; shift 4
+    local got
+    got=$(curl -sS --max-time 10 -X POST -o "$TMP/body" -w '%{http_code}' "$@" \
+          "http://127.0.0.1:$PUERTO$ruta" 2>/dev/null)
+    local body
+    body=$(cat "$TMP/body" 2>/dev/null)
+
+    if [ "$got" != "$cod" ]; then
+        fallo "$nombre" "codigo $cod" "codigo $got — $body"
+        return
+    fi
+    if [ -n "$trozo" ] && ! grep -qF "$trozo" "$TMP/body"; then
+        fallo "$nombre" "que contenga '$trozo'" "$body"
+        return
+    fi
+    ok "$nombre"
+}
+
 # no_compila <nombre> <fichero> <subcadena-del-error>
 no_compila() {
     local nombre="$1" fich="$2" trozo="$3"
@@ -115,7 +137,28 @@ echo "== lenguaje =="
 levantar "$AQUI/casos/lenguaje.odio" || exit 1
 comprueba "aritmetica"          GET /aritmetica       200 '"suma":7'
 comprueba "cadenas"             GET /cadenas          200 '"mayus":"HOLA"'
+comprueba "multilinea sin margen" GET /multilinea     200 '"sql":"SELECT id\nFROM posts"'
+comprueba "multilinea de una"   GET /multilinea       200 '"suelta":"en una linea"'
+comprueba "multilinea escapes"  GET /multilinea       200 '"escapes":"con \"comillas\""'
 comprueba "veracidad"           GET /veracidad        200 '"cero":false'
+
+# JSON tiene que ser UTF-8 (RFC 8259).  Un 0xFF suelto llega desde la red por
+# varias vias, y sin sanear producia una respuesta que ni el cliente que la
+# mando podia parsear: no falla la peticion, falla quien la recibe.
+json_utf8() {
+    local nombre="$1"; shift
+    curl -sS --max-time 10 -o "$TMP/body" "$@" 2>/dev/null
+    if python3 -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))"             "$TMP/body" 2>/dev/null; then
+        ok "$nombre"
+    else
+        fallo "$nombre" "JSON valido en UTF-8" "$(head -c 120 "$TMP/body" | cat -v)"
+    fi
+}
+json_utf8 "utf8 roto en la query"    "http://127.0.0.1:$PUERTO/eco_query?q=a%FFb"
+json_utf8 "utf8 roto en la cabecera" -H "$(printf 'X-Prueba: aÿb')"           "http://127.0.0.1:$PUERTO/eco_cabecera"
+# Y lo que si es valido tiene que salir INTACTO: sanear no puede estropear texto
+# bueno, que es la mitad que de verdad importa.
+comprueba "utf8 valido intacto" GET /eco_valido 200 '"eco":"añoñó 🐻 ñ"'
 comprueba "sin coercion"        GET /coercion         500 'no se puede sumar'
 comprueba "condicional elif"    GET /clasifica/0      200 '"r":"cero"'
 comprueba "condicional else"    GET /clasifica/99     200 '"r":"grande"'
@@ -139,6 +182,44 @@ comprueba "grupo con prefijo"   GET /api/v1/hola      200 '"v":1'
 comprueba "guarda deniega"      GET /admin/panel      403
 comprueba "guarda permite"      GET '/admin/panel?k=abre' 200 '"panel":true'
 comprueba "manejador 404"       GET /tampoco          404 '"ruta":"/tampoco"'
+
+# ── Matriz de enlace de parametros ──────────────────────────────────────────
+# Origen (ruta / query / multipart) x tipo (escalar, File, List<File>) x
+# presencia (falta, mal tipado, en dos sitios a la vez).  Ver casos/parametros.odio:
+# el bug real fue un parametro de texto SIEMPRE vacio en una ruta con ficheros,
+# y solo aparece cuando los dos conviven en la misma ruta -- probar query y
+# multipart cada uno por separado, como hacia el resto de la suite, no lo cazaba.
+echo "== enlace de parametros =="
+levantar "$AQUI/casos/parametros.odio" || exit 1
+
+comprueba "query ausente sin defecto da el cero del tipo" GET /query 200 '"q":""'
+
+comprueba_mp "multipart: texto junto a un fichero" /mp/uno 200 '"titulo":"hola"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "titulo=hola"
+comprueba_mp "multipart: el fichero tambien llega" /mp/uno 200 '"filename":"a.txt"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "titulo=hola"
+
+comprueba_mp "multipart: string"  /mp/tipos 200 '"s":"hola"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "s=hola" -F "n=7" -F "b=true"
+comprueba_mp "multipart: int"     /mp/tipos 200 '"n":7' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "s=hola" -F "n=7" -F "b=true"
+comprueba_mp "multipart: bool"    /mp/tipos 200 '"b":true' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "s=hola" -F "n=7" -F "b=true"
+
+comprueba_mp "multipart: texto junto a List<File>" /mp/lista 200 '"album":"vacaciones"' \
+    -F "fs=@$AQUI/casos/parametros.odio;filename=a.txt" -F "album=vacaciones"
+comprueba_mp "multipart: cuenta los ficheros de la lista" /mp/lista 200 '"n":2' \
+    -F "fs=@$AQUI/casos/parametros.odio;filename=a.txt" \
+    -F "fs=@$AQUI/casos/parametros.odio;filename=b.txt" -F "album=x"
+
+comprueba_mp "multipart: campo ausente cae al defecto" /mp/defecto 200 '"etiqueta":"sin-etiqueta"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt"
+
+comprueba_mp "multipart: la query gana al campo del formulario" "/mp/prioridad?origen=query" 200 '"origen":"query"' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "origen=formulario"
+
+comprueba_mp "multipart: escalar mal tipado da 400" /mp/malo 400 'parametro invalido' \
+    -F "f=@$AQUI/casos/parametros.odio;filename=a.txt" -F "n=no-es-un-numero"
 
 echo "== clases y validacion =="
 levantar "$AQUI/casos/clases.odio" || exit 1
@@ -187,9 +268,12 @@ no_compila "objeto fuera de sitio" "$AQUI/casos/malos/sse.odio"      "solo exist
 no_compila "ws sin origins"        "$AQUI/casos/malos/ws.odio"       "necesita origins"
 no_compila "campo inexistente"     "$AQUI/casos/malos/validate.odio" "no esta declarada"
 no_compila "metodo inexistente"    "$AQUI/casos/malos/metodo.odio"   "no tiene un metodo"
+no_compila "metodo de un string"   "$AQUI/casos/malos/metodo_tipo.odio" "no tienen el metodo"
+no_compila "campo de una clase"    "$AQUI/casos/malos/campo_tipo.odio"  "no tiene un campo"
 no_compila "modulo sin importar"   "$AQUI/casos/malos/import.odio"   "falta 'import sqlite'"
-# Los tipos de las expresiones se comprueban en EJECUCION, no al compilar:
-# el compilador verifica nombres, aridad y contexto, no que `s - 1` cuadre.
+# Los tipos de las expresiones se comprueban en EJECUCION: el compilador
+# verifica nombres, aridad, contexto, y los metodos y campos de un receptor
+# cuyo tipo conoce -- pero no que `s - 1` cuadre.
 # Eso ya lo cubre la prueba "sin coercion" de la suite de lenguaje.
 
 # ─── Resumen ─────────────────────────────────────────────────────────────────

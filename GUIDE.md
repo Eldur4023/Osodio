@@ -2,7 +2,7 @@
 
 > Referencia práctica de Odio, el lenguaje que interpreta Osodio 2.0. La gramática formal
 > está en [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md); las decisiones de diseño y sus motivos, en
-> [OSODIO-2.0.md](OSODIO-2.0.md).
+> [README.md](README.md#decisiones-de-diseño).
 
 ## Índice
 
@@ -39,8 +39,7 @@ cmake --build build -j$(nproc)
 ```
 
 Requiere Linux (epoll, `sendfile(2)`, `SO_REUSEPORT`), CMake 3.20+ y C++20. El primer
-`configure` necesita red para traer Jinja2Cpp, que es la única dependencia que no está
-vendorizada.
+`configure` no necesita red: no se baja nada.
 
 Opcional pero recomendado: `sudo apt install libjemalloc-dev`. Con varios event loops y un
 pool de base de datos, el `malloc` de glibc serializa en sus arenas; cambiarlo vale más que
@@ -106,8 +105,20 @@ cd build && ctest --output-on-failure
 tests/run_tests.sh ~/osodio-build/osodio
 ```
 
-60 pruebas que levantan el binario contra ficheros `.odio` reales y comprueban las
-respuestas por el socket. La suite no enlaza nada del proyecto: prueba lo que se despliega,
+246 pruebas en seis suites:
+
+| suite | qué cubre | |
+|---|---|---|
+| `regresion` | el binario por el socket, con `.odio` reales | 79 |
+| `plantillas` | compilar y renderizar, en proceso | 48 |
+| `sqlite` | tipos, límites y caché de sentencias | 37 |
+| `postgres` | tipos, marcadores, transacciones y concurrencia con contenido comprobado | 34 |
+| `mysql` | ídem, más el byte nulo dentro de un texto | 29 |
+| `marcadores` | la traducción de `?` a `$1` | 19 |
+
+Las de `mysql` y `postgres` necesitan un servidor y **se saltan solas** si no lo hay; las
+instrucciones para montarlo están en la cabecera de cada guion. La de `sqlite` crea su
+propio esquema y corre siempre. La suite no enlaza nada del proyecto: prueba lo que se despliega,
 no una versión instrumentada de ello.
 
 ---
@@ -120,7 +131,7 @@ mi-app/
   rutas/
     publico.odio
     admin.odio
-  templates/         plantillas Jinja2
+  templates/         plantillas de Odio
   public/            estáticos
 ```
 
@@ -335,7 +346,7 @@ Todo sale por `return`. No hay objeto `response` que arrastrar.
 ```odio
 return { "clave": "valor" }              # 200, JSON
 return [1, 2, 3]                         # 200, JSON
-return render("pagina.html", k=v)        # HTML con Jinja2
+return render("pagina.html", k=v)        # HTML con plantillas de Odio
 return text("hola")                      # text/plain
 return html("<h1>hola</h1>")             # text/html
 return send_file("/var/f.pdf")           # sendfile(2)
@@ -500,7 +511,7 @@ get endpoint("/articulos"):
     return await postgres.query("select id, titulo from articulos order by id")
 
 get endpoint("/articulos/:id", int id):
-    List<Json> filas = await postgres.query("select titulo from articulos where id = $1", id)
+    List<Json> filas = await postgres.query("select titulo from articulos where id = ?", id)
     if len(filas) == 0:
         return status(404)
     return filas[0]
@@ -509,20 +520,58 @@ get endpoint("/articulos/:id", int id):
 `query()` devuelve `List<Json>`: una lista de diccionarios, con los tipos del motor
 convertidos a los de Odio —entero, decimal, booleano, cadena y `null`—.
 
+Las columnas binarias —`BLOB` en sqlite y mysql— llegan en **base64**, no como cadena. No
+es una preferencia: un blob son bytes cualesquiera, y devolverlos como texto dejaba la
+respuesta sin ser UTF-8 válido, con lo que fallaba el cliente que la recibía en vez de la
+petición. En postgres un `bytea` llega en el hexadecimal de libpq (`h656c6c6f`).
+
 ```odio
 post endpoint("/articulos", Articulo a):
-    int filas = await postgres.exec(
-        "insert into articulos (titulo, vistas) values ($1, $2)", a.titulo, a.vistas)
-    int id = await postgres.last_id()
+    int filas = await sqlite.exec(
+        "insert into articulos (titulo, vistas) values (?, ?)", a.titulo, a.vistas)
+    int id = await sqlite.last_id()
     return { "id": id }.status(201)
 ```
 
 `exec()` devuelve el número de filas afectadas. `last_id()` devuelve el último id
-autogenerado.
+autogenerado **en sqlite y mysql**.
 
-**Los parámetros van siempre aparte, nunca concatenados.** El marcador depende del motor:
-`?` en sqlite y mysql, `$1`, `$2`… en postgres. Concatenar la consulta a mano es la única
-forma de abrirse a una inyección, y el lenguaje no te la pone fácil.
+**Postgres no lo tiene**, y el módulo lo dice en vez de inventárselo: ahí el id se pide en
+la propia consulta, que además es más fiable porque no depende de qué conexión atendió el
+insert.
+
+```odio
+post endpoint("/articulos", Articulo a):
+    List<Json> filas = await postgres.query(
+        "insert into articulos (titulo, vistas) values (?, ?) returning id",
+        a.titulo, a.vistas)
+    return filas[0].status(201)
+```
+
+**Los parámetros van siempre aparte, nunca concatenados.** Concatenar la consulta a mano es
+la única forma de abrirse a una inyección, y el lenguaje no te la pone fácil.
+
+El marcador es **`?` en los tres motores**. Postgres numera los suyos —`$1`, `$2`…— pero de
+eso se encarga su driver, así que la misma consulta vale para sqlite, mysql y postgres sin
+tocar una letra:
+
+```odio
+await sqlite.query(  "select titulo from articulos where id = ?", id)
+await mysql.query(   "select titulo from articulos where id = ?", id)
+await postgres.query("select titulo from articulos where id = ?", id)
+```
+
+Tres detalles de la traducción, que solo importan en postgres:
+
+- Una consulta escrita con `$1` sale intacta, así que el código anterior a esto sigue
+  funcionando.
+- Un `?` dentro de una cadena, de un identificador entrecomillado, de un comentario o de un
+  bloque `$$…$$` no es un marcador y no se toca.
+- `?` es además el operador de JSONB de postgres —`datos ? 'clave'`—. Si la consulta **no
+  lleva parámetros** no se traduce nada y el operador funciona tal cual; si los lleva, se
+  escribe `??` para decir «este es el operador, no un marcador».
+
+Mezclar `?` y `$1` en la misma consulta es un error, porque la numeración chocaría.
 
 ### Transacciones
 
@@ -761,6 +810,26 @@ Json  List<T>  Dict<K,V>  File                clases nativas, en mayúscula
 `T?` marca que el valor puede faltar. Los genéricos son **borrados**: el checker los verifica
 y desaparecen antes del bytecode. No hay clases genéricas de usuario.
 
+### Cadenas de varias líneas
+
+Tres comillas, para SQL o HTML sin pelearse con los saltos de línea:
+
+```odio
+get endpoint("/posts"):
+    return await sqlite.query("""
+        select id, titulo
+        from posts
+        order by fecha desc
+        """)
+```
+
+El margen no forma parte de la cadena: es indentación del fichero, no del texto. Se quita
+un salto de línea justo detrás de la apertura, la línea del cierre si va sola, y la sangría
+**común** al resto — con lo que la sangría relativa entre líneas se conserva. Lo de arriba
+vale exactamente `select id, titulo\nfrom posts\norder by fecha desc`.
+
+Los escapes son los mismos que en una cadena normal: `\n`, `\t`, `\r`, `\0`, `\"`, `\\`.
+
 ### Veracidad
 
 Son **falsos** `null`, `false`, `0`, `0.0`, `""`, y la lista y el diccionario vacíos. Es la
@@ -832,7 +901,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 | | |
 |---|---|
 | `text(v)` `html(v)` `json(v)` | Escriben la respuesta |
-| `render(plantilla, k=v, ...)` | Renderiza con Jinja2 |
+| `render(plantilla, k=v, ...)` | Renderiza una plantilla de Odio |
 | `status(código)` `redirect(destino[, código])` `send_file(ruta)` | |
 | `len(v)` | Tamaño de string, List o Dict |
 | `str(v)` `int(v)` | Conversión explícita |
@@ -854,7 +923,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 | `sse` | `send` `ping` `open` | Rutas `sse` |
 | `ws` | `send` `recv` `open` `close` | Rutas `ws` |
 | `error` | `code` `message` `messages` | Bloques `on error` |
-| `sqlite` `postgres` `mysql` | `query` `exec` `last_id` `begin` `commit` `rollback` | Con `import` y su bloque en `app:` |
+| `sqlite` `postgres` `mysql` | `query` `exec` `begin` `commit` `rollback`; `last_id` solo en sqlite y mysql | Con `import` y su bloque en `app:` |
 
 Usar uno fuera de su contexto es error de compilación. Todos los métodos de un módulo de
 base de datos son asíncronos: se llaman con `await`.
@@ -868,6 +937,25 @@ base de datos son asíncronos: se llaman con `await`.
 | `List` | `add(v)` |
 | `Dict` | `has(clave)` `keys()` |
 | `File` | `save(directorio)` |
+
+Cuando el tipo del receptor se conoce al compilar —un parámetro declarado, una variable con
+tipo, un literal— el nombre y el número de argumentos se comprueban **ahí**, no al ejecutar:
+
+```
+error: los valores de tipo string no tienen el metodo 'mayusculas';
+       tienen status, header, cookie, starts_with, ends_with, contains, upper, lower, trim
+```
+
+La comprobación sigue por la cadena, porque cada método sabe lo que devuelve:
+`s.upper().recortar()` también falla al compilar. Lo mismo con los campos de una clase:
+`p.noexiste` dice qué campos tiene `p` en vez de devolver `null` en silencio.
+
+Esto llega también **dentro de las plantillas**, porque `render()` le pasa los tipos de sus
+argumentos al compilador de plantillas: `{{ quien.mayusculas() }}` es un error de
+`osodio --check`, con el fichero y la línea de la plantilla.
+
+Donde el tipo no se conoce —la variable de un `{% for %}`, un campo de un `Json`— no se
+comprueba nada y el despacho sigue siendo en ejecución, como antes.
 
 ---
 

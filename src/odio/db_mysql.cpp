@@ -1,10 +1,12 @@
 #include <odio/db.hpp>
+#include <odio/crypto.hpp>
 
 #include <mysql.h>
 
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 
 namespace odio {
 
@@ -19,14 +21,31 @@ namespace {
 
 // Driver de MySQL/MariaDB sobre libmysqlclient.
 //
-// Se usan sentencias preparadas siempre: los parametros van por bind y nunca
-// concatenados, que es lo que hace imposible la inyeccion de SQL desde Odio.
+// Todo lo que lleva parametros va por sentencia preparada: viajan por bind y
+// nunca concatenados, que es lo que hace imposible la inyeccion de SQL desde
+// Odio.  Lo que NO lleva parametros se manda directo, porque el protocolo
+// preparado de MySQL no admite abrir una transaccion.
 class MysqlDriver : public DbDriver {
 public:
     const char* name() const override { return "mysql"; }
 
     bool configure(const std::map<std::string, std::string>& options,
                    std::string& error) override {
+        // libmysqlclient hay que inicializarla UNA vez y desde un solo hilo,
+        // antes de que ningun otro la toque.  Sin esto, la inicializacion
+        // implicita de mysql_init() la disparaba el primer worker del pool que
+        // recibiera trabajo, mientras otro ya estaba dentro de la biblioteca:
+        // ThreadSanitizer lo caza como carrera sobre el mutex que monta
+        // mysql_server_init.  configure() corre antes de pool->start(), asi que
+        // aqui todavia no hay workers.
+        static std::once_flag una_vez;
+        static bool arrancada = false;
+        std::call_once(una_vez, [] { arrancada = mysql_library_init(0, nullptr, nullptr) == 0; });
+        if (!arrancada) {
+            error = "mysql: no se puede inicializar libmysqlclient";
+            return false;
+        }
+
         auto get = [&](const char* k, const char* def) {
             auto it = options.find(k);
             return it == options.end() ? std::string(def) : it->second;
@@ -87,10 +106,17 @@ public:
 
     bool query(size_t worker, const std::string& sql, const std::vector<Value>& args,
                Value& out, std::string& error) override {
+        // Todo esto es local a la llamada, y tiene que serlo: el driver es uno
+        // solo y lo comparten los N workers del pool.  Con los buffers de bind
+        // guardados en el objeto, dos consultas simultaneas se pisaban los
+        // punteros que libmysqlclient todavia estaba usando.
         MYSQL_STMT* stmt = nullptr;
-        std::vector<MYSQL_BIND> binds;
+        std::vector<MYSQL_BIND>  binds;
         std::vector<std::string> store;
-        if (!prepare(worker, sql, args, &stmt, binds, store, error)) return false;
+        std::unique_ptr<odio_my_bool[]> nulls_in;
+        std::vector<unsigned long>      lens_in;
+        if (!prepare(worker, sql, args, &stmt, binds, store, nulls_in, lens_in, error))
+            return false;
 
         if (mysql_stmt_execute(stmt) != 0) {
             error = std::string("mysql: ") + mysql_stmt_error(stmt);
@@ -103,6 +129,20 @@ public:
             mysql_stmt_close(stmt);
             out = Value::list();
             return true;
+        }
+
+        // `max_length` vale CERO mientras no se pida expresamente y no se traiga
+        // el resultado al cliente.  Sin estas dos llamadas, todos los buffers se
+        // quedaban en el tamano de reserva y cualquier columna mas larga se
+        // truncaba EN SILENCIO: un TEXT de 4 KB llegaba con 1024 bytes, cortado
+        // ademas a mitad de caracter si era UTF-8.
+        odio_my_bool si = 1;
+        mysql_stmt_attr_set(stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &si);
+        if (mysql_stmt_store_result(stmt) != 0) {
+            error = std::string("mysql: ") + mysql_stmt_error(stmt);
+            mysql_free_result(meta);
+            mysql_stmt_close(stmt);
+            return false;
         }
 
         unsigned cols = mysql_num_fields(meta);
@@ -135,8 +175,13 @@ public:
         for (;;) {
             int rc = mysql_stmt_fetch(stmt);
             if (rc == MYSQL_NO_DATA) break;
-            if (rc == 1) {
-                error = std::string("mysql: ") + mysql_stmt_error(stmt);
+            // MYSQL_DATA_TRUNCATED se colaba por aqui como si fuera una fila
+            // buena.  Con los buffers ya bien dimensionados no deberia ocurrir;
+            // si ocurre, es un fallo y no un dato a medias.
+            if (rc == 1 || rc == MYSQL_DATA_TRUNCATED) {
+                error = (rc == MYSQL_DATA_TRUNCATED)
+                      ? std::string("mysql: fila truncada al leerla")
+                      : std::string("mysql: ") + mysql_stmt_error(stmt);
                 mysql_free_result(meta);
                 mysql_stmt_close(stmt);
                 return false;
@@ -145,7 +190,8 @@ public:
             for (unsigned i = 0; i < cols; ++i) {
                 if (nulls[i]) { row[fields[i].name] = Value::null(); continue; }
                 std::string text(bufs[i].data(), std::min<size_t>(lens[i], bufs[i].size()));
-                row[fields[i].name] = typed(fields[i].type, text);
+                row[fields[i].name] = typed(fields[i].type, fields[i].flags,
+                                            fields[i].charsetnr, text);
             }
             rows.push_back(Value::dict(std::move(row)));
         }
@@ -158,10 +204,41 @@ public:
 
     bool exec(size_t worker, const std::string& sql, const std::vector<Value>& args,
               long long& affected, std::string& error) override {
+        // Sin parametros la sentencia va directa, sin pasar por el protocolo de
+        // sentencias preparadas.
+        //
+        // No es una optimizacion, es que HACE FALTA: MySQL no admite ahi ni
+        // BEGIN ni START TRANSACTION —error 1295—, asi que por el camino
+        // preparado la transaccion no llegaba a abrirse nunca.  El UPDATE se
+        // autocommiteaba y el ROLLBACK devolvia exito sin nada que deshacer.
+        //
+        // Y no abre ningun agujero: lo que hace imposible la inyeccion es que
+        // los PARAMETROS viajen por bind, y aqui no hay ninguno que enlazar.
+        if (args.empty()) {
+            MYSQL* c = conns_[worker];
+            if (mysql_real_query(c, sql.c_str(),
+                                 static_cast<unsigned long>(sql.size())) != 0) {
+                error = std::string("mysql: ") + mysql_error(c);
+                return false;
+            }
+            // Un exec() sobre algo que devuelve filas dejaria la conexion a
+            // medias y la siguiente consulta fallaria sin motivo aparente.
+            if (MYSQL_RES* r = mysql_store_result(c)) mysql_free_result(r);
+            affected = static_cast<long long>(mysql_affected_rows(c));
+            return true;
+        }
+
+        // Todo esto es local a la llamada, y tiene que serlo: el driver es uno
+        // solo y lo comparten los N workers del pool.  Con los buffers de bind
+        // guardados en el objeto, dos consultas simultaneas se pisaban los
+        // punteros que libmysqlclient todavia estaba usando.
         MYSQL_STMT* stmt = nullptr;
-        std::vector<MYSQL_BIND> binds;
+        std::vector<MYSQL_BIND>  binds;
         std::vector<std::string> store;
-        if (!prepare(worker, sql, args, &stmt, binds, store, error)) return false;
+        std::unique_ptr<odio_my_bool[]> nulls_in;
+        std::vector<unsigned long>      lens_in;
+        if (!prepare(worker, sql, args, &stmt, binds, store, nulls_in, lens_in, error))
+            return false;
 
         if (mysql_stmt_execute(stmt) != 0) {
             error = std::string("mysql: ") + mysql_stmt_error(stmt);
@@ -191,9 +268,12 @@ private:
     unsigned             port_ = 3306;
     std::vector<MYSQL*>  conns_;
 
-    bool prepare(size_t worker, const std::string& sql, const std::vector<Value>& args,
+    bool prepare(size_t worker, const std::string& sql,
+                 const std::vector<Value>& args,
                  MYSQL_STMT** out, std::vector<MYSQL_BIND>& binds,
-                 std::vector<std::string>& store, std::string& error) {
+                 std::vector<std::string>& store,
+                 std::unique_ptr<odio_my_bool[]>& nulls,
+                 std::vector<unsigned long>& lens, std::string& error) {
         MYSQL* c = conns_[worker];
         *out = mysql_stmt_init(c);
         if (!*out) { error = "mysql: sin memoria"; return false; }
@@ -226,17 +306,17 @@ private:
 
         binds.assign(args.size(), MYSQL_BIND{});
         std::memset(binds.data(), 0, sizeof(MYSQL_BIND) * binds.size());
-        nulls_ = std::make_unique<odio_my_bool[]>(args.size());
-        lens_.assign(args.size(), 0);
+        nulls = std::make_unique<odio_my_bool[]>(args.size());
+        lens.assign(args.size(), 0);
 
         for (size_t i = 0; i < args.size(); ++i) {
-            nulls_[i] = args[i].is_null() ? 1 : 0;
-            lens_[i]  = static_cast<unsigned long>(store[i].size());
+            nulls[i] = args[i].is_null() ? 1 : 0;
+            lens[i]  = static_cast<unsigned long>(store[i].size());
             binds[i].buffer_type   = MYSQL_TYPE_STRING;
             binds[i].buffer        = store[i].data();
-            binds[i].buffer_length = lens_[i];
-            binds[i].length        = &lens_[i];
-            binds[i].is_null       = &nulls_[i];
+            binds[i].buffer_length = lens[i];
+            binds[i].length        = &lens[i];
+            binds[i].is_null       = &nulls[i];
         }
         if (mysql_stmt_bind_param(*out, binds.data()) != 0) {
             error = std::string("mysql: al enlazar parametros: ") + mysql_stmt_error(*out);
@@ -247,15 +327,39 @@ private:
         return true;
     }
 
-    std::unique_ptr<odio_my_bool[]> nulls_;
-    std::vector<unsigned long>      lens_;
+    // `charsetnr == 63` es el juego binary: eso distingue un BLOB de un TEXT,
+    // que en MySQL comparten tipo y solo se diferencian en la codificacion.
+    static constexpr unsigned kBinario = 63;
 
-    static Value typed(enum_field_types t, const std::string& text) {
+    static Value typed(enum_field_types t, unsigned flags, unsigned charset,
+                       const std::string& text) {
+        // Un BLOB no es texto: son bytes cualesquiera.  Devolverlos como cadena
+        // dejaba la respuesta sin ser UTF-8 valido, y entonces el fallo no es de
+        // la peticion sino del cliente que la recibe.  Base64 es como se mete un
+        // binario en un JSON.
+        if (charset == kBinario &&
+            (t == MYSQL_TYPE_BLOB      || t == MYSQL_TYPE_TINY_BLOB ||
+             t == MYSQL_TYPE_MEDIUM_BLOB || t == MYSQL_TYPE_LONG_BLOB ||
+             t == MYSQL_TYPE_STRING    || t == MYSQL_TYPE_VAR_STRING))
+            return Value::str(crypto::base64_encode(text));
+
         switch (t) {
             case MYSQL_TYPE_TINY:  case MYSQL_TYPE_SHORT:
             case MYSQL_TYPE_LONG:  case MYSQL_TYPE_LONGLONG:
-            case MYSQL_TYPE_INT24: case MYSQL_TYPE_YEAR:
+            case MYSQL_TYPE_INT24: case MYSQL_TYPE_YEAR: {
+                // Un BIGINT UNSIGNED llega hasta 18446744073709551615, que no
+                // cabe en el entero de Odio.  strtoll lo dejaria clavado en
+                // INT64_MAX sin avisar, asi que por encima de ese tope se cae a
+                // decimal, que es lo mismo que hace el parser de JSON y lo que
+                // hace JavaScript.  Por debajo sigue siendo exacto.
+                if (flags & UNSIGNED_FLAG) {
+                    unsigned long long u = std::strtoull(text.c_str(), nullptr, 10);
+                    if (u > static_cast<unsigned long long>(INT64_MAX))
+                        return Value::real(static_cast<double>(u));
+                    return Value::integer(static_cast<long long>(u));
+                }
                 return Value::integer(std::strtoll(text.c_str(), nullptr, 10));
+            }
             case MYSQL_TYPE_FLOAT: case MYSQL_TYPE_DOUBLE:
             case MYSQL_TYPE_DECIMAL: case MYSQL_TYPE_NEWDECIMAL:
                 return Value::real(std::strtod(text.c_str(), nullptr));

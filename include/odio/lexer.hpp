@@ -54,6 +54,7 @@ private:
     void lex_token();
     void lex_number(SourceLoc loc);
     void lex_string(SourceLoc loc);
+    void lex_string_multi(SourceLoc loc);
     void lex_ident(SourceLoc loc);
     void skip_line_comment();
 };

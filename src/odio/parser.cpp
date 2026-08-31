@@ -1,5 +1,6 @@
 #include <odio/parser.hpp>
 #include <cstdlib>
+#include <iostream>
 
 namespace odio {
 
@@ -498,9 +499,22 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
     if (check(Tok::Ident) && peek().text == "env" && peek(1).is(Tok::LParen)) {
         advance(); advance();
         if (!check(Tok::String)) { error_here("env() espera el nombre entre comillas"); return false; }
-        std::string name = advance().text;
+        Token name_tok = advance();
+        const std::string& name = name_tok.text;
         expect(Tok::RParen, "al cerrar env()");
         const char* v = std::getenv(name.c_str());
+        // Sin esto, una variable de entorno olvidada se convierte en "" sin
+        // que nadie se entere hasta produccion: para session/jwt el secreto
+        // vacio falla cerrado (se trata igual que "sin configurar"), pero el
+        // error real queda escondido detras de un mensaje que no lo menciona.
+        // No es un error de compilacion — .odio no tiene por que conocer el
+        // entorno de despliegue final, y --check debe poder correr sin el.
+        if (!v) {
+            std::cerr << "osodio: aviso: " << (name_tok.loc.file ? *name_tok.loc.file : "?")
+                      << ":" << name_tok.loc.line << ":" << name_tok.loc.col
+                      << ": la variable de entorno '" << name
+                      << "' no esta definida; se usa \"\" en su lugar\n";
+        }
         text = v ? v : "";
         kind = 0;
         return true;

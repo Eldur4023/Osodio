@@ -1,6 +1,5 @@
 #include <odio/project.hpp>
 #include <odio/plantilla.hpp>
-#include <odio/jinja_puente.hpp>
 #include <odio/lexer.hpp>
 #include <odio/parser.hpp>
 #include <odio/emitter.hpp>
@@ -82,6 +81,21 @@ std::string format_errors(const DiagnosticBag& diags,
 // que hay que calcular, la ruta necesita el VM y eso es otro hito.
 
 namespace {
+
+// Nombre de tipo de Odio para un valor ya construido.  Se usa donde los datos
+// son constantes y por tanto su tipo es exacto.
+std::string tipo_odio_de(const Value& v) {
+    switch (v.type()) {
+        case Value::Type::Str:   return "string";
+        case Value::Type::Int:   return "int";
+        case Value::Type::Float: return "float";
+        case Value::Type::Bool:  return "bool";
+        case Value::Type::List:  return "List";
+        case Value::Type::Dict:  return "Dict";
+        default:                 return {};
+    }
+}
+
 
 
 // Igual, pero produciendo un Value en vez de un arbol nlohmann.
@@ -232,9 +246,14 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         const std::string fuente((std::istreambuf_iterator<char>(f)),
                                  std::istreambuf_iterator<char>());
 
-        std::vector<std::string> claves;
-        std::vector<Value>       valores;
-        for (const auto& [k, v] : data) { claves.push_back(k); valores.push_back(v); }
+        // Aqui los datos son CONSTANTES, asi que el tipo de cada clave se sabe
+        // exacto: la plantilla se comprueba contra los valores de verdad.
+        std::vector<NombreTipado> claves;
+        std::vector<Value>        valores;
+        for (const auto& [k, v] : data) {
+            claves.push_back({k, tipo_odio_de(v)});
+            valores.push_back(v);
+        }
 
         Plantilla tpl_c;
         if (!compilar_plantilla(fuente, name, tpl_dir, claves, diags, tpl_c)) return {};
@@ -351,6 +370,19 @@ int async_sleep_id() {
 int async_ws_recv_id() {
     static const int id = native_id("__ws_recv");
     return id;
+}
+
+// El tope de pasos del VM se reinicia en cada suspension a proposito, para que
+// un bucle de sse/ws legitimo pueda vivir horas (ver kStepLimit en vm.hpp).
+// Pero eso deja un hueco: `while true: await sleep(0)` se suspende y reanuda
+// sin avanzar apenas nada, asi que nunca acumula pasos entre dos suspensiones
+// y el tope no lo ve nunca — un solo cliente podria fijar un hilo entero
+// reprogramando un temporizador de 0 ms sin parar.  Un piso de 1 ms no lo
+// impide del todo, pero lo acota a ~1000 reanudaciones/s por conexion en vez
+// de tantas como el planificador quiera dar: ninguna carga legitima necesita
+// menos de eso.
+long long clamp_sleep_ms(long long ms) {
+    return ms < 1 ? 1 : ms;
 }
 
 bool is_scalar(const std::string& t) {
@@ -524,7 +556,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         auto info  = std::make_shared<ClassInfo>();
         info->name = c.name;
 
-        std::vector<std::string> field_names;
+        std::vector<NombreTipado> field_names;
         bool ok = true;
 
         for (const auto& f : c.fields) {
@@ -536,7 +568,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
                 continue;
             }
             info->fields.push_back({f.name, f.type.name, f.type.optional});
-            field_names.push_back(f.name);
+            field_names.push_back({f.name, f.type.name});
         }
         if (!ok) continue;
 
@@ -1013,8 +1045,19 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
             if (it != req.params.end()) { raw = it->second; present = true; }
         } else {
             auto it = req.query.find(b.name);
-            if (it != req.query.end())  { raw = it->second; present = true; }
-            else if (b.has_default)     { raw = b.default_text; present = true; }
+            if (it != req.query.end()) { raw = it->second; present = true; }
+            else if (ctx.uploads && ctx.parts) {
+                // Un campo de texto de un formulario multipart es una parte mas,
+                // igual que un File, solo que sin filename.  Antes esta rama no
+                // existia: un parametro escalar en una ruta con File siempre
+                // salia vacio, sin error, porque solo se miraba la query string.
+                for (const auto& part : *ctx.parts) {
+                    if (part.name == b.name && part.filename.empty()) {
+                        raw = part.body; present = true; break;
+                    }
+                }
+            }
+            if (!present && b.has_default) { raw = b.default_text; present = true; }
         }
 
         Value v;
@@ -1426,7 +1469,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                             else if (result.await_id == async_sleep_id()) {
                                 long long ms = result.await_args.empty()
                                              ? 0 : result.await_args[0].as_int();
-                                if (ms < 0) ms = 0;
+                                ms = clamp_sleep_ms(ms);
                                 co_await osodio::sleep(static_cast<int>(ms));
                                 if (req.is_cancelled()) co_return;
                             }
@@ -1497,7 +1540,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         else if (result.await_id == async_sleep_id()) {
                             long long ms = result.await_args.empty()
                                          ? 0 : result.await_args[0].as_int();
-                            if (ms < 0) ms = 0;
+                            ms = clamp_sleep_ms(ms);
                             co_await osodio::sleep(static_cast<int>(ms));
                             if (req.is_cancelled()) co_return;
                         }
@@ -1598,7 +1641,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     else if (result.await_id == async_sleep_id()) {
                         long long ms = result.await_args.empty()
                                      ? 0 : result.await_args[0].as_int();
-                        if (ms < 0) ms = 0;
+                        ms = clamp_sleep_ms(ms);
                         co_await osodio::sleep(static_cast<int>(ms));
                         // sleep() despierta antes si el cliente se desconecta;
                         // en ese caso no tiene sentido seguir ejecutando.

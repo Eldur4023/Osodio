@@ -5,13 +5,16 @@
 #include <osodio/response.hpp>
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 using odio::Plantilla;
 using odio::Value;
 
-static int fallos = 0;
+static int         fallos = 0;
+static std::string dir_tpl = ".";
 
 static void comprobar(const char* nombre, const std::string& obtenido,
                       const std::string& esperado) {
@@ -26,11 +29,11 @@ static void comprobar(const char* nombre, const std::string& obtenido,
 
 // Compila y renderiza; devuelve "" y deja `err` si algo falla.
 static std::string pintar(const std::string& fuente,
-                          const std::vector<std::string>& nombres,
+                          const std::vector<odio::NombreTipado>& nombres,
                           std::vector<Value> valores, std::string& err) {
     odio::DiagnosticBag diags;
     Plantilla p;
-    if (!odio::compilar_plantilla(fuente, "prueba.html", ".", nombres, diags, p)) {
+    if (!odio::compilar_plantilla(fuente, "prueba.html", dir_tpl, nombres, diags, p)) {
         err = diags.items().empty() ? "error sin mensaje" : diags.items().front().message;
         return {};
     }
@@ -45,7 +48,7 @@ static std::string pintar(const std::string& fuente,
 }
 
 static void caso(const char* nombre, const std::string& fuente,
-                 const std::vector<std::string>& nombres,
+                 const std::vector<odio::NombreTipado>& nombres,
                  std::vector<Value> valores, const std::string& esperado) {
     std::string err;
     const std::string got = pintar(fuente, nombres, std::move(valores), err);
@@ -59,7 +62,7 @@ static void caso(const char* nombre, const std::string& fuente,
 
 // Casos que TIENEN que fallar al compilar, con el motivo esperado.
 static void no_compila(const char* nombre, const std::string& fuente,
-                       const std::vector<std::string>& nombres,
+                       const std::vector<odio::NombreTipado>& nombres,
                        const std::string& trozo) {
     std::string err;
     const std::string got = pintar(fuente, nombres, {}, err);
@@ -162,9 +165,77 @@ int main() {
     no_compila("for mal escrito", "{% for x xs %}{% endfor %}", {"xs"}, "for x in lista");
     no_compila("etiqueta desconocida", "{% cosa %}", {}, "etiqueta desconocida");
     no_compila("filtro de jinja", "{{ x|upper }}", {"x"}, "metodos de Odio");
-    no_compila("herencia todavia no", "{% extends \"base.html\" %}", {}, "todavia no existe");
     no_compila("variable que no existe", "{{ noexiste }}", {}, "en la expresion");
     no_compila("basura detras", "{{ n n }}", {"n"}, "sobra algo");
+
+    // ── Herencia ────────────────────────────────────────────────────────────
+    // Necesita ficheros de verdad: {% extends %} los lee del disco.
+    {
+        namespace fs = std::filesystem;
+        const fs::path d = fs::temp_directory_path() / "odio_tpl_prueba";
+        fs::remove_all(d);
+        fs::create_directories(d);
+        dir_tpl = d.string();
+        auto escribir = [&](const char* n, const char* t) { std::ofstream(d / n) << t; };
+        auto leer = [&](const char* n) {
+            std::ifstream f(d / n);
+            return std::string((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+        };
+
+        escribir("base.html",
+                 "<html>{% block cabeza %}CABEZA{% endblock %}"
+                 "|{% block cuerpo %}vacio{% endblock %}</html>");
+        escribir("hijo.html",
+                 "{% extends \"base.html\" %}{% block cuerpo %}soy {{ quien }}{% endblock %}");
+        escribir("nieto.html",
+                 "{% extends \"hijo.html\" %}{% block cabeza %}NUEVA{% endblock %}");
+        escribir("anidado.html",
+                 "<a>{% block fuera %}[{% block dentro %}d{% endblock %}]{% endblock %}</a>");
+        escribir("hijo_anidado.html",
+                 "{% extends \"anidado.html\" %}{% block dentro %}D{% endblock %}");
+
+        std::printf("== herencia ==\n");
+        caso("hijo sustituye un bloque", leer("hijo.html"), {"quien"},
+             {Value::str("Ana")}, "<html>CABEZA|soy Ana</html>");
+        caso("sin sustituir sale el defecto", leer("base.html"), {}, {},
+             "<html>CABEZA|vacio</html>");
+        caso("cadena de tres", leer("nieto.html"), {"quien"},
+             {Value::str("Ana")}, "<html>NUEVA|soy Ana</html>");
+        caso("bloque dentro de bloque", leer("hijo_anidado.html"), {}, {},
+             "<a>[D]</a>");
+
+        no_compila("extends no es lo primero", "hola{% extends \"base.html\" %}", {},
+                   "tiene que ser lo primero");
+        no_compila("base que no existe", "{% extends \"nada.html\" %}", {},
+                   "no se encuentra la plantilla base");
+        no_compila("endblock que falta", "{% block x %}sin cerrar", {},
+                   "falta {% endblock %}");
+        no_compila("macro no existe", "{% macro m() %}{% endmacro %}", {},
+                   "no existe en Odio");
+
+        dir_tpl = ".";
+        fs::remove_all(d);
+    }
+
+    // Cuando render() sabe el tipo de lo que pasa, la plantilla se comprueba
+    // contra el: una errata dentro de un {{ }} deja de ser una pagina rota.
+    std::printf("== tipos ==\n");
+    caso("metodo que existe", "{{ s.upper().trim() }}", {{"s", "string"}},
+         {Value::str(" ana ")}, "ANA");
+    no_compila("metodo que no existe", "{{ s.mayusculas() }}", {{"s", "string"}},
+               "no tienen el metodo");
+    no_compila("metodo con argumentos de mas", "{{ s.upper(1) }}", {{"s", "string"}},
+               "espera 0 argumento(s)");
+    no_compila("metodo tras encadenar", "{{ s.upper().recortar() }}", {{"s", "string"}},
+               "no tienen el metodo");
+    no_compila("campo sobre un numero", "{{ n.campo }}", {{"n", "int"}},
+               "no tiene campos");
+
+    // Sin tipo no hay nada que comprobar, y eso tiene que seguir compilando:
+    // es lo que le pasa a la variable de un {% for %}.
+    caso("sin tipo no se comprueba", "{% for x in xs %}{{ x.upper() }}{% endfor %}",
+         {"xs"}, {Value::list({Value::str("a")})}, "A");
 
     std::printf("\n%s\n", fallos ? "HAY FALLOS" : "todas pasan");
     return fallos ? 1 : 0;

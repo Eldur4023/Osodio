@@ -15,6 +15,75 @@ bool is_ident_char(unsigned char c) {
     return is_ident_start(c) || std::isdigit(c);
 }
 
+// Traduce la letra que va detras de una barra.  Devuelve false si no es ninguno
+// de los escapes conocidos.  La usan las cadenas de una linea y las de tres
+// comillas, para que las dos entiendan exactamente lo mismo.
+bool escape_de(char e, char& out) {
+    switch (e) {
+        case 'n':  out = '\n'; return true;
+        case 't':  out = '\t'; return true;
+        case 'r':  out = '\r'; return true;
+        case '0':  out = '\0'; return true;
+        case '"':  out = '"';  return true;
+        case '\\': out = '\\'; return true;
+        default:   return false;
+    }
+}
+
+// Quita el margen de una cadena de tres comillas.
+//
+// El texto se escribe indentado dentro del cuerpo de la ruta, pero esa
+// indentacion es del fichero, no de la cadena: sin quitarla, un SELECT llegaria
+// con ocho espacios en cada linea hasta el log del motor.  Las reglas son tres:
+//
+//   • un salto de linea justo detras de la apertura no cuenta, esta para que el
+//     texto pueda empezar en su propia linea;
+//   • si el cierre esta solo en su linea, esa linea tampoco cuenta;
+//   • del resto se quita la sangria comun a todas las lineas con contenido.
+//
+// Solo se miran espacios: una linea que empiece por tabulador deja el margen en
+// cero y no se toca nada, que es preferible a adivinar cuanto ocupa un tab.
+std::string sin_margen(std::string s) {
+    if (s.rfind("\r\n", 0) == 0)         s.erase(0, 2);
+    else if (!s.empty() && s[0] == '\n') s.erase(0, 1);
+
+    const size_t ult = s.rfind('\n');
+    if (ult != std::string::npos &&
+        s.find_first_not_of(" \t\r", ult + 1) == std::string::npos)
+        s.erase(ult);
+
+    size_t margen = std::string::npos;
+    for (size_t i = 0;;) {
+        size_t fin = s.find('\n', i);
+        const bool ultima = (fin == std::string::npos);
+        if (ultima) fin = s.size();
+
+        size_t j = i;
+        while (j < fin && s[j] == ' ') ++j;
+        if (j < fin && s[j] != '\r') margen = std::min(margen, j - i);
+
+        if (ultima) break;
+        i = fin + 1;
+    }
+    if (margen == std::string::npos || margen == 0) return s;
+
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0;;) {
+        size_t fin = s.find('\n', i);
+        const bool ultima = (fin == std::string::npos);
+        if (ultima) fin = s.size();
+
+        const size_t salta = std::min(margen, fin - i);
+        out.append(s, i + salta, fin - i - salta);
+
+        if (ultima) break;
+        out += '\n';
+        i = fin + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 char Lexer::peek(size_t ahead) const {
@@ -116,6 +185,9 @@ void Lexer::lex_number(SourceLoc loc) {
 }
 
 void Lexer::lex_string(SourceLoc loc) {
+    // Tres comillas abren una cadena que puede ocupar varias lineas.
+    if (peek(1) == '"' && peek(2) == '"') { lex_string_multi(loc); return; }
+
     advance();  // comilla de apertura
     std::string value;
     while (true) {
@@ -129,17 +201,65 @@ void Lexer::lex_string(SourceLoc loc) {
 
         if (eof()) { diags_.error(loc, "cadena sin cerrar"); break; }
         char e = advance();
-        switch (e) {
-            case 'n':  value += '\n'; break;
-            case 't':  value += '\t'; break;
-            case 'r':  value += '\r'; break;
-            case '0':  value += '\0'; break;
-            case '"':  value += '"';  break;
-            case '\\': value += '\\'; break;
-            default:
-                diags_.error({&file_.path, line_, col_ - 1},
-                             std::string("escape desconocido: \\") + e);
-                value += e;
+        char d;
+        if (escape_de(e, d)) {
+            value += d;
+        } else {
+            diags_.error({&file_.path, line_, col_ - 1},
+                         std::string("escape desconocido: \\") + e);
+            value += e;
+        }
+    }
+    push(Tok::String, loc, std::move(value));
+}
+
+// Cadena de tres comillas: sirve para meter SQL o HTML sin pelearse con los
+// saltos de linea.
+//
+//     let q = """
+//         SELECT id, titulo
+//         FROM posts
+//         WHERE autor = ?
+//         """
+//
+// Se recoge primero el texto crudo y solo despues se aplican los escapes: asi
+// la sangria se mide sobre los saltos de linea que hay ESCRITOS en el fichero,
+// y un \n de dentro de la cadena no altera el margen.
+void Lexer::lex_string_multi(SourceLoc loc) {
+    advance(); advance(); advance();   // """
+
+    std::string bruto;
+    bool        cerrada = false;
+    while (!eof()) {
+        if (peek() == '"' && peek(1) == '"' && peek(2) == '"') {
+            advance(); advance(); advance();
+            cerrada = true;
+            break;
+        }
+        // La barra y lo que le sigue viajan juntos y sin tocar: si no, un \"
+        // dejaria una comilla suelta que podria cerrar la cadena antes de
+        // tiempo.
+        if (peek() == '\\' && pos_ + 1 < file_.text.size()) {
+            bruto += advance();
+            bruto += advance();
+            continue;
+        }
+        bruto += advance();
+    }
+    if (!cerrada) diags_.error(loc, "cadena sin cerrar: faltan las tres comillas del final");
+
+    bruto = sin_margen(std::move(bruto));
+
+    std::string value;
+    value.reserve(bruto.size());
+    for (size_t i = 0; i < bruto.size(); ++i) {
+        if (bruto[i] != '\\' || i + 1 >= bruto.size()) { value += bruto[i]; continue; }
+        char d;
+        if (escape_de(bruto[++i], d)) {
+            value += d;
+        } else {
+            diags_.error(loc, std::string("escape desconocido: \\") + bruto[i]);
+            value += bruto[i];
         }
     }
     push(Tok::String, loc, std::move(value));

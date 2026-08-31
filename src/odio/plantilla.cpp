@@ -5,6 +5,7 @@
 #include <odio/parser.hpp>
 #include <odio/vm.hpp>
 
+#include <map>
 #include <memory>
 #include <filesystem>
 #include <fstream>
@@ -34,6 +35,26 @@ void escapar_html(const std::string& in, std::string& out) {
 
 namespace {
 
+// Recorta espacios a la izquierda/derecha segun los marcadores {%- y -%}.
+void recortar_izq(std::string& t) {
+    size_t n = t.size();
+    while (n > 0 && (t[n - 1] == ' ' || t[n - 1] == '\t' ||
+                     t[n - 1] == '\n' || t[n - 1] == '\r')) --n;
+    t.resize(n);
+}
+void recortar_der(size_t& i, const std::string& src) {
+    while (i < src.size() && (src[i] == ' ' || src[i] == '\t' ||
+                              src[i] == '\n' || src[i] == '\r')) ++i;
+}
+
+std::string trim(std::string s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+
 // ─── Compilador ──────────────────────────────────────────────────────────────
 
 class Compilador {
@@ -42,9 +63,33 @@ public:
         : dir_(dir), diags_(diags), out_(out) {}
 
     bool compilar(const std::string& fuente, const std::string& fichero,
-                  const std::vector<std::string>& datos) {
+                  const std::vector<NombreTipado>& datos) {
         out_.nombres = datos;
-        cuerpo(fuente, fichero, 0);
+
+        // Herencia: se sube por la cadena de {% extends %} recogiendo bloques.
+        // El hijo gana, asi que solo se apunta el bloque que no estaba ya.  Al
+        // final se compila la RAIZ, con los bloques sustituidos.
+        std::string raiz = fuente, raiz_fichero = fichero;
+        for (int n = 0; n <= 16; ++n) {
+            std::string padre;
+            if (!padre_de(raiz, raiz_fichero, padre)) break;
+            if (n == 16) {
+                error(loc_inicio(raiz_fichero), raiz_fichero,
+                      "demasiados {% extends %} encadenados: hay un ciclo?");
+                return false;
+            }
+            recoger_bloques(raiz, raiz_fichero);
+            std::string texto_padre;
+            if (!leer_plantilla(padre, texto_padre)) {
+                error(loc_inicio(raiz_fichero), raiz_fichero,
+                      "no se encuentra la plantilla base '" + padre + "'");
+                return false;
+            }
+            raiz         = std::move(texto_padre);
+            raiz_fichero = padre;
+        }
+
+        cuerpo(raiz, raiz_fichero, 0);
         if (!abiertos_.empty()) {
             error(abiertos_.back().loc, fichero,
                   "falta {% end" + abiertos_.back().que + " %}");
@@ -68,11 +113,11 @@ private:
     // bucle, que es exactamente lo que significa sombrear.
     void tapar(const std::string& nombre, std::vector<std::pair<size_t, std::string>>& tapados) {
         for (size_t i = out_.nombres.size(); i-- > 0;) {
-            if (out_.nombres[i] == nombre) {
-                tapados.emplace_back(i, out_.nombres[i]);
+            if (out_.nombres[i].nombre == nombre) {
+                tapados.emplace_back(i, out_.nombres[i].nombre);
                 // El marcador lleva la ranura para que dos nombres tapados no
                 // choquen entre si: el emisor tampoco admite eso.
-                out_.nombres[i] = " tapado" + std::to_string(i);
+                out_.nombres[i].nombre = " tapado" + std::to_string(i);
                 break;
             }
         }
@@ -145,6 +190,93 @@ private:
 
     void cuerpo(const std::string& src, const std::string& fichero, int profundidad);
 
+    // Bloques que el hijo (o el nieto) define, por nombre.  Guardan tambien de
+    // que fichero salieron, para que el error apunte al sitio correcto.
+    std::map<std::string, std::pair<std::string, std::string>> bloques_;
+
+    SourceLoc loc_inicio(const std::string& fichero) {
+        SourceLoc l;
+        l.file = guardar_nombre(fichero);
+        l.line = 1;
+        l.col  = 1;
+        return l;
+    }
+
+    bool leer_plantilla(const std::string& nombre, std::string& out) {
+        if (nombre.empty() || nombre.find("..") != std::string::npos) return false;
+        std::ifstream f(std::filesystem::path(dir_) / nombre, std::ios::binary);
+        if (!f) return false;
+        out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        return true;
+    }
+
+    // Si la plantilla empieza por {% extends "x" %}, devuelve x.  Tiene que ser
+    // lo primero: una plantilla que hereda no aporta texto suyo, solo bloques.
+    bool padre_de(const std::string& src, const std::string& fichero,
+                  std::string& padre) {
+        size_t i = src.find_first_not_of(" \t\r\n");
+        if (i == std::string::npos || src.compare(i, 2, "{%") != 0) return false;
+        size_t fin = src.find("%}", i);
+        if (fin == std::string::npos) return false;
+        std::string cont = trim(src.substr(i + 2, fin - i - 2));
+        if (cont.rfind("extends", 0) != 0) return false;
+        padre = trim(cont.substr(7));
+        if (padre.size() >= 2 && (padre.front() == 0x22 || padre.front() == 0x27))
+            padre = padre.substr(1, padre.size() - 2);
+        if (padre.empty()) {
+            error(loc_inicio(fichero), fichero, "{% extends %} sin nombre de plantilla");
+            return false;
+        }
+        return true;
+    }
+
+    // Indice justo despues del {% endblock %} que cierra el que empieza en
+    // `desde`, contando los anidados.
+    static size_t fin_de_bloque(const std::string& src, size_t desde, size_t& contenido_fin) {
+        int  nivel = 1;
+        size_t i   = desde;
+        while (i < src.size()) {
+            size_t abre = src.find("{%", i);
+            if (abre == std::string::npos) break;
+            size_t fin = src.find("%}", abre);
+            if (fin == std::string::npos) break;
+            std::string cont = trim(src.substr(abre + 2, fin - abre - 2));
+            if (cont.rfind("block", 0) == 0)      ++nivel;
+            else if (cont.rfind("endblock", 0) == 0) {
+                if (--nivel == 0) { contenido_fin = abre; return fin + 2; }
+            }
+            i = fin + 2;
+        }
+        contenido_fin = src.size();
+        return std::string::npos;
+    }
+
+    // Apunta los bloques de una plantilla hija.  El primero que se ve gana: se
+    // sube desde el mas derivado, asi que el de abajo tapa al de arriba.
+    void recoger_bloques(const std::string& src, const std::string& fichero) {
+        size_t i = 0;
+        while (i < src.size()) {
+            size_t abre = src.find("{%", i);
+            if (abre == std::string::npos) break;
+            size_t fin = src.find("%}", abre);
+            if (fin == std::string::npos) break;
+            std::string cont = trim(src.substr(abre + 2, fin - abre - 2));
+            if (cont.rfind("block", 0) != 0) { i = fin + 2; continue; }
+
+            std::string nombre = trim(cont.substr(5));
+            size_t      cfin   = 0;
+            size_t      tras   = fin_de_bloque(src, fin + 2, cfin);
+            if (tras == std::string::npos) {
+                error(loc_inicio(fichero), fichero,
+                      "falta {% endblock %} para el bloque '" + nombre + "'");
+                return;
+            }
+            if (!nombre.empty() && !bloques_.count(nombre))
+                bloques_[nombre] = {src.substr(fin + 2, cfin - fin - 2), fichero};
+            i = tras;
+        }
+    }
+
 public:
     // Contexto de compilacion del modulo, para que las expresiones puedan
     // llamar a funciones del usuario y construir sus clases.
@@ -152,25 +284,6 @@ public:
     const ClassSigs*             clases_  = nullptr;
     const std::set<std::string>* imports_ = nullptr;
 };
-
-// Recorta espacios a la izquierda/derecha segun los marcadores {%- y -%}.
-void recortar_izq(std::string& t) {
-    size_t n = t.size();
-    while (n > 0 && (t[n - 1] == ' ' || t[n - 1] == '\t' ||
-                     t[n - 1] == '\n' || t[n - 1] == '\r')) --n;
-    t.resize(n);
-}
-void recortar_der(size_t& i, const std::string& src) {
-    while (i < src.size() && (src[i] == ' ' || src[i] == '\t' ||
-                              src[i] == '\n' || src[i] == '\r')) ++i;
-}
-
-std::string trim(std::string s) {
-    size_t a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return {};
-    size_t b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
 
 } // namespace
 
@@ -314,9 +427,11 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
             tapar("loop", tapados);
 
             const uint32_t slot = static_cast<uint32_t>(out_.nombres.size());
-            out_.nombres.push_back(var);
+            // La variable del bucle no lleva tipo: depende de lo que haya
+            // dentro de la lista, y eso no se sabe aqui.
+            out_.nombres.push_back({var, {}});
             const uint32_t slot_loop = static_cast<uint32_t>(out_.nombres.size());
-            out_.nombres.push_back("loop");
+            out_.nombres.push_back({"loop", {}});
 
             out_.code.push_back({Plantilla::Op::BucleInicio,
                                  static_cast<uint32_t>(k), 0, slot, slot_loop, loc});
@@ -330,7 +445,7 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
             }
             Abierto ab = std::move(abiertos_.back());
             abiertos_.pop_back();
-            for (const auto& [idx, nom] : ab.tapados) out_.nombres[idx] = nom;
+            for (const auto& [idx, nom] : ab.tapados) out_.nombres[idx].nombre = nom;
             const auto& ini = out_.code[ab.inicio];
             out_.code.push_back({Plantilla::Op::BucleSiguiente, 0,
                                  static_cast<uint32_t>(ab.inicio + 1),
@@ -359,10 +474,35 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
                                  std::istreambuf_iterator<char>());
             cuerpo(incluido, nombre, profundidad + 1);
 
-        } else if (etiqueta == "extends" || etiqueta == "block" ||
-                   etiqueta == "endblock" || etiqueta == "macro") {
-            error(loc, fichero, "{% " + etiqueta + " %} todavia no existe en Odio: "
-                                "la herencia de plantillas llegara en su momento");
+        } else if (etiqueta == "block") {
+            // En la raiz: si el hijo definio este bloque, se compila SU texto y
+            // se salta el de aqui; si no, se compila el de aqui, que es el
+            // valor por defecto.
+            const std::string nombre = trim(resto);
+            size_t contenido_fin = 0;
+            size_t tras = fin_de_bloque(src, i, contenido_fin);
+            if (tras == std::string::npos) {
+                error(loc, fichero, "falta {% endblock %} para el bloque '" + nombre + "'");
+                return;
+            }
+            auto it = bloques_.find(nombre);
+            if (it != bloques_.end()) {
+                cuerpo(it->second.first, it->second.second, profundidad + 1);
+                i = tras;
+                texto_desde = i;
+            }
+            // Si no hay sustituto, se sigue leyendo normal: el contenido por
+            // defecto se compila tal cual y el {% endblock %} no hace nada.
+
+        } else if (etiqueta == "endblock") {
+            // Cierra un bloque cuyo contenido por defecto se acaba de compilar.
+
+        } else if (etiqueta == "extends") {
+            error(loc, fichero, "{% extends %} tiene que ser lo primero de la plantilla");
+
+        } else if (etiqueta == "macro" || etiqueta == "endmacro") {
+            error(loc, fichero, "{% " + etiqueta + " %} no existe en Odio: "
+                                "para reutilizar, usa {% include %} o una funcion del .odio");
         } else {
             error(loc, fichero, "etiqueta desconocida: {% " + etiqueta + " %}");
         }
@@ -373,7 +513,7 @@ void Compilador::cuerpo(const std::string& src, const std::string& fichero,
 
 bool compilar_plantilla(const std::string& fuente, const std::string& fichero,
                         const std::string& dir,
-                        const std::vector<std::string>& datos,
+                        const std::vector<NombreTipado>& datos,
                         DiagnosticBag& diags, Plantilla& out) {
     Compilador c(dir, diags, out);
     return c.compilar(fuente, fichero, datos);
