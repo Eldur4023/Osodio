@@ -512,14 +512,26 @@ convertidos a los de Odio —entero, decimal, booleano, cadena y `null`—.
 
 ```odio
 post endpoint("/articulos", Articulo a):
-    int filas = await postgres.exec(
+    int filas = await sqlite.exec(
         "insert into articulos (titulo, vistas) values (?, ?)", a.titulo, a.vistas)
-    int id = await postgres.last_id()
+    int id = await sqlite.last_id()
     return { "id": id }.status(201)
 ```
 
 `exec()` devuelve el número de filas afectadas. `last_id()` devuelve el último id
-autogenerado.
+autogenerado **en sqlite y mysql**.
+
+**Postgres no lo tiene**, y el módulo lo dice en vez de inventárselo: ahí el id se pide en
+la propia consulta, que además es más fiable porque no depende de qué conexión atendió el
+insert.
+
+```odio
+post endpoint("/articulos", Articulo a):
+    List<Json> filas = await postgres.query(
+        "insert into articulos (titulo, vistas) values (?, ?) returning id",
+        a.titulo, a.vistas)
+    return filas[0].status(201)
+```
 
 **Los parámetros van siempre aparte, nunca concatenados.** Concatenar la consulta a mano es
 la única forma de abrirse a una inyección, y el lenguaje no te la pone fácil.
@@ -896,7 +908,7 @@ string rol = edad >= 18 ? "adulto" : "menor"
 | `sse` | `send` `ping` `open` | Rutas `sse` |
 | `ws` | `send` `recv` `open` `close` | Rutas `ws` |
 | `error` | `code` `message` `messages` | Bloques `on error` |
-| `sqlite` `postgres` `mysql` | `query` `exec` `last_id` `begin` `commit` `rollback` | Con `import` y su bloque en `app:` |
+| `sqlite` `postgres` `mysql` | `query` `exec` `begin` `commit` `rollback`; `last_id` solo en sqlite y mysql | Con `import` y su bloque en `app:` |
 
 Usar uno fuera de su contexto es error de compilación. Todos los métodos de un módulo de
 base de datos son asíncronos: se llaman con `await`.

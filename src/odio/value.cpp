@@ -105,15 +105,22 @@ void escapar(const std::string& in, std::string& out) {
 }
 
 void escribir_double(double d, std::string& out) {
+    // JSON no sabe escribir NaN ni infinito: no son tokens del formato.  Se
+    // escriben como null, que es lo que hace JSON.stringify y lo unico que
+    // todos los clientes saben leer.
+    //
+    // No es teorico: postgres admite 'NaN' e 'Infinity' en un double precision,
+    // y sin esto una fila con uno de esos valores producia un documento que
+    // ningun parser acepta —`{"d":inf}`— en vez de un error visible.
+    if (!std::isfinite(d)) { out += "null"; return; }
+
     char buf[32];
     auto r = std::to_chars(buf, buf + sizeof(buf), d);
     if (r.ec != std::errc{}) { out += "0"; return; }
     std::string t(buf, r.ptr);
     // Un double entero sale como "3"; JSON lo leeria como entero, asi que se le
     // pone el ".0" igual que hacia nlohmann.
-    if (t.find_first_of(".eE") == std::string::npos &&
-        t.find("inf") == std::string::npos && t.find("nan") == std::string::npos)
-        t += ".0";
+    if (t.find_first_of(".eE") == std::string::npos) t += ".0";
     out += t;
 }
 

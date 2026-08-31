@@ -430,6 +430,14 @@ concatenación desde Odio.
 
   De ahí una regla para el futuro: **un módulo que no se ha ejecutado contra su motor no
   está escrito, está esbozado.** Compilar y enlazar no prueba nada de lo que importa.
+
+- (resuelto) **La misma batería, pasada a postgres**, sacó un fallo que no era del módulo
+  sino del serializador de JSON: postgres admite `NaN` e `Infinity` en un `double
+  precision`, y salían escritos tal cual —`{"d":inf}`—, que ningún cliente sabe leer. Ahora
+  se escriben como `null`, igual que hace `JSON.stringify`. El resto del módulo aguantó:
+  tipos, transacciones, texto largo y concurrencia. También se corrigió la guía, que
+  prometía un `last_id()` que postgres no tiene y que el driver ya rechazaba con un mensaje
+  correcto.
 - (resuelto) **Los métodos HTTP son palabras reservadas en todo el fichero.** `get`,
   `post`, `put`, `patch`, `delete` y `any` no valen como nombre de variable, campo ni
   parámetro, aunque solo signifiquen algo delante de `endpoint`. Se podrían haber hecho
