@@ -142,8 +142,8 @@ del VM es obligatoria por los dos primeros, aunque no se importe ningún módulo
 
 ## 5. El lenguaje Odio
 
-Gramática formal completa en [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md). Ejemplos trabajados en
-`prueba-revisada.odio`, `prueba-avanzada.odio` y `prueba-app.odio`.
+Manual completo del lenguaje, con gramática formal y programas trabajados, en
+[ODIO-GRAMMAR.md](ODIO-GRAMMAR.md).
 
 Odio es un híbrido deliberado: **bloques por indentación al estilo Python, tipado estático
 al estilo C++**. La forma de declarar rutas viene de Flask; la de recibir datos, de FastAPI.

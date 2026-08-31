@@ -372,6 +372,19 @@ int async_ws_recv_id() {
     return id;
 }
 
+// El tope de pasos del VM se reinicia en cada suspension a proposito, para que
+// un bucle de sse/ws legitimo pueda vivir horas (ver kStepLimit en vm.hpp).
+// Pero eso deja un hueco: `while true: await sleep(0)` se suspende y reanuda
+// sin avanzar apenas nada, asi que nunca acumula pasos entre dos suspensiones
+// y el tope no lo ve nunca — un solo cliente podria fijar un hilo entero
+// reprogramando un temporizador de 0 ms sin parar.  Un piso de 1 ms no lo
+// impide del todo, pero lo acota a ~1000 reanudaciones/s por conexion en vez
+// de tantas como el planificador quiera dar: ninguna carga legitima necesita
+// menos de eso.
+long long clamp_sleep_ms(long long ms) {
+    return ms < 1 ? 1 : ms;
+}
+
 bool is_scalar(const std::string& t) {
     const auto& v = scalar_types();
     return std::find(v.begin(), v.end(), t) != v.end();
@@ -1032,8 +1045,19 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
             if (it != req.params.end()) { raw = it->second; present = true; }
         } else {
             auto it = req.query.find(b.name);
-            if (it != req.query.end())  { raw = it->second; present = true; }
-            else if (b.has_default)     { raw = b.default_text; present = true; }
+            if (it != req.query.end()) { raw = it->second; present = true; }
+            else if (ctx.uploads && ctx.parts) {
+                // Un campo de texto de un formulario multipart es una parte mas,
+                // igual que un File, solo que sin filename.  Antes esta rama no
+                // existia: un parametro escalar en una ruta con File siempre
+                // salia vacio, sin error, porque solo se miraba la query string.
+                for (const auto& part : *ctx.parts) {
+                    if (part.name == b.name && part.filename.empty()) {
+                        raw = part.body; present = true; break;
+                    }
+                }
+            }
+            if (!present && b.has_default) { raw = b.default_text; present = true; }
         }
 
         Value v;
@@ -1445,7 +1469,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                             else if (result.await_id == async_sleep_id()) {
                                 long long ms = result.await_args.empty()
                                              ? 0 : result.await_args[0].as_int();
-                                if (ms < 0) ms = 0;
+                                ms = clamp_sleep_ms(ms);
                                 co_await osodio::sleep(static_cast<int>(ms));
                                 if (req.is_cancelled()) co_return;
                             }
@@ -1516,7 +1540,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         else if (result.await_id == async_sleep_id()) {
                             long long ms = result.await_args.empty()
                                          ? 0 : result.await_args[0].as_int();
-                            if (ms < 0) ms = 0;
+                            ms = clamp_sleep_ms(ms);
                             co_await osodio::sleep(static_cast<int>(ms));
                             if (req.is_cancelled()) co_return;
                         }
@@ -1617,7 +1641,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     else if (result.await_id == async_sleep_id()) {
                         long long ms = result.await_args.empty()
                                      ? 0 : result.await_args[0].as_int();
-                        if (ms < 0) ms = 0;
+                        ms = clamp_sleep_ms(ms);
                         co_await osodio::sleep(static_cast<int>(ms));
                         // sleep() despierta antes si el cliente se desconecta;
                         // en ese caso no tiene sentido seguir ejecutando.

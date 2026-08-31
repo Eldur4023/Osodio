@@ -150,7 +150,8 @@ void HttpConnection::do_read() {
         bool ok    = parser_.feed(buf, static_cast<size_t>(n));
         in_parser_ = false;
         if (!ok) {
-            send_error(400, "Bad Request");
+            send_error(parser_.body_too_large() ? 413 : 400,
+                       parser_.body_too_large() ? "Content Too Large" : "Bad Request");
             close();
             return;
         }
@@ -460,7 +461,8 @@ void HttpConnection::finish_cycle() {
         std::string buf;
         buf.swap(pending_buf_);
         if (!parser_.feed(buf.data(), buf.size())) {
-            send_error(400, "Bad Request");
+            send_error(parser_.body_too_large() ? 413 : 400,
+                       parser_.body_too_large() ? "Content Too Large" : "Bad Request");
             close();
             return;
         }

@@ -22,6 +22,11 @@ struct HttpParser::ParseContext {
     // Flag set by any callback that detects a limit violation
     bool error = false;
 
+    // Set specifically when the body exceeds kMaxBodySize, so the connection
+    // layer can answer 413 instead of a generic 400 — the client sent a
+    // well-formed request that is simply too big, not a malformed one.
+    bool body_too_large = false;
+
     // Back-pointer to the owning parser's OnComplete (stable address)
     OnComplete* on_complete = nullptr;
 };
@@ -99,7 +104,11 @@ static int cb_on_headers_complete(llhttp_t* p) {
 
 static int cb_on_body(llhttp_t* p, const char* at, size_t len) {
     auto* c = ctx(p);
-    if (c->current.body.size() + len > kMaxBodySize) { c->error = true; return HPE_USER; }
+    if (c->current.body.size() + len > kMaxBodySize) {
+        c->error = true;
+        c->body_too_large = true;
+        return HPE_USER;
+    }
     c->current.body.append(at, len);
     return HPE_OK;
 }
@@ -168,6 +177,10 @@ bool HttpParser::is_paused() const {
     return llhttp_get_errno(parser_.get()) == HPE_PAUSED;
 }
 
+bool HttpParser::body_too_large() const {
+    return ctx_->body_too_large;
+}
+
 size_t HttpParser::unconsumed() const {
     if (!is_paused() || !last_data_) return 0;
     const char* pos = llhttp_get_error_pos(parser_.get());
@@ -188,6 +201,7 @@ void HttpParser::reset() {
     ctx_->value_pending = false;
     ctx_->header_count  = 0;
     ctx_->error         = false;
+    ctx_->body_too_large = false;
     last_data_ = nullptr;
     last_len_  = 0;
     llhttp_reset(parser_.get());
