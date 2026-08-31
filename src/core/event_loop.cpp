@@ -1,4 +1,4 @@
-#include <osodio/core/event_loop.hpp>
+#include <lohin/core/event_loop.hpp>
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -9,7 +9,7 @@
 #include <cerrno>
 #include <iostream>
 
-namespace osodio::core {
+namespace lohin::core {
 
 EpollLoop::EpollLoop() {
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
@@ -151,4 +151,4 @@ void EpollLoop::stop() {
     (void)write(wakeup_fd_, &val, sizeof(val));
 }
 
-} // namespace osodio::core
+} // namespace lohin::core

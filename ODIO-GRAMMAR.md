@@ -1,7 +1,7 @@
 # Odio — El lenguaje
 
 > Manual de referencia completo: léxico, tipos, gramática y semántica de Odio, el lenguaje
-> que compila y sirve Osodio 2.0. Sustituye a los ficheros `ejemplo-*.odio` y `prueba-*.odio`
+> que compila y sirve LoHin 2.0. Sustituye a los ficheros `ejemplo-*.odio` y `prueba-*.odio`
 > que antes vivían en la raíz del repositorio — lo que enseñaban por demostración, este
 > documento lo enseña explicado, con la misma gramática pero cero ambigüedad sobre qué es
 > parte del lenguaje y qué era solo un capricho de quien escribió el ejemplo.
@@ -395,8 +395,8 @@ app:
         password env("PG_PASSWORD")
 ```
 
-Cada módulo se compila dentro del binario de Osodio solo si su cliente nativo estaba presente
-al compilar el propio Osodio. Importar uno que el binario no trae es un error **al compilar
+Cada módulo se compila dentro del binario de LoHin solo si su cliente nativo estaba presente
+al compilar el propio LoHin. Importar uno que el binario no trae es un error **al compilar
 el `.odio`**, no un fallo confuso la primera vez que se llama:
 
 ```
@@ -681,7 +681,7 @@ El resto ejecuta bytecode sobre el VM propio (§40). Al arrancar, el binario inf
 rutas van por cada camino:
 
 ```
-osodio: 3 fichero(s), 12 ruta(s) — 5 declarativa(s), 7 con logica
+lohin: 3 fichero(s), 12 ruta(s) — 5 declarativa(s), 7 con logica
 ```
 
 Una ruta con guardas de grupo heredadas **nunca** es declarativa, aunque su propio cuerpo lo
@@ -1377,7 +1377,7 @@ get endpoint("/z"):
 **Esto llega también dentro de las plantillas**, porque `render()` le pasa al motor de
 plantillas los tipos de los argumentos con los que se la llamó, y el motor de plantillas los
 comprueba con el mismo checker que el resto del lenguaje: `{{ quien.mayusculas() }}` es un
-error de `osodio --check` con el fichero y la línea **de la plantilla**, no una excepción a
+error de `lohin --check` con el fichero y la línea **de la plantilla**, no una excepción a
 media renderización con la mitad de la página ya enviada al cliente.
 
 Donde el tipo del receptor **no** se conoce estáticamente —una variable de un `for` sobre un
@@ -1554,7 +1554,7 @@ misma consulta es un error, porque la numeración chocaría.
 
 Transacciones: `begin()` fija la conexión del pool para el resto de la petición, y
 `commit()`/`rollback()` la sueltan. Si el handler termina —o revienta— con una transacción
-abierta, Osodio hace `ROLLBACK` por su cuenta y lo avisa por consola; sin eso, la siguiente
+abierta, LoHin hace `ROLLBACK` por su cuenta y lo avisa por consola; sin eso, la siguiente
 petición que reutilizara esa conexión del pool heredaría una transacción a medias que no es
 suya.
 

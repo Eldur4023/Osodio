@@ -6,7 +6,7 @@ namespace odio::crypto {
 
 // SHA-256 y HMAC-SHA256 propios, sin OpenSSL.
 //
-// Osodio 2.0 no enlaza OpenSSL —TLS es cosa del reverse proxy— pero sigue
+// LoHin 2.0 no enlaza OpenSSL —TLS es cosa del reverse proxy— pero sigue
 // necesitando un MAC para firmar la cookie de sesion y los JWT HS256.  Son las
 // dos unicas operaciones criptograficas del proyecto, y ambas caben aqui.
 //

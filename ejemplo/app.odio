@@ -1,8 +1,8 @@
-# Proyecto de ejemplo de Osodio 2.0.
-#   $ osodio ./ejemplo
+# Proyecto de ejemplo de LoHin 2.0.
+#   $ lohin ./ejemplo
 
 app:
-    name      "Ejemplo Osodio"
+    name      "Ejemplo LoHin"
     version   "2.0.0"
     port      8080
     templates "./ejemplo/templates"
@@ -12,13 +12,13 @@ app:
 
 
 get endpoint("/"):
-    return render("index.html", titulo="Osodio 2.0", nota="editame y guarda")
+    return render("index.html", titulo="LoHin 2.0", nota="editame y guarda")
 
 get endpoint("/hola"):
     return text("hola desde odio")
 
 get endpoint("/api"):
-    return { "ok": true, "motor": "osodio", "hito": 1 }
+    return { "ok": true, "motor": "lohin", "hito": 1 }
 
 get endpoint("/ir"):
     return redirect("/")

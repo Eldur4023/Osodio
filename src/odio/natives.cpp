@@ -1,12 +1,12 @@
 #include <odio/natives.hpp>
 #include <odio/plantilla.hpp>
 
-#include <osodio/request.hpp>
-#include <osodio/response.hpp>
-#include <osodio/sse.hpp>
-#include <osodio/websocket.hpp>
-#include <osodio/logger.hpp>
-#include <osodio/multipart.hpp>
+#include <lohin/request.hpp>
+#include <lohin/response.hpp>
+#include <lohin/sse.hpp>
+#include <lohin/websocket.hpp>
+#include <lohin/logger.hpp>
+#include <lohin/multipart.hpp>
 
 #include <array>
 #include <cctype>
@@ -299,15 +299,15 @@ Value fn_state_remove(NativeCtx&, std::vector<Value>& args, std::string& error) 
 // ─── log.* / cookie / form ───────────────────────────────────────────────────
 
 Value fn_log_info(NativeCtx&, std::vector<Value>& args, std::string&) {
-    osodio::log().info(args[0].to_string());
+    lohin::log().info(args[0].to_string());
     return Value::null();
 }
 Value fn_log_warn(NativeCtx&, std::vector<Value>& args, std::string&) {
-    osodio::log().warn(args[0].to_string());
+    lohin::log().warn(args[0].to_string());
     return Value::null();
 }
 Value fn_log_error(NativeCtx&, std::vector<Value>& args, std::string&) {
-    osodio::log().error(args[0].to_string());
+    lohin::log().error(args[0].to_string());
     return Value::null();
 }
 
@@ -515,10 +515,10 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             error = "cookie() espera al menos nombre y valor";
             return Value::null();
         }
-        osodio::CookieOptions opts;
+        lohin::CookieOptions opts;
         opts.path      = "/";
         opts.http_only = true;
-        opts.same_site = osodio::SameSite::Lax;
+        opts.same_site = lohin::SameSite::Lax;
 
         // Tercer hueco: las opciones con nombre, agrupadas por el emisor.
         if (args.size() > 2 && args[2].is_dict()) {
@@ -534,9 +534,9 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             if (auto* v = pick("http_only"); v && v->is_bool()) opts.http_only = v->as_bool();
             if (auto* v = pick("same_site"); v && v->is_str()) {
                 const std::string& ss = v->as_str();
-                if      (ss == "strict") opts.same_site = osodio::SameSite::Strict;
-                else if (ss == "none")   opts.same_site = osodio::SameSite::None;
-                else                     opts.same_site = osodio::SameSite::Lax;
+                if      (ss == "strict") opts.same_site = lohin::SameSite::Strict;
+                else if (ss == "none")   opts.same_site = lohin::SameSite::None;
+                else                     opts.same_site = lohin::SameSite::Lax;
             }
         }
         ctx.res.cookie(args[0].as_str(), args[1].to_string(), std::move(opts));

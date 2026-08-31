@@ -1,6 +1,6 @@
 # Bug hunting
 
-> Registro de los fallos reales que ha sacado probar Osodio contra su propio motor —no
+> Registro de los fallos reales que ha sacado probar LoHin contra su propio motor —no
 > contra una versión instrumentada, no solo compilar— y de cómo se buscaron. Existe porque
 > el patrón se repite demasiado como para no llevar cuenta: **compilar y enlazar no prueba
 > nada de lo que importa.** Un módulo que no se ha ejecutado contra su motor no está escrito,
@@ -104,7 +104,7 @@ borrados, empalmes) sobre semillas reales, un proceso hijo por caso para que
 un `abort()` de ASan/UBSan tumbe solo ese caso. Detalle completo en
 [fuzz/README.md](fuzz/README.md).
 
-Tres objetivos, cada uno con `odio`/`osodio` recompilados enteros bajo
+Tres objetivos, cada uno con `odio`/`lohin` recompilados enteros bajo
 `-fsanitize=address,undefined` —no solo el arnés, o el sanitizador no ve nada
 del código real—:
 
@@ -199,7 +199,7 @@ cada petición, sin mencionar la variable de entorno que faltaba.
 entorno de despliegue final, y `--check` debe poder correr sin él.
 
 ```
-osodio: aviso: app.odio:4:20: la variable de entorno 'SESSION_SECRET'
+lohin: aviso: app.odio:4:20: la variable de entorno 'SESSION_SECRET'
 no esta definida; se usa "" en su lugar
 ```
 
@@ -236,7 +236,7 @@ planificador quiera dar. Verificado que no toca el caso legítimo: `sleep(500)` 
 
 ### 2026-08-31 — El propio arnés de benchmark medía tres servidores a la vez
 
-No es un bug de Osodio — de la medida. Se deja registrado porque el método que lo destapó es
+No es un bug de LoHin — de la medida. Se deja registrado porque el método que lo destapó es
 el mismo de esta lista: no confiar en que un proceso muerto por `pkill` esté realmente
 muerto.
 
@@ -246,7 +246,7 @@ en el mismo puerto —58 minutos después—, repartiéndose conexiones con el q
 midiendo, sin dar ningún error visible.
 
 Segunda vuelta: arreglado el `pkill`, apareció `database disk image is malformed`. El
-apagado ordenado de Osodio **deja de escuchar antes de terminar de drenar**, y el arnés
+apagado ordenado de LoHin **deja de escuchar antes de terminar de drenar**, y el arnés
 restauraba `datos.db` en cuanto el puerto quedaba libre, sobrescribiendo el fichero bajo un
 proceso que todavía lo tenía abierto.
 
@@ -304,7 +304,7 @@ en que "si compiló y dio 200, está bien".
 ### 2026-08-31 — UTF-8 inválido alcanzable desde la red por tres vías
 
 Se creía un caso raro de sqlite; resultó alcanzable desde cuerpo JSON, *query* y cabeceras.
-Un cliente mandaba un byte suelto y Osodio contestaba `200` con una respuesta que el propio
+Un cliente mandaba un byte suelto y LoHin contestaba `200` con una respuesta que el propio
 cliente no podía leer. Arreglo: una pasada de validación en la salida, aparte del bucle de
 escapado existente, con el mismo atajo de ASCII de 8 bytes para no pagar el coste en el caso
 común. Medido con tres repeticiones alternadas: **+0,1 % en un JSON de 57 KB y −1,5 % en el

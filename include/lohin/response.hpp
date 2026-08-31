@@ -13,7 +13,7 @@
 #include <vector>
 #include "cookies.hpp"
 
-namespace osodio {
+namespace lohin {
 
 class Response {
     struct State {
@@ -111,7 +111,7 @@ public:
 
     Response& text(std::string body) {
         if (state_->body_committed) {
-            std::cerr << "[osodio] Response.text() called after body already committed — ignoring\n";
+            std::cerr << "[lohin] Response.text() called after body already committed — ignoring\n";
             return *this;
         }
         header("Content-Type", "text/plain; charset=utf-8");
@@ -122,7 +122,7 @@ public:
 
     Response& html(const std::string& content) {
         if (state_->body_committed) {
-            std::cerr << "[osodio] Response.html() called after body already committed — ignoring\n";
+            std::cerr << "[lohin] Response.html() called after body already committed — ignoring\n";
             return *this;
         }
         header("Content-Type", "text/html; charset=utf-8");
@@ -149,7 +149,7 @@ public:
             fs::path path = fs::path(state_->templates_dir) / requested;
             std::ifstream f(path, std::ios::binary);
             if (!f) {
-                std::cerr << "[osodio] template not found: " << path.string() << '\n';
+                std::cerr << "[lohin] template not found: " << path.string() << '\n';
                 state_->status_code = 500;
                 state_->body = R"({"error":"Internal Server Error"})";
                 state_->headers["Content-Type"] = "application/json; charset=utf-8";
@@ -168,7 +168,7 @@ public:
     // que es una materializacion menos.
     Response& json_text(std::string cuerpo) {
         if (state_->body_committed) {
-            std::cerr << "[osodio] Response.json_text() called after body already committed - ignoring\n";
+            std::cerr << "[lohin] Response.json_text() called after body already committed - ignoring\n";
             return *this;
         }
         header("Content-Type", "application/json; charset=utf-8");
@@ -179,7 +179,7 @@ public:
 
     Response& send(std::string body) {
         if (state_->body_committed) {
-            std::cerr << "[osodio] Response.send() called after body already committed — ignoring\n";
+            std::cerr << "[lohin] Response.send() called after body already committed — ignoring\n";
             return *this;
         }
         state_->body = std::move(body);
@@ -370,4 +370,4 @@ private:
     }
 };
 
-} // namespace osodio
+} // namespace lohin

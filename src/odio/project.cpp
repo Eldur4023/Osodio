@@ -7,14 +7,14 @@
 #include <odio/crypto.hpp>
 #include <odio/db.hpp>
 
-#include <osodio/request.hpp>
-#include <osodio/response.hpp>
-#include <osodio/task.hpp>
-#include <osodio/sse.hpp>
-#include <osodio/websocket.hpp>
-#include <osodio/multipart.hpp>
-#include <osodio/app.hpp>
-#include <osodio/logger.hpp>
+#include <lohin/request.hpp>
+#include <lohin/response.hpp>
+#include <lohin/task.hpp>
+#include <lohin/sse.hpp>
+#include <lohin/websocket.hpp>
+#include <lohin/multipart.hpp>
+#include <lohin/app.hpp>
+#include <lohin/logger.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -147,19 +147,19 @@ const std::string* callee_name(const Expr& e) {
 }
 
 // Responde con un cuerpo JSON construido a mano.
-void responder(osodio::Response& res, int code, Value v) {
+void responder(lohin::Response& res, int code, Value v) {
     res.status(code).json_text(v.to_json_text());
 }
 
 // Los errores del motor son siempre {"error": "..."} y a veces con una lista de
 // mensajes: dos formas fijas que no necesitan nada mas.
-void responder_error(osodio::Response& res, int code, const std::string& msg) {
+void responder_error(lohin::Response& res, int code, const std::string& msg) {
     Value::Dict d;
     d["error"] = Value::str(msg);
     responder(res, code, Value::dict(std::move(d)));
 }
 
-void responder_error(osodio::Response& res, int code, const std::string& msg,
+void responder_error(lohin::Response& res, int code, const std::string& msg,
                      const std::vector<std::string>& mensajes) {
     Value::List l;
     l.reserve(mensajes.size());
@@ -170,7 +170,7 @@ void responder_error(osodio::Response& res, int code, const std::string& msg,
     responder(res, code, Value::dict(std::move(d)));
 }
 
-using Action = std::function<void(osodio::Request&, osodio::Response&)>;
+using Action = std::function<void(lohin::Request&, lohin::Response&)>;
 
 // Traduce el `return <expr>` de una ruta declarativa a una accion nativa.
 // Devuelve un Action vacio y anota el diagnostico si la expresion necesita
@@ -184,7 +184,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         // nlohmann y se hacia dump() en cada peticion: una ruta que se resuelve
         // entera al compilar no deberia serializar nada en caliente.
         std::string cuerpo = literal.to_json_text();
-        return [cuerpo](osodio::Request&, osodio::Response& res) {
+        return [cuerpo](lohin::Request&, lohin::Response& res) {
             res.header("Content-Type", "application/json; charset=utf-8").send(cuerpo);
         };
     }
@@ -258,15 +258,15 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         Plantilla tpl_c;
         if (!compilar_plantilla(fuente, name, tpl_dir, claves, diags, tpl_c)) return {};
 
-        osodio::Request  req_falsa;
-        osodio::Response res_falsa;
+        lohin::Request  req_falsa;
+        lohin::Response res_falsa;
         NativeCtx        ctx{req_falsa, res_falsa};
         std::string      html, err;
         if (!render_plantilla(tpl_c, std::move(valores), ctx, nullptr, html, err)) {
             diags.error(e.loc, "al renderizar '" + name + "': " + err);
             return {};
         }
-        return [html](osodio::Request&, osodio::Response& res) {
+        return [html](lohin::Request&, lohin::Response& res) {
             res.header("Content-Type", "text/html; charset=utf-8").send(html);
         };
     }
@@ -276,7 +276,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         if (!s) return {};
         std::string body = *s;
         bool is_html = (*fn == "html");
-        return [body, is_html](osodio::Request&, osodio::Response& res) {
+        return [body, is_html](lohin::Request&, lohin::Response& res) {
             if (is_html) res.html(body); else res.text(body);
         };
     }
@@ -285,7 +285,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         const std::string* p = need_string(0, "la ruta del fichero");
         if (!p) return {};
         std::string path = *p;
-        return [path](osodio::Request&, osodio::Response& res) {
+        return [path](lohin::Request&, lohin::Response& res) {
             res.send_file(path);
         };
     }
@@ -296,7 +296,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             return {};
         }
         int code = static_cast<int>(e.args[0].value->int_value);
-        return [code](osodio::Request&, osodio::Response& res) {
+        return [code](lohin::Request&, lohin::Response& res) {
             res.status(code).send("");
         };
     }
@@ -313,7 +313,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             code = static_cast<int>(e.args[1].value->int_value);
         }
         std::string to = *target;
-        return [to, code](osodio::Request&, osodio::Response& res) {
+        return [to, code](lohin::Request&, lohin::Response& res) {
             res.status(code).header("Location", to).send("");
         };
     }
@@ -329,7 +329,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             return {};
         }
         std::string cuerpo = v.to_json_text();
-        return [cuerpo](osodio::Request&, osodio::Response& res) {
+        return [cuerpo](lohin::Request&, lohin::Response& res) {
             res.header("Content-Type", "application/json; charset=utf-8").send(cuerpo);
         };
     }
@@ -414,7 +414,7 @@ Value db_error(const std::string& msg) {
 // El primer argumento es siempre el nombre del modulo, que apila el emisor.
 // Un fallo del motor no revienta el handler: llega como un valor con `error`,
 // que el .odio puede mirar o dejar pasar.
-osodio::Task<Value> run_db(const VM::Result& r, int op, osodio::Request& req,
+lohin::Task<Value> run_db(const VM::Result& r, int op, lohin::Request& req,
                            NativeCtx& ctx) {
     if (r.await_args.empty() || !r.await_args[0].is_str())
         co_return db_error("consulta mal formada");
@@ -498,7 +498,7 @@ osodio::Task<Value> run_db(const VM::Result& r, int op, osodio::Request& req,
 // Sin esto, un `return` a mitad o un error dejarian la conexion dentro de una
 // transaccion para siempre, y el siguiente que la cogiera del pool heredaria
 // ese estado.
-osodio::Task<void> rollback_pendientes(NativeCtx& ctx, osodio::Request& req) {
+lohin::Task<void> rollback_pendientes(NativeCtx& ctx, lohin::Request& req) {
     if (ctx.pinned_workers.empty()) co_return;
 
     auto pendientes = ctx.pinned_workers;
@@ -508,7 +508,7 @@ osodio::Task<void> rollback_pendientes(NativeCtx& ctx, osodio::Request& req) {
         auto* pool   = reg.pool(mod);
         if (!driver || !pool) continue;
 
-        osodio::log().warn("transaccion de '" + mod + "' sin commit ni rollback: "
+        lohin::log().warn("transaccion de '" + mod + "' sin commit ni rollback: "
                            "se deshace");
         co_await DbAwaitable{pool, req.loop,
             [driver](size_t w) {
@@ -595,7 +595,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
 // El contenido va firmado pero NO cifrado: el usuario puede leerlo, solo no
 // puede falsificarlo.  No se guarda ahi nada que no pueda ver.
 
-constexpr const char* kSessionCookie = "osodio_session";
+constexpr const char* kSessionCookie = "lohin_session";
 
 std::string sign_session(const Value::Dict& data, const std::string& secret) {
     std::string payload = crypto::base64url_encode(
@@ -690,7 +690,7 @@ struct AuthConfig {
 };
 
 // Prepara sesion y claims antes de ejecutar el handler.
-void begin_auth(const AuthConfig& cfg, osodio::Request& req,
+void begin_auth(const AuthConfig& cfg, lohin::Request& req,
                 SessionState& session, Value& claims, NativeCtx& ctx) {
     session.secret = cfg.session_secret;
     if (!cfg.session_secret.empty()) {
@@ -712,14 +712,14 @@ void begin_auth(const AuthConfig& cfg, osodio::Request& req,
 
 // Reescribe la cookie solo si el handler toco la sesion.
 void end_auth(const AuthConfig& cfg, const SessionState& session,
-              osodio::Response& res) {
+              lohin::Response& res) {
     if (!session.dirty || cfg.session_secret.empty()) return;
 
-    osodio::CookieOptions opts;
+    lohin::CookieOptions opts;
     opts.path      = "/";
     opts.http_only = true;                 // JS no la puede leer
     opts.secure    = cfg.session_secure;
-    opts.same_site = osodio::SameSite::Lax;
+    opts.same_site = lohin::SameSite::Lax;
 
     if (session.data.empty()) {
         res.clear_cookie(kSessionCookie, opts);
@@ -921,7 +921,7 @@ Action try_declarative(const RouteDecl& r, const std::string& tpl_dir) {
 // una regla de validate, es 422 con la lista completa de motivos: se reportan
 // todos de una vez, no el primero.  El handler no llega a ejecutarse.
 bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
-               osodio::Request& req, osodio::Response& res,
+               lohin::Request& req, lohin::Response& res,
                NativeCtx& ctx, Value& out) {
     Value body;
     if (!Value::parse_json(req.body, body)) {
@@ -964,7 +964,7 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
         for (const auto& rule : ci.rules) {
             VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx, fns);
             if (r.status != VM::Status::Done) {
-                osodio::log().error("validate de " + ci.name + ": " + r.error);
+                lohin::log().error("validate de " + ci.name + ": " + r.error);
                 responder_error(res, 500, r.error);
                 return false;
             }
@@ -987,7 +987,7 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
 // Devuelve false, con la respuesta ya escrita, si algun valor no encaja.
 // Un File del lenguaje son los metadatos mas el indice de su parte en
 // ctx.uploads; los bytes no viajan dentro del Value.
-Value make_file_value(const osodio::MultipartPart& part, size_t index) {
+Value make_file_value(const lohin::MultipartPart& part, size_t index) {
     Value::Dict d;
     d["name"]         = Value::str(part.name);
     d["filename"]     = Value::str(part.filename);
@@ -998,7 +998,7 @@ Value make_file_value(const osodio::MultipartPart& part, size_t index) {
 }
 
 bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
-                  osodio::Request& req, osodio::Response& res,
+                  lohin::Request& req, lohin::Response& res,
                   NativeCtx& ctx, std::vector<Value>& out) {
     // Se limpian al empezar: un 422 que el handler escriba a mano no debe
     // heredar los mensajes de una validacion anterior en este hilo.
@@ -1128,7 +1128,7 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
     Value::Dict doc;
     doc["openapi"] = jstr("3.0.3");
     doc["info"]    = jobj({
-        {"title",   jstr(program.app.name.empty() ? "Osodio API" : program.app.name)},
+        {"title",   jstr(program.app.name.empty() ? "LoHin API" : program.app.name)},
         {"version", jstr(program.app.version.empty() ? "0.1.0" : program.app.version)},
     });
 
@@ -1428,14 +1428,14 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             ++mod.vm_routes;
             std::string ws_where = "WS " + r.pattern;
-            osodio::App::WSOptions opts;
+            lohin::App::WSOptions opts;
             opts.allowed_origins = r.origins;
 
             mod.router.add_internal("GET", r.pattern,
-                osodio::App::make_ws_handler(
+                lohin::App::make_ws_handler(
                     [ws_chunk, ws_binds, ws_where, auth, fn_table, tpl_table]
-                    (osodio::WSConnection conn, osodio::Request& req,
-                     osodio::Response& res) -> osodio::Task<void> {
+                    (lohin::WSConnection conn, lohin::Request& req,
+                     lohin::Response& res) -> lohin::Task<void> {
                         NativeCtx    ctx{req, res};
                 ctx.plantillas = tpl_table;
                 ctx.funciones  = fn_table;
@@ -1470,7 +1470,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                                 long long ms = result.await_args.empty()
                                              ? 0 : result.await_args[0].as_int();
                                 ms = clamp_sleep_ms(ms);
-                                co_await osodio::sleep(static_cast<int>(ms));
+                                co_await lohin::sleep(static_cast<int>(ms));
                                 if (req.is_cancelled()) co_return;
                             }
 
@@ -1483,7 +1483,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                                   std::to_string(result.error_loc.line) + ":" +
                                   std::to_string(result.error_loc.col)
                                 : ws_where;
-                            osodio::log().error(at + ": " + result.error);
+                            lohin::log().error(at + ": " + result.error);
                         }
                     },
                     std::move(opts)));
@@ -1510,9 +1510,9 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
             mod.router.add_internal("GET", r.pattern,
-                [sse_chunk, sse_binds, sse_where, auth, fn_table, tpl_table](osodio::Request& req,
-                                                        osodio::Response& res)
-                    -> osodio::Task<void> {
+                [sse_chunk, sse_binds, sse_where, auth, fn_table, tpl_table](lohin::Request& req,
+                                                        lohin::Response& res)
+                    -> lohin::Task<void> {
                     NativeCtx    ctx{req, res};
                 ctx.plantillas = tpl_table;
                 ctx.funciones  = fn_table;
@@ -1525,7 +1525,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
                     // make_sse escribe ya las cabeceras del flujo, asi que la
                     // respuesta cuenta como emitida desde este momento.
-                    auto writer = osodio::make_sse(res, req);
+                    auto writer = lohin::make_sse(res, req);
                     ctx.sse             = &writer;
                     ctx.response_written = true;
 
@@ -1541,7 +1541,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                             long long ms = result.await_args.empty()
                                          ? 0 : result.await_args[0].as_int();
                             ms = clamp_sleep_ms(ms);
-                            co_await osodio::sleep(static_cast<int>(ms));
+                            co_await lohin::sleep(static_cast<int>(ms));
                             if (req.is_cancelled()) co_return;
                         }
                         result = vm.resume(std::move(produced), ctx);
@@ -1553,7 +1553,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                               std::to_string(result.error_loc.line) + ":" +
                               std::to_string(result.error_loc.col)
                             : sse_where;
-                        osodio::log().error(at + ": " + result.error);
+                        lohin::log().error(at + ": " + result.error);
                     }
                 });
             continue;
@@ -1574,7 +1574,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         if (Action a = try_declarative(r, mod.program.app.templates_dir)) {
             ++mod.declarative_routes;
             mod.router.add_internal(r.method, r.pattern,
-                [a](osodio::Request& req, osodio::Response& res) -> osodio::Task<void> {
+                [a](lohin::Request& req, lohin::Response& res) -> lohin::Task<void> {
                     a(req, res);
                     co_return;
                 });
@@ -1597,8 +1597,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
         std::string where = r.method + " " + r.pattern;
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where, auth, needs_upload, fn_table, tpl_table](osodio::Request& req, osodio::Response& res)
-                -> osodio::Task<void> {
+            [chunk, binds, where, auth, needs_upload, fn_table, tpl_table](lohin::Request& req, lohin::Response& res)
+                -> lohin::Task<void> {
                 NativeCtx    ctx{req, res};
                 ctx.plantillas = tpl_table;
                 ctx.funciones  = fn_table;
@@ -1607,9 +1607,9 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                 begin_auth(auth, req, session, claims, ctx);
 
                 // Solo se parsea el cuerpo multipart si alguna ranura lo pide.
-                std::vector<osodio::MultipartPart> parts;
+                std::vector<lohin::MultipartPart> parts;
                 if (needs_upload) {
-                    if (auto p = osodio::parse_multipart(req)) {
+                    if (auto p = lohin::parse_multipart(req)) {
                         parts       = std::move(*p);
                         ctx.parts   = &parts;
                         ctx.uploads = true;
@@ -1642,7 +1642,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         long long ms = result.await_args.empty()
                                      ? 0 : result.await_args[0].as_int();
                         ms = clamp_sleep_ms(ms);
-                        co_await osodio::sleep(static_cast<int>(ms));
+                        co_await lohin::sleep(static_cast<int>(ms));
                         // sleep() despierta antes si el cliente se desconecta;
                         // en ese caso no tiene sentido seguir ejecutando.
                         if (req.is_cancelled()) co_return;
@@ -1657,7 +1657,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                           std::to_string(result.error_loc.line) + ":" +
                           std::to_string(result.error_loc.col)
                         : where;
-                    osodio::log().error(at + ": " + result.error);
+                    lohin::log().error(at + ": " + result.error);
                     Value::Dict d;
                     d["error"] = Value::str(result.error);
                     d["en"]    = Value::str(at);

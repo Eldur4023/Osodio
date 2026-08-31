@@ -18,7 +18,7 @@
 //   app.enable_health();    // GET /health  → {"status":"ok","uptime":…}
 //   app.enable_metrics();   // GET /metrics → Prometheus text format
 
-namespace osodio {
+namespace lohin {
 
 class Metrics {
 public:
@@ -51,23 +51,23 @@ public:
         std::ostringstream ss;
         ss << std::fixed << std::setprecision(3);
 
-        ss << "# HELP osodio_requests_total Total HTTP requests handled\n"
-              "# TYPE osodio_requests_total counter\n"
-           << "osodio_requests_total " << total << "\n\n"
+        ss << "# HELP lohin_requests_total Total HTTP requests handled\n"
+              "# TYPE lohin_requests_total counter\n"
+           << "lohin_requests_total " << total << "\n\n"
 
-              "# HELP osodio_requests_by_class HTTP requests grouped by status class\n"
-              "# TYPE osodio_requests_by_class counter\n"
-           << "osodio_requests_by_class{class=\"2xx\"} " << r2xx << "\n"
-           << "osodio_requests_by_class{class=\"4xx\"} " << r4xx << "\n"
-           << "osodio_requests_by_class{class=\"5xx\"} " << r5xx << "\n\n"
+              "# HELP lohin_requests_by_class HTTP requests grouped by status class\n"
+              "# TYPE lohin_requests_by_class counter\n"
+           << "lohin_requests_by_class{class=\"2xx\"} " << r2xx << "\n"
+           << "lohin_requests_by_class{class=\"4xx\"} " << r4xx << "\n"
+           << "lohin_requests_by_class{class=\"5xx\"} " << r5xx << "\n\n"
 
-              "# HELP osodio_active_connections Currently open TCP connections\n"
-              "# TYPE osodio_active_connections gauge\n"
-           << "osodio_active_connections " << conns << "\n\n"
+              "# HELP lohin_active_connections Currently open TCP connections\n"
+              "# TYPE lohin_active_connections gauge\n"
+           << "lohin_active_connections " << conns << "\n\n"
 
-              "# HELP osodio_uptime_seconds Seconds since server start\n"
-              "# TYPE osodio_uptime_seconds gauge\n"
-           << "osodio_uptime_seconds " << uptime << "\n";
+              "# HELP lohin_uptime_seconds Seconds since server start\n"
+              "# TYPE lohin_uptime_seconds gauge\n"
+           << "lohin_uptime_seconds " << uptime << "\n";
 
         return ss.str();
     }
@@ -104,4 +104,4 @@ private:
     std::chrono::steady_clock::time_point  started_at_ = std::chrono::steady_clock::now();
 };
 
-} // namespace osodio
+} // namespace lohin

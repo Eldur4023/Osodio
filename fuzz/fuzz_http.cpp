@@ -5,10 +5,10 @@
 //   fuzz_http [iteraciones]
 
 #include "chaos.hpp"
-#include <osodio/multipart.hpp>
-#include <osodio/request.hpp>
+#include <lohin/multipart.hpp>
+#include <lohin/request.hpp>
 
-// http_parser.hpp es interno a la biblioteca osodio (vive en src/, no en
+// http_parser.hpp es interno a la biblioteca lohin (vive en src/, no en
 // include/): aqui se incluye directo, como ya hace tests/marcadores.cpp con el
 // driver de postgres, para probar EL codigo y no una copia resumida de el.
 #include "../src/http/http_parser.hpp"
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-using namespace osodio;
+using namespace lohin;
 
 static const std::vector<std::string> kSemillasHttp = {
     "GET /articulos/42 HTTP/1.1\r\nHost: x\r\n\r\n",

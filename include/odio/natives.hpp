@@ -7,7 +7,7 @@
 #include "bytecode.hpp"
 #include "value.hpp"
 
-namespace osodio {
+namespace lohin {
 class Request; class Response; class SSEWriter; class WSConnection;
 struct MultipartPart;
 }
@@ -46,8 +46,8 @@ struct SessionState {
 struct Plantilla;
 
 struct NativeCtx {
-    osodio::Request&  req;
-    osodio::Response& res;
+    lohin::Request&  req;
+    lohin::Response& res;
 
     // Plantillas compiladas del modulo.  Se compilan al arrancar, asi que
     // renderizar es recorrerlas, no parsearlas.
@@ -59,7 +59,7 @@ struct NativeCtx {
 
     // Solo en rutas sse: el escritor del flujo, creado por el driver antes de
     // arrancar el VM.  Nulo en el resto, y los builtins de sse lo comprueban.
-    osodio::SSEWriter* sse = nullptr;
+    lohin::SSEWriter* sse = nullptr;
 
     // Transaccion en curso por modulo: nombre -> worker fijado.  Mientras
     // exista, todas las consultas de ese modulo van por la misma conexion.
@@ -72,11 +72,11 @@ struct NativeCtx {
 
     // Partes multipart ya parseadas.  Un File del lenguaje guarda el indice de
     // su parte aqui, no los bytes: asi copiar un File es copiar un entero.
-    const std::vector<osodio::MultipartPart>* parts   = nullptr;
+    const std::vector<lohin::MultipartPart>* parts   = nullptr;
     bool                                      uploads = false;
 
     // Solo en rutas ws: la conexion ya establecida.
-    osodio::WSConnection* ws = nullptr;
+    lohin::WSConnection* ws = nullptr;
 
     // Sesion: cookie firmada, sin estado en servidor.  Se carga perezosamente
     // en el primer acceso y solo se reescribe si el handler la modifica.

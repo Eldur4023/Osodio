@@ -2,7 +2,7 @@
 //
 // Semillas: todos los .odio del directorio dado (por defecto tests/casos).
 // Cada caso mutado se escribe a un fichero temporal y se compila con
-// odio::compile(), la MISMA funcion que usa `osodio --check` -- se prueba el
+// odio::compile(), la MISMA funcion que usa `lohin --check` -- se prueba el
 // camino real, no una version resumida de el.
 //
 //   fuzz_lenguaje [directorio-de-semillas] [iteraciones]

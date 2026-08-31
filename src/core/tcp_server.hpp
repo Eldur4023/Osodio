@@ -3,10 +3,10 @@
 #include <cstdint>
 #include <atomic>
 #include <memory>
-#include <osodio/core/event_loop.hpp>
-#include "../../include/osodio/types.hpp"
+#include <lohin/core/event_loop.hpp>
+#include "../../include/lohin/types.hpp"
 
-namespace osodio::core {
+namespace lohin::core {
 
 class TcpServer {
 public:
@@ -17,7 +17,7 @@ public:
     // TcpServer instance so the limit is enforced globally across all threads.
     // If nullptr, a per-instance counter is created (single-thread behaviour).
     TcpServer(const std::string& host, uint16_t port,
-              EventLoop& loop, osodio::DispatchFn dispatch,
+              EventLoop& loop, lohin::DispatchFn dispatch,
               int max_connections = 10'000,
               std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~TcpServer();
@@ -43,7 +43,7 @@ public:
 private:
     int                listen_fd_ = -1;
     EventLoop&         loop_;
-    osodio::DispatchFn dispatch_;
+    lohin::DispatchFn dispatch_;
     int                max_connections_;
 
     // Shared between TcpServer and every HttpConnection so they can decrement
@@ -53,4 +53,4 @@ private:
     void on_accept();
 };
 
-} // namespace osodio::core
+} // namespace lohin::core

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(osodio CXX C)
+project(lohin CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,26 +10,26 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "Osodio requiere Linux: usa epoll, sendfile(2) y SO_REUSEPORT.")
+    message(FATAL_ERROR "LoHin requiere Linux: usa epoll, sendfile(2) y SO_REUSEPORT.")
 endif()
 
-option(OSODIO_IO_URING "Backend io_uring en lugar de epoll (Linux 5.1+)" OFF)
-option(OSODIO_EXAMPLES "Compilar los ejemplos de examples/"              ON)
+option(LOHIN_IO_URING "Backend io_uring en lugar de epoll (Linux 5.1+)" OFF)
+option(LOHIN_EXAMPLES "Compilar los ejemplos de examples/"              ON)
 
 # Arneses de fuzzing manuales -- ver fuzz/chaos.hpp para el motivo de no usar
 # libFuzzer (necesita clang; este toolchain es gcc).  Apagado por defecto: no
 # es parte de la build normal ni de ctest, se lanza a mano.
-option(OSODIO_FUZZ "Compilar los arneses de fuzzing de fuzz/" OFF)
+option(LOHIN_FUZZ "Compilar los arneses de fuzzing de fuzz/" OFF)
 
 # Modulos de persistencia.  Cada uno se compila solo si su cliente esta
 # presente: `import sqlite` en un binario sin el da un error claro al compilar
 # el .odio, no un fallo raro en produccion.
-option(OSODIO_SQLITE   "Modulo sqlite"                                   ON)
-option(OSODIO_POSTGRES "Modulo postgres (libpq)"                         ON)
-option(OSODIO_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
+option(LOHIN_SQLITE   "Modulo sqlite"                                   ON)
+option(LOHIN_POSTGRES "Modulo postgres (libpq)"                         ON)
+option(LOHIN_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
 
 # ── Dependencias del sistema ──────────────────────────────────────────────────
-# Osodio 2.0 no enlaza OpenSSL, nghttp2 ni zlib: TLS, HTTP/2 y compresion son
+# LoHin 2.0 no enlaza OpenSSL, nghttp2 ni zlib: TLS, HTTP/2 y compresion son
 # cosa del reverse proxy.  Solo hacen falta hilos.
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -44,12 +44,12 @@ find_package(Threads REQUIRED)
 #   /articulos?page=3   (11 KB)   49.051 -> 65.307 req/s   +33%
 #
 # Es opcional: si no esta, se compila igual y se sigue usando el de glibc.
-option(OSODIO_JEMALLOC "Enlazar jemalloc si esta disponible" ON)
-set(OSODIO_ALLOC "")
-if(OSODIO_JEMALLOC)
+option(LOHIN_JEMALLOC "Enlazar jemalloc si esta disponible" ON)
+set(LOHIN_ALLOC "")
+if(LOHIN_JEMALLOC)
     find_library(JEMALLOC_LIB NAMES jemalloc)
     if(JEMALLOC_LIB)
-        set(OSODIO_ALLOC ${JEMALLOC_LIB})
+        set(LOHIN_ALLOC ${JEMALLOC_LIB})
         message(STATUS "asignador: jemalloc (${JEMALLOC_LIB})")
     else()
         message(STATUS "asignador: glibc — instala libjemalloc-dev para el de verdad")
@@ -60,16 +60,16 @@ endif()
 # —JSON, plantillas, criptografia— es de casa.
 #
 # ── third_party (vendorizado, sin red durante cmake) ──────────────────────────
-add_library(osodio_llhttp STATIC
+add_library(lohin_llhttp STATIC
     third_party/llhttp/src/api.c
     third_party/llhttp/src/http.c
     third_party/llhttp/src/llhttp.c
 )
-target_include_directories(osodio_llhttp PUBLIC third_party/llhttp/include)
-set_target_properties(osodio_llhttp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(lohin_llhttp PUBLIC third_party/llhttp/include)
+set_target_properties(lohin_llhttp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ── Biblioteca principal ──────────────────────────────────────────────────────
-set(OSODIO_SOURCES
+set(LOHIN_SOURCES
     src/app.cpp
     src/router.cpp
     src/core/event_loop.cpp
@@ -78,30 +78,30 @@ set(OSODIO_SOURCES
     src/http/http_connection.cpp
 )
 
-if(OSODIO_IO_URING)
-    list(APPEND OSODIO_SOURCES src/core/io_uring_loop.cpp)
+if(LOHIN_IO_URING)
+    list(APPEND LOHIN_SOURCES src/core/io_uring_loop.cpp)
 endif()
 
-add_library(osodio STATIC ${OSODIO_SOURCES})
+add_library(lohin STATIC ${LOHIN_SOURCES})
 
-target_include_directories(osodio PUBLIC
+target_include_directories(lohin PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
-target_link_libraries(osodio PUBLIC
-    osodio_llhttp
+target_link_libraries(lohin PUBLIC
+    lohin_llhttp
     Threads::Threads
-    ${OSODIO_ALLOC}
+    ${LOHIN_ALLOC}
 )
 
-if(OSODIO_IO_URING)
+if(LOHIN_IO_URING)
     find_library(URING_LIB uring REQUIRED)
-    target_compile_definitions(osodio PUBLIC OSODIO_IO_URING)
-    target_link_libraries(osodio PUBLIC ${URING_LIB})
+    target_compile_definitions(lohin PUBLIC LOHIN_IO_URING)
+    target_link_libraries(lohin PUBLIC ${URING_LIB})
 endif()
 
-target_compile_options(osodio PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_compile_options(lohin PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
 # ── Odio: frontend del lenguaje ───────────────────────────────────────────────
 add_library(odio STATIC
@@ -121,14 +121,14 @@ add_library(odio STATIC
     src/odio/project.cpp
 )
 target_include_directories(odio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(odio PUBLIC osodio)
+target_link_libraries(odio PUBLIC lohin)
 
-if(OSODIO_SQLITE)
+if(LOHIN_SQLITE)
     find_path(SQLITE3_INC sqlite3.h)
     find_library(SQLITE3_LIB sqlite3)
     if(SQLITE3_INC AND SQLITE3_LIB)
         target_sources(odio PRIVATE src/odio/db_sqlite.cpp)
-        target_compile_definitions(odio PRIVATE OSODIO_SQLITE)
+        target_compile_definitions(odio PRIVATE LOHIN_SQLITE)
         target_include_directories(odio PRIVATE ${SQLITE3_INC})
         target_link_libraries(odio PRIVATE ${SQLITE3_LIB})
         message(STATUS "modulo sqlite: activado")
@@ -137,12 +137,12 @@ if(OSODIO_SQLITE)
     endif()
 endif()
 
-if(OSODIO_POSTGRES)
+if(LOHIN_POSTGRES)
     find_path(PQ_INC libpq-fe.h PATH_SUFFIXES postgresql)
     find_library(PQ_LIB pq)
     if(PQ_INC AND PQ_LIB)
         target_sources(odio PRIVATE src/odio/db_postgres.cpp)
-        target_compile_definitions(odio PRIVATE OSODIO_POSTGRES)
+        target_compile_definitions(odio PRIVATE LOHIN_POSTGRES)
         target_include_directories(odio PRIVATE ${PQ_INC})
         target_link_libraries(odio PRIVATE ${PQ_LIB})
         message(STATUS "modulo postgres: activado")
@@ -151,12 +151,12 @@ if(OSODIO_POSTGRES)
     endif()
 endif()
 
-if(OSODIO_MYSQL)
+if(LOHIN_MYSQL)
     find_path(MYSQL_INC mysql.h PATH_SUFFIXES mysql mariadb)
     find_library(MYSQL_LIB NAMES mysqlclient mariadb)
     if(MYSQL_INC AND MYSQL_LIB)
         target_sources(odio PRIVATE src/odio/db_mysql.cpp)
-        target_compile_definitions(odio PRIVATE OSODIO_MYSQL)
+        target_compile_definitions(odio PRIVATE LOHIN_MYSQL)
         target_include_directories(odio PRIVATE ${MYSQL_INC})
         target_link_libraries(odio PRIVATE ${MYSQL_LIB})
         message(STATUS "modulo mysql: activado")
@@ -166,10 +166,10 @@ if(OSODIO_MYSQL)
 endif()
 target_compile_options(odio PRIVATE -Wall -Wextra)
 
-# El binario de Osodio 2.0.
-add_executable(osodio-bin src/odio/main.cpp)
-set_target_properties(osodio-bin PROPERTIES OUTPUT_NAME osodio)
-target_link_libraries(osodio-bin PRIVATE odio)
+# El binario de LoHin 2.0.
+add_executable(lohin-bin src/odio/main.cpp)
+set_target_properties(lohin-bin PROPERTIES OUTPUT_NAME lohin)
+target_link_libraries(lohin-bin PRIVATE odio)
 
 # Herramientas de desarrollo del frontend.
 add_executable(dump_tokens src/odio/tools/dump_tokens.cpp)
@@ -192,7 +192,7 @@ add_test(NAME plantillas COMMAND prueba_plantillas)
 
 # El traductor de marcadores de postgres es una funcion pura: se prueba sin
 # servidor incluyendo el .cpp del driver, para probar EL codigo y no una copia.
-if(OSODIO_POSTGRES AND PQ_INC AND PQ_LIB)
+if(LOHIN_POSTGRES AND PQ_INC AND PQ_LIB)
     add_executable(prueba_marcadores tests/marcadores.cpp)
     target_include_directories(prueba_marcadores PRIVATE ${PQ_INC})
     target_link_libraries(prueba_marcadores PRIVATE odio ${PQ_LIB})
@@ -200,7 +200,7 @@ if(OSODIO_POSTGRES AND PQ_INC AND PQ_LIB)
 endif()
 
 add_test(NAME regresion
-         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:osodio-bin>
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:lohin-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(regresion PROPERTIES TIMEOUT 300)
 
@@ -208,30 +208,30 @@ set_tests_properties(regresion PROPERTIES TIMEOUT 300)
 # 77— cuando no lo hay, en vez de poner en rojo una maquina donde no aplica.
 # Las instrucciones para montar el entorno estan en la cabecera del guion.
 add_test(NAME mysql
-         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mysql.sh $<TARGET_FILE:osodio-bin>
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mysql.sh $<TARGET_FILE:lohin-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(mysql PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # La bateria de tipos de sqlite no necesita servidor —el esquema lo crea el
 # propio .odio— asi que corre siempre.
 add_test(NAME sqlite
-         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:osodio-bin>
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:lohin-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # Idem para postgres.
 add_test(NAME postgres
-         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_postgres.sh $<TARGET_FILE:osodio-bin>
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_postgres.sh $<TARGET_FILE:lohin-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(postgres PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # ── Fuzzing ───────────────────────────────────────────────────────────────────
 # Sin flags de sanitizador aqui a proposito: para que ASan/UBSan sirvan de algo
-# tienen que instrumentar tambien odio/osodio, no solo estos dos .cpp, asi que
+# tienen que instrumentar tambien odio/lohin, no solo estos dos .cpp, asi que
 # van en CMAKE_CXX_FLAGS de la configuracion entera -- ver fuzz/README.md.
 # Cada caso corre en un hijo (fuzz/chaos.hpp): un abort de sanitizador tumba
 # solo ese hijo, la campana sigue.
-if(OSODIO_FUZZ)
+if(LOHIN_FUZZ)
     add_executable(fuzz_lenguaje fuzz/fuzz_lenguaje.cpp)
     target_link_libraries(fuzz_lenguaje PRIVATE odio)
 
@@ -241,11 +241,11 @@ if(OSODIO_FUZZ)
 endif()
 
 # ── Ejemplos ──────────────────────────────────────────────────────────────────
-if(OSODIO_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
-    file(GLOB OSODIO_EXAMPLE_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp)
-    foreach(src ${OSODIO_EXAMPLE_SRCS})
+if(LOHIN_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+    file(GLOB LOHIN_EXAMPLE_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp)
+    foreach(src ${LOHIN_EXAMPLE_SRCS})
         get_filename_component(name ${src} NAME_WE)
         add_executable(${name} ${src})
-        target_link_libraries(${name} PRIVATE osodio)
+        target_link_libraries(${name} PRIVATE lohin)
     endforeach()
 endif()

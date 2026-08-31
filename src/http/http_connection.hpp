@@ -4,15 +4,15 @@
 #include <atomic>
 #include <cstdint>
 #include "http_parser.hpp"
-#include <osodio/core/event_loop.hpp>
-#include "../../include/osodio/types.hpp"
-#include "../../include/osodio/cancel.hpp"
+#include <lohin/core/event_loop.hpp>
+#include "../../include/lohin/types.hpp"
+#include "../../include/lohin/cancel.hpp"
 
-namespace osodio::http {
+namespace lohin::http {
 
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
-    HttpConnection(int fd, core::EventLoop& loop, osodio::DispatchFn dispatch,
+    HttpConnection(int fd, core::EventLoop& loop, lohin::DispatchFn dispatch,
                    std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~HttpConnection();
 
@@ -22,15 +22,15 @@ public:
 private:
     int                fd_;
     core::EventLoop&   loop_;
-    osodio::DispatchFn dispatch_;
+    lohin::DispatchFn dispatch_;
     std::shared_ptr<std::atomic<int>>          conn_count_;   // decremented on close()
-    std::shared_ptr<osodio::CancellationToken> cancel_token_; // one per request
+    std::shared_ptr<lohin::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_         = false;
 
     // Weak reference to the current request — used in WebSocket mode to route
     // do_read() bytes into the WS frame parser instead of the HTTP parser.
-    std::weak_ptr<osodio::Request> current_req_;
+    std::weak_ptr<lohin::Request> current_req_;
 
     // ── Response buffer limit ─────────────────────────────────────────────────
     // Hard cap on the size of a single response.  Connections that exceed this
@@ -99,7 +99,7 @@ private:
     void close();
 
     void dispatch(ParsedRequest req);
-    void finish_dispatch(osodio::Request& request, osodio::Response& response);
+    void finish_dispatch(lohin::Request& request, lohin::Response& response);
 };
 
-} // namespace osodio::http
+} // namespace lohin::http

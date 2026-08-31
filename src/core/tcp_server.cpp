@@ -13,10 +13,10 @@
 #include <memory>
 #include <iostream>
 
-namespace osodio::core {
+namespace lohin::core {
 
 TcpServer::TcpServer(const std::string& host, uint16_t port,
-                     EventLoop& loop, osodio::DispatchFn dispatch,
+                     EventLoop& loop, lohin::DispatchFn dispatch,
                      int max_connections,
                      std::shared_ptr<std::atomic<int>> conn_count)
     : loop_(loop)
@@ -129,4 +129,4 @@ void TcpServer::on_accept() {
     }
 }
 
-} // namespace osodio::core
+} // namespace lohin::core

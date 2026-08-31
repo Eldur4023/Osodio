@@ -1,13 +1,13 @@
-// El binario de Osodio 2.0: lee ficheros .odio y sirve.
+// El binario de LoHin 2.0: lee ficheros .odio y sirve.
 #include <odio/project.hpp>
 #include <odio/vm.hpp>
 #include <odio/autotest.hpp>
 #include <odio/db.hpp>
 
-#include <osodio/app.hpp>
-#include <osodio/middleware.hpp>
-#include <osodio/logger.hpp>
-#include <osodio/openapi.hpp>
+#include <lohin/app.hpp>
+#include <lohin/middleware.hpp>
+#include <lohin/logger.hpp>
+#include <lohin/openapi.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -46,7 +46,7 @@ void publish_module(std::shared_ptr<odio::Module> m) {
 
 void usage() {
     std::cerr <<
-        "uso: osodio [opciones] <fichero.odio | ficheros... | directorio>\n"
+        "uso: lohin [opciones] <fichero.odio | ficheros... | directorio>\n"
         "\n"
         "  Un fichero      compila solo ese fichero\n"
         "  Varios ficheros compila solo esos\n"
@@ -80,7 +80,7 @@ void watch_loop(std::vector<fs::path> inputs) {
         }
         if (!changed) continue;
 
-        osodio::log().info("cambios detectados: recompilando");
+        lohin::log().info("cambios detectados: recompilando");
 
         // Margen para que el editor termine de escribir el fichero.
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
@@ -103,7 +103,7 @@ void watch_loop(std::vector<fs::path> inputs) {
         }
 
         publish_module(next);
-        osodio::log().info("recargado: " + std::to_string(next->program.routes.size()) +
+        lohin::log().info("recargado: " + std::to_string(next->program.routes.size()) +
                            " ruta(s) — " + std::to_string(next->declarative_routes) +
                            " declarativa(s), " + std::to_string(next->vm_routes) +
                            " con logica");
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
     std::vector<fs::path> inputs;
     std::string error;
     if (!odio::resolve_inputs(args, inputs, error)) {
-        std::cerr << "osodio: " << error << "\n";
+        std::cerr << "lohin: " << error << "\n";
         return 2;
     }
 
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "osodio: " << inputs.size() << " fichero(s), "
+    std::cout << "lohin: " << inputs.size() << " fichero(s), "
               << mod->program.routes.size() << " ruta(s) — "
               << mod->declarative_routes << " declarativa(s), "
               << mod->vm_routes << " con logica\n";
@@ -164,11 +164,11 @@ int main(int argc, char** argv) {
     publish_module(mod);
 
     const odio::AppDecl& cfg = mod->program.app;
-    osodio::App app;
+    lohin::App app;
     // Una linea por peticion, con su flush, cuesta cerca de un 25% del
     // rendimiento y multiplica por 2,6 la latencia mediana: se pide a mano.
     // El arranque, las recargas y el autotest se siguen viendo siempre.
-    if (verbose) app.use(osodio::logger());
+    if (verbose) app.use(lohin::logger());
 
     // Los pools de los modulos de datos tienen hilos propios que reanudan
     // handlers posteando al event loop.  Hay que pararlos y esperarlos mientras
@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
     // congelada al arrancar: asi la recarga en caliente actualiza tambien la
     // documentacion.
     if (cfg.docs) {
-        app.get("/openapi.json", [](osodio::Response& res) {
+        app.get("/openapi.json", [](lohin::Response& res) {
             auto mod = current_module();
             if (!mod) {
                 res.status(503).json_text(R"({"error":"sin modulo"})");
@@ -191,8 +191,8 @@ int main(int argc, char** argv) {
             }
             res.json_text(mod->openapi);
         });
-        app.get("/docs", [](osodio::Response& res) {
-            res.html(osodio::swagger_ui_html("/openapi.json"));
+        app.get("/docs", [](lohin::Response& res) {
+            res.html(lohin::swagger_ui_html("/openapi.json"));
         });
     }
     if (cfg.health)  app.enable_health();
@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
     //
     // Hacen falta dos patrones: el comodin del radix tree cubre uno o mas
     // segmentos, asi que la raiz "/" no entra en "/*".
-    auto dispatch = [](osodio::Request& req, osodio::Response& res) -> osodio::Task<void> {
+    auto dispatch = [](lohin::Request& req, lohin::Response& res) -> lohin::Task<void> {
         auto mod = current_module();
         if (!mod) { res.status(503).json_text(R"({"error":"sin modulo cargado"})"); co_return; }
 
@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
     // Manejadores de `on error`: se registra uno solo en el motor y el reparto
     // por codigo lo hace el modulo vivo, igual que con las rutas, para que la
     // recarga en caliente tambien los alcance.
-    app.on_error([](int code, osodio::Request& req, osodio::Response& res) {
+    app.on_error([](int code, lohin::Request& req, lohin::Response& res) {
         auto mod = current_module();
         if (!mod) return;
 
@@ -241,7 +241,7 @@ int main(int argc, char** argv) {
         odio::VM  vm;
         auto result = vm.start(*it->second, {}, ctx, &mod->functions);
         if (result.status == odio::VM::Status::Error) {
-            osodio::log().error("on error " + std::to_string(code) + ": " + result.error);
+            lohin::log().error("on error " + std::to_string(code) + ": " + result.error);
             return;
         }
         if (result.status != odio::VM::Status::Done) return;   // no puede suspenderse

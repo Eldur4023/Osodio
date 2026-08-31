@@ -510,7 +510,7 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
         // No es un error de compilacion — .odio no tiene por que conocer el
         // entorno de despliegue final, y --check debe poder correr sin el.
         if (!v) {
-            std::cerr << "osodio: aviso: " << (name_tok.loc.file ? *name_tok.loc.file : "?")
+            std::cerr << "lohin: aviso: " << (name_tok.loc.file ? *name_tok.loc.file : "?")
                       << ":" << name_tok.loc.line << ":" << name_tok.loc.col
                       << ": la variable de entorno '" << name
                       << "' no esta definida; se usa \"\" en su lugar\n";

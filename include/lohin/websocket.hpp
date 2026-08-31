@@ -11,10 +11,10 @@
 #include <unistd.h>
 #include <cerrno>
 #include <coroutine>
-#include <osodio/core/event_loop.hpp>
+#include <lohin/core/event_loop.hpp>
 #include "cancel.hpp"
 
-namespace osodio {
+namespace lohin {
 
 // ─── WSMessage ────────────────────────────────────────────────────────────────
 
@@ -422,4 +422,4 @@ private:
     }
 };
 
-} // namespace osodio
+} // namespace lohin

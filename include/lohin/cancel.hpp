@@ -3,7 +3,7 @@
 #include <functional>
 #include <memory>
 
-namespace osodio {
+namespace lohin {
 
 // ─── CancellationToken ────────────────────────────────────────────────────────
 //
@@ -52,4 +52,4 @@ struct CancellationToken {
     void clear_wake() noexcept { wake_fn_ = nullptr; }
 };
 
-} // namespace osodio
+} // namespace lohin

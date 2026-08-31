@@ -55,7 +55,7 @@ struct NombreTipado {
 //
 // Cuando el emisor ve un render("x.html", k=v) con el nombre literal, compila
 // la plantilla AHI MISMO contra esas claves.  Por eso una errata dentro de un
-// {{ }} sale en `osodio --check` y no cuando alguien pide la pagina.
+// {{ }} sale en `lohin --check` y no cuando alguien pide la pagina.
 struct PlantillaCtx {
     std::string             dir;
     std::vector<Plantilla>* tabla = nullptr;

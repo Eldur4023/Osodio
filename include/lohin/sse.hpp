@@ -8,7 +8,7 @@
 #include "request.hpp"
 #include "response.hpp"
 
-namespace osodio {
+namespace lohin {
 
 // ─── SSEWriter ────────────────────────────────────────────────────────────────
 //
@@ -27,7 +27,7 @@ namespace osodio {
 //       int n = 0;
 //       while (sse.is_open()) {
 //           sse.send(std::to_string(n++));
-//           co_await osodio::sleep(1000);
+//           co_await lohin::sleep(1000);
 //       }
 //   });
 //
@@ -167,4 +167,4 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
     return SSEWriter(req._raw_write, req.cancel_token);
 }
 
-} // namespace osodio
+} // namespace lohin

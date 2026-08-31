@@ -8,7 +8,7 @@ namespace odio {
 
 // Sonda automatica de endpoints.
 //
-// Tras arrancar y tras cada recarga con exito, Osodio se pega a si mismo por
+// Tras arrancar y tras cada recarga con exito, LoHin se pega a si mismo por
 // HTTP y recorre las rutas del modulo.  No comprueba logica de negocio: lo que
 // busca es que ningun handler se rompa —un 5xx— despues de un cambio.
 //

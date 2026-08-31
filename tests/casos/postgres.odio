@@ -6,9 +6,9 @@ app:
     postgres:
         host     "127.0.0.1"
         port     5432
-        database "osodio_pruebas"
-        user     "osodio"
-        password "osodio"
+        database "lohin_pruebas"
+        user     "lohin"
+        password "lohin"
         pool     8
 
 get endpoint("/__ping__"):

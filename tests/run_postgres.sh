@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Suite del modulo postgres de Osodio 2.0.
+# Suite del modulo postgres de LoHin 2.0.
 #
 # Va aparte de run_tests.sh porque necesita un servidor: sin el, esta suite se
 # SALTA sola en vez de fallar, para que `ctest` siga siendo verde en una maquina
@@ -13,8 +13,8 @@
 #
 #   sudo apt install -y postgresql
 #   sudo service postgresql start
-#   sudo -u postgres psql -c "CREATE USER osodio WITH PASSWORD 'osodio';"
-#   sudo -u postgres psql -c "CREATE DATABASE osodio_pruebas OWNER osodio;"
+#   sudo -u postgres psql -c "CREATE USER lohin WITH PASSWORD 'lohin';"
+#   sudo -u postgres psql -c "CREATE DATABASE lohin_pruebas OWNER lohin;"
 #
 #   tests/run_postgres.sh [ruta-al-binario]
 #
@@ -23,13 +23,13 @@
 
 set -u
 
-OSODIO="${1:-$HOME/osodio-build/osodio}"
+LOHIN="${1:-$HOME/lohin-build/lohin}"
 AQUI="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PUERTO=${OSODIO_TEST_PG_PORT:-8810}
+PUERTO=${LOHIN_TEST_PG_PORT:-8810}
 SRV=""
 
-PGURL="postgresql://osodio:osodio@127.0.0.1/osodio_pruebas"
+PGURL="postgresql://lohin:lohin@127.0.0.1/lohin_pruebas"
 
 pasadas=0
 fallidas=0
@@ -61,11 +61,11 @@ if ! command -v psql > /dev/null 2>&1; then
     exit 77
 fi
 if ! psql "$PGURL" -c "select 1" > /dev/null 2>&1; then
-    gris "postgres: no se puede conectar a osodio_pruebas — suite omitida"
+    gris "postgres: no se puede conectar a lohin_pruebas — suite omitida"
     gris "          (las instrucciones para montarlo estan en la cabecera de este fichero)"
     exit 77
 fi
-if ! "$OSODIO" --check "$AQUI/casos/postgres.odio" > "$TMP/check" 2>&1; then
+if ! "$LOHIN" --check "$AQUI/casos/postgres.odio" > "$TMP/check" 2>&1; then
     if grep -q "postgres" "$TMP/check" && grep -q "import" "$TMP/check"; then
         gris "postgres: el binario se compilo sin el modulo — suite omitida"
         exit 77
@@ -110,7 +110,7 @@ psql "$PGURL" -q -v ON_ERROR_STOP=1 -f "$AQUI/casos/postgres-esquema.sql" > /dev
     exit 1; }
 
 echo "== arranque =="
-"$OSODIO" --no-watch --port "$PUERTO" "$AQUI/casos/postgres.odio" > "$TMP/srv.log" 2>&1 &
+"$LOHIN" --no-watch --port "$PUERTO" "$AQUI/casos/postgres.odio" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PUERTO/__ping__" 2>/dev/null && break

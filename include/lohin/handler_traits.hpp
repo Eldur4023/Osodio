@@ -7,11 +7,11 @@
 #include "response.hpp"
 #include "task.hpp"
 
-namespace osodio {
+namespace lohin {
 
 // Adapta un handler de C++ a la firma que guarda el router.
 //
-// En Osodio 2.0 los handlers nativos son un punado —/docs, /health, /metrics y
+// En LoHin 2.0 los handlers nativos son un punado —/docs, /health, /metrics y
 // el dispatcher de Odio—, asi que la adaptacion se reduce a repartir `Request&`
 // y `Response&` y a aceptar tanto `void` como `Task<void>`.
 //
@@ -67,4 +67,4 @@ public:
     }
 };
 
-} // namespace osodio
+} // namespace lohin

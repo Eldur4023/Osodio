@@ -1,11 +1,11 @@
-#include "../include/osodio/app.hpp"
-#include "../include/osodio/logger.hpp"
-#include "../include/osodio/metrics.hpp"
-#include "../include/osodio/request.hpp"
-#include "../include/osodio/response.hpp"
-#include "../include/osodio/task.hpp"
+#include "../include/lohin/app.hpp"
+#include "../include/lohin/logger.hpp"
+#include "../include/lohin/metrics.hpp"
+#include "../include/lohin/request.hpp"
+#include "../include/lohin/response.hpp"
+#include "../include/lohin/task.hpp"
 
-#include <osodio/core/event_loop.hpp>
+#include <lohin/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
 
 #include <sys/epoll.h>
@@ -26,7 +26,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-namespace osodio {
+namespace lohin {
 
 namespace {
 
@@ -501,7 +501,7 @@ void App::run(const std::string& host, uint16_t port) {
     }
 
     const char* scheme = "http";
-    log().info("Osodio running on ", scheme, "://", host, ':', port,
+    log().info("LoHin running on ", scheme, "://", host, ':', port,
                " (threads=", num_threads, ", press CTRL+C to quit)");
 
     main_loop.run();
@@ -522,4 +522,4 @@ void App::run(const std::string& host, uint16_t port) {
     if (g_signal_pipe[1] >= 0) { ::close(g_signal_pipe[1]); g_signal_pipe[1] = -1; }
 }
 
-} // namespace osodio
+} // namespace lohin

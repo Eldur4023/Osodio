@@ -1,11 +1,11 @@
-#include "../include/osodio/router.hpp"
+#include "../include/lohin/router.hpp"
 
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
-namespace osodio {
+namespace lohin {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Node Helpers
@@ -57,7 +57,7 @@ std::string Router::normalize_pattern(const std::string& p) {
                 // Unclosed brace: the pattern is malformed.  Better to fail
                 // loudly at registration than silently match weird URLs.
                 throw std::invalid_argument(
-                    "osodio::Router: unterminated '{' in pattern: " + p);
+                    "lohin::Router: unterminated '{' in pattern: " + p);
             }
         } else {
             out += p[i];
@@ -185,4 +185,4 @@ bool Router::match_recursive(
     return false;
 }
 
-} // namespace osodio
+} // namespace lohin

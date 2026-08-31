@@ -1,6 +1,6 @@
 #include <odio/autotest.hpp>
 
-#include <osodio/logger.hpp>
+#include <lohin/logger.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -60,7 +60,7 @@ Respuesta pedir(uint16_t port, const std::string& metodo, const std::string& rut
     std::string pet = metodo + " " + ruta + " HTTP/1.1\r\n"
                       "Host: 127.0.0.1\r\n"
                       "Connection: close\r\n"
-                      "X-Osodio-Autotest: 1\r\n";
+                      "X-LoHin-Autotest: 1\r\n";
     if (!cuerpo.empty()) {
         pet += "Content-Type: application/json\r\n";
         pet += "Content-Length: " + std::to_string(cuerpo.size()) + "\r\n";
@@ -182,7 +182,7 @@ void run_autotest(const Module& mod, const AutotestOptions& opts) {
     std::ostringstream cab;
     cab << "autotest: probando " << rutas.size() << " ruta(s)";
     if (!opts.unsafe) cab << " (solo metodos seguros; --autotest=all incluye el resto)";
-    osodio::log().info(cab.str());
+    lohin::log().info(cab.str());
 
     int ok = 0, rechazadas = 0, errores = 0, omitidas = 0;
 
@@ -190,13 +190,13 @@ void run_autotest(const Module& mod, const AutotestOptions& opts) {
         std::string metodo = r.method;
 
         if (metodo == "WS") {
-            osodio::log().info("  omitida   WS   " + r.pattern +
+            lohin::log().info("  omitida   WS   " + r.pattern +
                                "   (necesita handshake de WebSocket)");
             ++omitidas;
             continue;
         }
         if (!opts.unsafe && !metodo_seguro(metodo)) {
-            osodio::log().info("  omitida   " + metodo + "  " + r.pattern +
+            lohin::log().info("  omitida   " + metodo + "  " + r.pattern +
                                "   (metodo con efectos)");
             ++omitidas;
             continue;
@@ -223,7 +223,7 @@ void run_autotest(const Module& mod, const AutotestOptions& opts) {
               << std::setw(7) << metodo << std::setw(34) << ruta;
         if (res.conectado) linea << res.codigo << "  " << res.ms << "ms";
         linea << "";
-        osodio::log().info(linea.str());
+        lohin::log().info(linea.str());
     }
 
     std::ostringstream fin;
@@ -233,8 +233,8 @@ void run_autotest(const Module& mod, const AutotestOptions& opts) {
 
     // Un 5xx es lo unico que significa "esto se ha roto": un 4xx puede ser el
     // comportamiento correcto de una guarda o de una validacion.
-    if (errores) osodio::log().error(fin.str());
-    else         osodio::log().info(fin.str());
+    if (errores) lohin::log().error(fin.str());
+    else         lohin::log().info(fin.str());
 }
 
 } // namespace odio

@@ -1,8 +1,8 @@
 // Prueba del motor de plantillas de Odio, sin HTTP de por medio.
 #include <odio/plantilla.hpp>
 
-#include <osodio/request.hpp>
-#include <osodio/response.hpp>
+#include <lohin/request.hpp>
+#include <lohin/response.hpp>
 
 #include <cstdio>
 #include <filesystem>
@@ -37,8 +37,8 @@ static std::string pintar(const std::string& fuente,
         err = diags.items().empty() ? "error sin mensaje" : diags.items().front().message;
         return {};
     }
-    osodio::Request  req;
-    osodio::Response res;
+    lohin::Request  req;
+    lohin::Response res;
     odio::NativeCtx  ctx{req, res};
 
     std::string salida;

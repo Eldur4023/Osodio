@@ -1,6 +1,6 @@
-# Osodio — Guía del desarrollador
+# LoHin — Guía del desarrollador
 
-> Referencia práctica de Odio, el lenguaje que interpreta Osodio 2.0. La gramática formal
+> Referencia práctica de Odio, el lenguaje que interpreta LoHin 2.0. La gramática formal
 > está en [ODIO-GRAMMAR.md](ODIO-GRAMMAR.md); las decisiones de diseño y sus motivos, en
 > [README.md](README.md#decisiones-de-diseño).
 
@@ -50,9 +50,9 @@ El argumento decide qué se compila, sin sorpresas:
 
 | Invocación | Qué compila |
 |---|---|
-| `osodio app.odio` | Solo ese fichero |
-| `osodio a.odio b.odio` | Solo esos dos |
-| `osodio ./mi-app` | Todos los `.odio` del directorio, recursivamente |
+| `lohin app.odio` | Solo ese fichero |
+| `lohin a.odio b.odio` | Solo esos dos |
+| `lohin ./mi-app` | Todos los `.odio` del directorio, recursivamente |
 
 | Opción | |
 |---|---|
@@ -65,7 +65,7 @@ El argumento decide qué se compila, sin sorpresas:
 
 ### Auto-prueba
 
-Con `--autotest`, tras arrancar y tras **cada recarga con éxito**, Osodio se pega a sí mismo
+Con `--autotest`, tras arrancar y tras **cada recarga con éxito**, LoHin se pega a sí mismo
 por HTTP y recorre las rutas del módulo:
 
 ```
@@ -97,12 +97,12 @@ imprime con fichero, línea y columna.
 
 ---
 
-### Pruebas del propio Osodio
+### Pruebas del propio LoHin
 
 ```bash
 cd build && ctest --output-on-failure
 # o directamente:
-tests/run_tests.sh ~/osodio-build/osodio
+tests/run_tests.sh ~/lohin-build/lohin
 ```
 
 246 pruebas en seis suites:
@@ -205,7 +205,7 @@ get endpoint("/"):
 El resto ejecuta bytecode. Al arrancar, el binario dice cuántas van por cada camino:
 
 ```
-osodio: 3 fichero(s), 12 ruta(s) — 5 declarativa(s), 7 con logica
+lohin: 3 fichero(s), 12 ruta(s) — 5 declarativa(s), 7 con logica
 ```
 
 Una ruta con guardas de grupo **nunca** es declarativa: la acción nativa no las ejecutaría.
@@ -445,7 +445,7 @@ Se comprueban firma, `exp` e `iss` (si se configuró `issuer`). **Se rechaza cua
 que no sea HS256, incluido `none`**: aceptar el algoritmo que declara el propio token es la
 vulnerabilidad clásica de las librerías de JWT.
 
-RS256 no está: requeriría criptografía asimétrica, y Osodio 2.0 no enlaza OpenSSL.
+RS256 no está: requeriría criptografía asimétrica, y LoHin 2.0 no enlaza OpenSSL.
 
 ---
 
@@ -490,7 +490,7 @@ app:
         pool     4
 ```
 
-Cada módulo se compila solo si su cliente estaba presente al compilar Osodio. Si no,
+Cada módulo se compila solo si su cliente estaba presente al compilar LoHin. Si no,
 `import postgres` da un error al compilar el `.odio`, no un fallo raro en producción.
 
 ### Configuración
@@ -586,7 +586,7 @@ post endpoint("/transfiere"):
 
 `begin()` fija la conexión: todo lo que venga después en esa petición va por la misma, y
 `commit()` o `rollback()` la sueltan. Si el handler termina —o revienta— con una
-transacción abierta, Osodio hace `ROLLBACK` y lo avisa por consola. Sin eso, la siguiente
+transacción abierta, LoHin hace `ROLLBACK` y lo avisa por consola. Sin eso, la siguiente
 petición que cogiera esa conexión del pool heredaría el estado.
 
 ### Errores
@@ -743,7 +743,7 @@ on error 422:
 
 Sin código, es el manejador global. **Solo cubre 400–599**: con un 2xx el handler de la ruta
 ya ha escrito la respuesta, y sustituirla sería un filtro de respuesta — es decir,
-middleware, que Osodio 2.0 delega al proxy a propósito.
+middleware, que LoHin 2.0 delega al proxy a propósito.
 
 El código de estado se conserva. Si el manejador no escribe nada, se mantiene el cuerpo por
 defecto.
@@ -952,7 +952,7 @@ La comprobación sigue por la cadena, porque cada método sabe lo que devuelve:
 
 Esto llega también **dentro de las plantillas**, porque `render()` le pasa los tipos de sus
 argumentos al compilador de plantillas: `{{ quien.mayusculas() }}` es un error de
-`osodio --check`, con el fichero y la línea de la plantilla.
+`lohin --check`, con el fichero y la línea de la plantilla.
 
 Donde el tipo no se conoce —la variable de un `{% for %}`, un campo de un `Json`— no se
 comprueba nada y el despacho sigue siendo en ejecución, como antes.
@@ -979,7 +979,7 @@ Todos salen con fichero, línea, columna y un cursor bajo la posición exacta.
 ## 22. Cómo funciona por dentro
 
 ```
-osodio ./app  →  lex → parse → check → emitir
+lohin ./app  →  lex → parse → check → emitir
                  ↓
               tabla de rutas + bytecode   (una vez, no por petición)
                  ↓

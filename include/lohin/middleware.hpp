@@ -9,7 +9,7 @@
 #include "task.hpp"
 #include "logger.hpp"
 
-namespace osodio {
+namespace lohin {
 
 // ─── logger() ─────────────────────────────────────────────────────────────────
 //
@@ -19,7 +19,7 @@ namespace osodio {
 // middleware time (including async handlers). It also feeds the request
 // counters behind the performance report.
 //
-//   app.use(osodio::logger());
+//   app.use(lohin::logger());
 //
 inline Middleware logger() {
     return [](Request& req, Response& res, NextFn next) -> Task<void> {
@@ -51,7 +51,7 @@ inline Middleware logger() {
 }
 
 // CORS, compresion, cabeceras de seguridad y limitacion de ritmo vivian aqui.
-// En Osodio 2.0 los pone el proxy inverso que hay delante —nginx, Caddy,
+// En LoHin 2.0 los pone el proxy inverso que hay delante —nginx, Caddy,
 // Traefik— que ya lo hace mejor y sin gastar el hilo del event loop.
 
-} // namespace osodio
+} // namespace lohin

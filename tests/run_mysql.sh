@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Suite del modulo mysql de Osodio 2.0.
+# Suite del modulo mysql de LoHin 2.0.
 #
 # Va aparte de run_tests.sh porque necesita un servidor: sin el, esta suite se
 # SALTA sola en vez de fallar, para que `ctest` siga siendo verde en una maquina
@@ -11,9 +11,9 @@
 #
 #   sudo apt install -y mysql-server
 #   sudo service mysql start
-#   sudo mysql -e "CREATE DATABASE osodio_pruebas CHARACTER SET utf8mb4;
-#                  CREATE USER 'osodio'@'127.0.0.1' IDENTIFIED BY 'osodio';
-#                  GRANT ALL ON osodio_pruebas.* TO 'osodio'@'127.0.0.1';
+#   sudo mysql -e "CREATE DATABASE lohin_pruebas CHARACTER SET utf8mb4;
+#                  CREATE USER 'lohin'@'127.0.0.1' IDENTIFIED BY 'lohin';
+#                  GRANT ALL ON lohin_pruebas.* TO 'lohin'@'127.0.0.1';
 #                  FLUSH PRIVILEGES;"
 #
 #   tests/run_mysql.sh [ruta-al-binario]
@@ -24,16 +24,16 @@
 
 set -u
 
-OSODIO="${1:-$HOME/osodio-build/osodio}"
+LOHIN="${1:-$HOME/lohin-build/lohin}"
 AQUI="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PUERTO=${OSODIO_TEST_MYSQL_PORT:-8800}
+PUERTO=${LOHIN_TEST_MYSQL_PORT:-8800}
 SRV=""
 
 DB_HOST=127.0.0.1
-DB_USER=osodio
-DB_PASS=osodio
-DB_NOMBRE=osodio_pruebas
+DB_USER=lohin
+DB_PASS=lohin
+DB_NOMBRE=lohin_pruebas
 
 pasadas=0
 fallidas=0
@@ -70,7 +70,7 @@ if ! mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NOMBRE" \
     gris "       (las instrucciones para montarlo estan en la cabecera de este fichero)"
     exit 77
 fi
-if ! "$OSODIO" --check "$AQUI/casos/mysql.odio" > "$TMP/check" 2>&1; then
+if ! "$LOHIN" --check "$AQUI/casos/mysql.odio" > "$TMP/check" 2>&1; then
     if grep -q "modulo 'mysql'" "$TMP/check" || grep -q "import mysql" "$TMP/check"; then
         gris "mysql: el binario se compilo sin el modulo — suite omitida"
         exit 77
@@ -116,7 +116,7 @@ mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NOMBRE" \
     rojo "no se puede cargar el esquema"; exit 1; }
 
 echo "== arranque =="
-"$OSODIO" --no-watch --port "$PUERTO" "$AQUI/casos/mysql.odio" > "$TMP/srv.log" 2>&1 &
+"$LOHIN" --no-watch --port "$PUERTO" "$AQUI/casos/mysql.odio" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PUERTO/__ping__" 2>/dev/null && break

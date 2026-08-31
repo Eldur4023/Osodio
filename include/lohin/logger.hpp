@@ -20,25 +20,25 @@
 // configure() turns on file output and, optionally, a periodic performance
 // report.
 //
-//   osodio::log().configure({
+//   lohin::log().configure({
 //       .dir           = "./logs",
 //       .filename      = "app.log",
 //       .max_file_size = 5 * 1024 * 1024,   // rotate at 5 MB
 //       .performance   = true,              // report every 60 s
 //   });
 //
-//   osodio::log().info("cache warmed, ", n, " entries");
-//   osodio::log().error("payment provider unreachable: ", err);
+//   lohin::log().info("cache warmed, ", n, " entries");
+//   lohin::log().error("payment provider unreachable: ", err);
 //
 // The performance report needs request data — add the logger() middleware:
 //
-//   app.use(osodio::logger());
+//   app.use(lohin::logger());
 //
 // Every interval it logs throughput, latency and an estimated load percentage
 // (Little's law: req/s × avg latency ÷ worker threads) with a one-line
 // diagnosis of how saturated the server is.
 
-namespace osodio {
+namespace lohin {
 
 enum class LogLevel : int { Debug = 0, Info = 1, Warn = 2, Error = 3, Off = 4 };
 
@@ -47,10 +47,10 @@ struct LoggerOptions {
     // console-only logging.
     bool        file          = true;
     std::string dir           = "./logs";
-    std::string filename      = "osodio.log";
+    std::string filename      = "lohin.log";
 
-    // Rotate when the current file reaches this size: osodio.log is renamed
-    // to osodio.1.log (then .2, .3, …) and a fresh osodio.log is started.
+    // Rotate when the current file reaches this size: lohin.log is renamed
+    // to lohin.1.log (then .2, .3, …) and a fresh lohin.log is started.
     std::size_t max_file_size = 10 * 1024 * 1024;
 
     // Rotated files to keep — the oldest is deleted on rotation. 0 = keep all.
@@ -184,7 +184,7 @@ private:
         return std::filesystem::path(opts_.dir) / opts_.filename;
     }
 
-    // osodio.log → osodio.<n>.log
+    // lohin.log → lohin.<n>.log
     std::filesystem::path rotated_path(int n) const {
         auto dot  = opts_.filename.rfind('.');
         auto stem = (dot == std::string::npos) ? opts_.filename
@@ -201,7 +201,7 @@ private:
         fs::create_directories(opts_.dir, ec);
         file_.open(current_path(), std::ios::app);
         if (!file_) {
-            std::cerr << "[osodio] logger: cannot open "
+            std::cerr << "[lohin] logger: cannot open "
                       << current_path().string() << " — file logging disabled\n";
             return;
         }
@@ -310,7 +310,7 @@ private:
     bool                    stop_ = false;
 };
 
-// Global accessor — osodio::log().info("…");
+// Global accessor — lohin::log().info("…");
 inline Logger& log() { return Logger::instance(); }
 
-} // namespace osodio
+} // namespace lohin
